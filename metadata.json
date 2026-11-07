@@ -1,0 +1,6 @@
+{
+  "name": "Lapak Kita",
+  "description": "Aplikasi manajemen lapak titipan makanan & produk konsinyasi serta kasir oleh Rafline Dev",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
