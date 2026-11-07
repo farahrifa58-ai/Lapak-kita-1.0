@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 
 object AppConfig {
     // Configured for build: false for Full Version, true for Trial Version
-    var IS_TRIAL: Boolean = true
+    var IS_TRIAL: Boolean = false
 
     const val TRIAL_DURATION_MINUTES = 60L
 }

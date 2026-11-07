@@ -176,6 +176,27 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deleteSeller(seller: Seller, onDone: () -> Unit) {
+        viewModelScope.launch {
+            repository.deleteSeller(seller)
+            onDone()
+        }
+    }
+
+    fun updateProduct(product: Product, onDone: () -> Unit) {
+        viewModelScope.launch {
+            repository.updateProduct(product)
+            onDone()
+        }
+    }
+
+    fun deleteProduct(product: Product, onDone: () -> Unit) {
+        viewModelScope.launch {
+            repository.deleteProduct(product)
+            onDone()
+        }
+    }
+
     fun setSellerLeaveStatus(
         sellerId: Long,
         newStatus: SellerStatus,

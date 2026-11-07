@@ -1621,3 +1621,242 @@ fun AddExpenseDialog(
         }
     )
 }
+
+// 11. EDIT DATA PENYETOR
+@Composable
+fun EditSellerDialog(
+    seller: Seller,
+    lang: String,
+    onConfirm: (Seller) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf(seller.name) }
+    var wa by remember { mutableStateOf(seller.whatsappNumber) }
+    var address by remember { mutableStateOf(seller.address) }
+    var notes by remember { mutableStateOf(seller.notes) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Edit Data Penyetor", fontWeight = FontWeight.Bold, color = EmeraldPrimary)
+        },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Nama Penyetor / Penjual *") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = wa,
+                    onValueChange = { wa = it.filter { c -> c.isDigit() || c == '+' } },
+                    label = { Text("Nomor WhatsApp *") },
+                    placeholder = { Text("08123456789") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = address,
+                    onValueChange = { address = it },
+                    label = { Text("Alamat (Opsional)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = notes,
+                    onValueChange = { notes = it },
+                    label = { Text("Catatan Tambahan (Opsional)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (error != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(error!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.isBlank()) {
+                        error = "Nama penyetor tidak boleh kosong"
+                    } else if (wa.isBlank()) {
+                        error = "Nomor WhatsApp wajib diisi"
+                    } else {
+                        onConfirm(
+                            seller.copy(
+                                name = name.trim(),
+                                whatsappNumber = wa.trim(),
+                                address = address.trim(),
+                                notes = notes.trim()
+                            )
+                        )
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+            ) {
+                Text("Simpan Perubahan")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Batal")
+            }
+        }
+    )
+}
+
+// 12. EDIT DATA PRODUK
+@Composable
+fun EditProductDialog(
+    product: Product,
+    lang: String,
+    onConfirm: (Product) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf(product.name) }
+    var category by remember { mutableStateOf(product.category) }
+    var unit by remember { mutableStateOf(product.unit) }
+    var sellingPriceText by remember { mutableStateOf(product.sellingPrice.toLong().toString()) }
+    var sellerShareText by remember { mutableStateOf(product.sellerShare.toLong().toString()) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    val sellingPrice = sellingPriceText.toDoubleOrNull() ?: 0.0
+    val sellerShare = sellerShareText.toDoubleOrNull() ?: 0.0
+    val adminProfit = (sellingPrice - sellerShare).coerceAtLeast(0.0)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Edit Data Produk", fontWeight = FontWeight.Bold, color = EmeraldPrimary)
+        },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Nama Produk / Menu *") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = category,
+                    onValueChange = { category = it },
+                    label = { Text("Kategori (Makanan, Minuman, Snack, dll)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = unit,
+                    onValueChange = { unit = it },
+                    label = { Text("Satuan (Pcs, Bungkus, Porsi, Cup, dll)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = sellingPriceText,
+                    onValueChange = { sellingPriceText = it.filter { c -> c.isDigit() } },
+                    label = { Text("Harga Jual Konsumen (Rp) *") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = sellerShareText,
+                    onValueChange = { sellerShareText = it.filter { c -> c.isDigit() } },
+                    label = { Text("Hak / Harga Bersih Penyetor (Rp) *") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = EmeraldContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "Estimasi Laba Lapak / Unit: ${LapakViewModel.formatRupiah(adminProfit)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = EmeraldDark
+                        )
+                    }
+                }
+                if (error != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(error!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.isBlank()) {
+                        error = "Nama produk tidak boleh kosong"
+                    } else if (sellingPrice <= 0) {
+                        error = "Harga jual harus lebih dari 0"
+                    } else if (sellerShare <= 0) {
+                        error = "Hak penyetor harus lebih dari 0"
+                    } else if (sellerShare > sellingPrice) {
+                        error = "Hak penyetor tidak boleh lebih besar dari harga jual"
+                    } else {
+                        onConfirm(
+                            product.copy(
+                                name = name.trim(),
+                                category = category.trim().ifEmpty { "Umum" },
+                                unit = unit.trim().ifEmpty { "Pcs" },
+                                sellingPrice = sellingPrice,
+                                sellerShare = sellerShare,
+                                adminProfitPerUnit = adminProfit
+                            )
+                        )
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+            ) {
+                Text("Simpan Perubahan")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Batal")
+            }
+        }
+    )
+}
+
+// 13. DIALOG KONFIRMASI HAPUS
+@Composable
+fun DeleteConfirmDialog(
+    title: String,
+    message: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(Icons.Default.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(32.dp))
+        },
+        title = {
+            Text(title, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Text(message, style = MaterialTheme.typography.bodyMedium)
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+            ) {
+                Text("Hapus", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Batal")
+            }
+        }
+    )
+}
+
