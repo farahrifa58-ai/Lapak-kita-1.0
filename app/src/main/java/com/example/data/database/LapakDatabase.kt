@@ -88,57 +88,29 @@ abstract class LapakDatabase : RoomDatabase() {
                 )
             )
 
-            // 3. Penyetor A (Aktif)
+            // 3. Penyetor 1 (Dapur Mama Farida)
             val sellerAId = dao.insertSeller(
                 Seller(
                     name = "Dapur Mama Farida",
                     whatsappNumber = "081298765432",
                     address = "Komp. Flamboyan Blok C-3",
-                    notes = "Spesialis jajan pasar & burger homemade",
+                    notes = "Spesialis burger & jajan pasar",
                     status = SellerStatus.AKTIF
                 )
             )
 
-            // 4. Penyetor B (Aktif)
+            // 4. Penyetor 2 (Snack Berkah Bu Dewi)
             val sellerBId = dao.insertSeller(
                 Seller(
                     name = "Snack Berkah Bu Dewi",
                     whatsappNumber = "081311223344",
                     address = "Jl. Melati No. 15",
-                    notes = "Spesialis risoles & gorengan premium",
+                    notes = "Spesialis brownies kukus & kue lezat",
                     status = SellerStatus.AKTIF
                 )
             )
 
-            // 5. Penyetor C (Libur)
-            val now = System.currentTimeMillis()
-            val threeDaysLater = now + (3 * 24 * 60 * 60 * 1000L)
-            val sellerCId = dao.insertSeller(
-                Seller(
-                    name = "Kue Tradisional Bu Siti",
-                    whatsappNumber = "081555667788",
-                    address = "Jl. Cendana No. 9",
-                    notes = "Spesialis kue basah tradisional",
-                    status = SellerStatus.LIBUR,
-                    leaveStartDate = now - (24 * 60 * 60 * 1000L),
-                    leaveEndDate = threeDaysLater,
-                    leaveReason = "Ada acara keluarga di luar kota"
-                )
-            )
-
-            // Log status history for Seller C
-            dao.insertStatusHistory(
-                SellerStatusHistory(
-                    sellerId = sellerCId,
-                    previousStatus = SellerStatus.AKTIF,
-                    newStatus = SellerStatus.LIBUR,
-                    reason = "Ada acara keluarga di luar kota",
-                    timestamp = now - (24 * 60 * 60 * 1000L)
-                )
-            )
-
-            // Products for Seller A
-            // Notice: Seller A sells "Burger Sapi Keju"
+            // Produk 1: Burger Sapi Keju (Penyetor 1)
             val prodA1Id = dao.insertProduct(
                 Product(
                     sellerId = sellerAId,
@@ -150,54 +122,9 @@ abstract class LapakDatabase : RoomDatabase() {
                     adminProfitPerUnit = 3000.0
                 )
             )
-            val prodA2Id = dao.insertProduct(
-                Product(
-                    sellerId = sellerAId,
-                    name = "Sandwich Telur Mayo",
-                    category = "Makanan",
-                    unit = "pcs",
-                    sellingPrice = 12000.0,
-                    sellerShare = 9500.0,
-                    adminProfitPerUnit = 2500.0
-                )
-            )
-            val prodA3Id = dao.insertProduct(
-                Product(
-                    sellerId = sellerAId,
-                    name = "Donat Gula Halus",
-                    category = "Kue",
-                    unit = "pcs",
-                    sellingPrice = 5000.0,
-                    sellerShare = 3800.0,
-                    adminProfitPerUnit = 1200.0
-                )
-            )
 
-            // Products for Seller B
-            // Notice: Seller B ALSO sells "Burger Sapi Keju" (demonstrating separate stock per seller!)
+            // Produk 2: Brownies Kukus Coklat (Penyetor 2)
             val prodB1Id = dao.insertProduct(
-                Product(
-                    sellerId = sellerBId,
-                    name = "Burger Sapi Keju",
-                    category = "Makanan",
-                    unit = "pcs",
-                    sellingPrice = 14000.0,
-                    sellerShare = 11000.0,
-                    adminProfitPerUnit = 3000.0
-                )
-            )
-            val prodB2Id = dao.insertProduct(
-                Product(
-                    sellerId = sellerBId,
-                    name = "Risoles Mayo Pedas",
-                    category = "Gorengan",
-                    unit = "pcs",
-                    sellingPrice = 4000.0,
-                    sellerShare = 3000.0,
-                    adminProfitPerUnit = 1000.0
-                )
-            )
-            val prodB3Id = dao.insertProduct(
                 Product(
                     sellerId = sellerBId,
                     name = "Brownies Kukus Coklat",
@@ -209,32 +136,7 @@ abstract class LapakDatabase : RoomDatabase() {
                 )
             )
 
-            // Products for Seller C (Libur, but existing stock still available for sale)
-            val prodC1Id = dao.insertProduct(
-                Product(
-                    sellerId = sellerCId,
-                    name = "Lemper Ayam Bakar",
-                    category = "Kue Basah",
-                    unit = "pcs",
-                    sellingPrice = 4000.0,
-                    sellerShare = 3000.0,
-                    adminProfitPerUnit = 1000.0
-                )
-            )
-            val prodC2Id = dao.insertProduct(
-                Product(
-                    sellerId = sellerCId,
-                    name = "Pastel Ayam Telur",
-                    category = "Gorengan",
-                    unit = "pcs",
-                    sellingPrice = 4500.0,
-                    sellerShare = 3500.0,
-                    adminProfitPerUnit = 1000.0
-                )
-            )
-
-            // Stock Lots & Initial Consignments
-            // Seller A: Burger 15 pcs, Sandwich 10 pcs, Donat 20 pcs
+            // Stok Awal Produk 1: Burger 15 pcs
             val lotA1Id = dao.insertStockLot(
                 StockLot(
                     productId = prodA1Id,
@@ -259,106 +161,10 @@ abstract class LapakDatabase : RoomDatabase() {
                 )
             )
 
-            val lotA2Id = dao.insertStockLot(
-                StockLot(
-                    productId = prodA2Id,
-                    sellerId = sellerAId,
-                    initialQty = 10,
-                    currentQty = 10,
-                    unit = "pcs",
-                    sellingPrice = 12000.0,
-                    sellerShare = 9500.0,
-                    notes = "Setoran pagi"
-                )
-            )
-            dao.insertMovement(
-                StockMovement(
-                    productId = prodA2Id,
-                    sellerId = sellerAId,
-                    stockLotId = lotA2Id,
-                    type = StockMovementType.SETORAN_AWAL,
-                    quantityChange = 10,
-                    finalStock = 10,
-                    reasonOrNote = "Setoran awal 10 pcs"
-                )
-            )
-
-            val lotA3Id = dao.insertStockLot(
-                StockLot(
-                    productId = prodA3Id,
-                    sellerId = sellerAId,
-                    initialQty = 20,
-                    currentQty = 20,
-                    unit = "pcs",
-                    sellingPrice = 5000.0,
-                    sellerShare = 3800.0,
-                    notes = "Setoran pagi"
-                )
-            )
-            dao.insertMovement(
-                StockMovement(
-                    productId = prodA3Id,
-                    sellerId = sellerAId,
-                    stockLotId = lotA3Id,
-                    type = StockMovementType.SETORAN_AWAL,
-                    quantityChange = 20,
-                    finalStock = 20,
-                    reasonOrNote = "Setoran awal 20 pcs"
-                )
-            )
-
-            // Seller B: Burger 12 pcs, Risoles 25 pcs, Brownies 10 potong
+            // Stok Awal Produk 2: Brownies 10 potong
             val lotB1Id = dao.insertStockLot(
                 StockLot(
                     productId = prodB1Id,
-                    sellerId = sellerBId,
-                    initialQty = 12,
-                    currentQty = 12,
-                    unit = "pcs",
-                    sellingPrice = 14000.0,
-                    sellerShare = 11000.0,
-                    notes = "Setoran pagi"
-                )
-            )
-            dao.insertMovement(
-                StockMovement(
-                    productId = prodB1Id,
-                    sellerId = sellerBId,
-                    stockLotId = lotB1Id,
-                    type = StockMovementType.SETORAN_AWAL,
-                    quantityChange = 12,
-                    finalStock = 12,
-                    reasonOrNote = "Setoran awal 12 pcs"
-                )
-            )
-
-            val lotB2Id = dao.insertStockLot(
-                StockLot(
-                    productId = prodB2Id,
-                    sellerId = sellerBId,
-                    initialQty = 25,
-                    currentQty = 25,
-                    unit = "pcs",
-                    sellingPrice = 4000.0,
-                    sellerShare = 3000.0,
-                    notes = "Setoran pagi"
-                )
-            )
-            dao.insertMovement(
-                StockMovement(
-                    productId = prodB2Id,
-                    sellerId = sellerBId,
-                    stockLotId = lotB2Id,
-                    type = StockMovementType.SETORAN_AWAL,
-                    quantityChange = 25,
-                    finalStock = 25,
-                    reasonOrNote = "Setoran awal 25 pcs"
-                )
-            )
-
-            val lotB3Id = dao.insertStockLot(
-                StockLot(
-                    productId = prodB3Id,
                     sellerId = sellerBId,
                     initialQty = 10,
                     currentQty = 10,
@@ -370,62 +176,13 @@ abstract class LapakDatabase : RoomDatabase() {
             )
             dao.insertMovement(
                 StockMovement(
-                    productId = prodB3Id,
+                    productId = prodB1Id,
                     sellerId = sellerBId,
-                    stockLotId = lotB3Id,
+                    stockLotId = lotB1Id,
                     type = StockMovementType.SETORAN_AWAL,
                     quantityChange = 10,
                     finalStock = 10,
                     reasonOrNote = "Setoran awal 10 potong"
-                )
-            )
-
-            // Seller C: Lemper 15 pcs, Pastel 12 pcs
-            val lotC1Id = dao.insertStockLot(
-                StockLot(
-                    productId = prodC1Id,
-                    sellerId = sellerCId,
-                    initialQty = 15,
-                    currentQty = 15,
-                    unit = "pcs",
-                    sellingPrice = 4000.0,
-                    sellerShare = 3000.0,
-                    notes = "Stok kemarin sebelum libur"
-                )
-            )
-            dao.insertMovement(
-                StockMovement(
-                    productId = prodC1Id,
-                    sellerId = sellerCId,
-                    stockLotId = lotC1Id,
-                    type = StockMovementType.SETORAN_AWAL,
-                    quantityChange = 15,
-                    finalStock = 15,
-                    reasonOrNote = "Setoran awal 15 pcs"
-                )
-            )
-
-            val lotC2Id = dao.insertStockLot(
-                StockLot(
-                    productId = prodC2Id,
-                    sellerId = sellerCId,
-                    initialQty = 12,
-                    currentQty = 12,
-                    unit = "pcs",
-                    sellingPrice = 4500.0,
-                    sellerShare = 3500.0,
-                    notes = "Stok kemarin sebelum libur"
-                )
-            )
-            dao.insertMovement(
-                StockMovement(
-                    productId = prodC2Id,
-                    sellerId = sellerCId,
-                    stockLotId = lotC2Id,
-                    type = StockMovementType.SETORAN_AWAL,
-                    quantityChange = 12,
-                    finalStock = 12,
-                    reasonOrNote = "Setoran awal 12 pcs"
                 )
             )
 

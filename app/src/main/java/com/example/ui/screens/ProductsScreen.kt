@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.SellerStatus
@@ -44,6 +45,8 @@ fun ProductsScreen(
     var showShareDialog by remember { mutableStateOf(false) }
     var showAddProductDialog by remember { mutableStateOf(false) }
     var depositTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
+    var editTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
+    var deleteTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
 
     val categories = remember(products) {
         listOf("Semua") + products.map { it.product.category }.distinct()
@@ -75,7 +78,8 @@ fun ProductsScreen(
                     )
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = EmeraldContainer,
+                    titleContentColor = EmeraldPrimary
                 )
             )
         },
@@ -101,7 +105,7 @@ fun ProductsScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // PROMINENT BUTTON: BAGIKAN STOK TERSISA
             item {
@@ -297,6 +301,12 @@ fun ProductsScreen(
                         },
                         onAddDeposit = {
                             depositTargetProduct = item
+                        },
+                        onEdit = {
+                            editTargetProduct = item
+                        },
+                        onDelete = {
+                            deleteTargetProduct = item
                         }
                     )
                 }
@@ -354,6 +364,34 @@ fun ProductsScreen(
             onDismiss = { depositTargetProduct = null }
         )
     }
+
+    // Edit Product Dialog
+    editTargetProduct?.let { prodDetail ->
+        EditProductDialog(
+            product = prodDetail.product,
+            lang = lang,
+            onConfirm = { updatedProduct ->
+                viewModel.updateProduct(updatedProduct) {
+                    editTargetProduct = null
+                }
+            },
+            onDismiss = { editTargetProduct = null }
+        )
+    }
+
+    // Delete Product Dialog
+    deleteTargetProduct?.let { prodDetail ->
+        DeleteConfirmDialog(
+            title = "Hapus Produk",
+            message = "Apakah Anda yakin ingin menghapus produk '${prodDetail.product.name}' (${prodDetail.seller.name})? Semua riwayat stok produk ini akan terhapus.",
+            onConfirm = {
+                viewModel.deleteProduct(prodDetail.product) {
+                    deleteTargetProduct = null
+                }
+            },
+            onDismiss = { deleteTargetProduct = null }
+        )
+    }
 }
 
 @Composable
@@ -361,27 +399,31 @@ fun ProductCard(
     item: ProductDetailItem,
     lang: String,
     onAddToCart: () -> Unit,
-    onAddDeposit: () -> Unit
+    onAddDeposit: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(12.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            // Header: Name & Seller Badge
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            // Header Row: Product Name & Seller on left, Stock Pill + Edit + Delete on right
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
                     Text(
                         text = item.product.name,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleMedium.copy(fontSize = 15.sp),
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -391,14 +433,16 @@ fun ProductCard(
                             Icons.Default.Storefront,
                             contentDescription = null,
                             tint = EmeraldPrimary,
-                            modifier = Modifier.size(14.dp)
+                            modifier = Modifier.size(13.dp)
                         )
                         Spacer(Modifier.width(4.dp))
                         Text(
                             text = item.seller.name,
                             style = MaterialTheme.typography.labelSmall,
                             color = EmeraldPrimary,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         if (item.seller.status != SellerStatus.AKTIF) {
                             Spacer(Modifier.width(6.dp))
@@ -407,104 +451,169 @@ fun ProductCard(
                     }
                 }
 
-                // Remaining Stock Pill
-                Box(
-                    modifier = Modifier
-                        .background(
-                            if (item.currentStock > 5) EmeraldContainer else if (item.currentStock > 0) AmberContainer else MaterialTheme.colorScheme.errorContainer,
-                            RoundedCornerShape(8.dp)
-                        )
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                // Action area: Stock Pill + Edit Button + Delete Button
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Text(
-                        text = "${item.currentStock} ${item.product.unit}",
-                        color = if (item.currentStock > 5) EmeraldDark else if (item.currentStock > 0) AmberTertiary else MaterialTheme.colorScheme.error,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    // Remaining Stock Pill
+                    Box(
+                        modifier = Modifier
+                            .background(
+                                if (item.currentStock > 5) EmeraldContainer else if (item.currentStock > 0) TealContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                RoundedCornerShape(6.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "${item.currentStock} ${item.product.unit}",
+                            color = if (item.currentStock > 5) EmeraldDark else if (item.currentStock > 0) TealSecondary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
+
+                    // Edit button
+                    IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = "Edit Produk",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    // Delete button
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Hapus Produk",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             }
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
 
-            // Pricing Grid: Harga Jual, Hak Penyetor, Laba Admin
+            // Pricing Grid: Compact 3-column banner
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-                    .padding(10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
                     Text(
                         text = AppStrings.get("prod_selling_price", lang),
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
                         text = LapakViewModel.formatRupiah(item.product.sellingPrice),
-                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
 
                 Column {
                     Text(
                         text = AppStrings.get("prod_seller_share", lang),
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
                         text = LapakViewModel.formatRupiah(item.product.sellerShare),
-                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = AmberTertiary
+                        color = TealSecondary,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
                         text = AppStrings.get("prod_admin_profit", lang),
-                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
                         text = LapakViewModel.formatRupiah(item.product.adminProfitPerUnit),
-                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = EmeraldPrimary
+                        color = EmeraldPrimary,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
 
-            // Action Buttons
+            // Action Buttons: Compact Height
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
                     onClick = onAddDeposit,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(34.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    shape = RoundedCornerShape(8.dp)
                 ) {
-                    Icon(Icons.Default.AddBox, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(
+                        Icons.Default.AddBox,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp)
+                    )
                     Spacer(Modifier.width(4.dp))
-                    Text(AppStrings.get("prod_add_deposit", lang), maxLines = 1)
+                    Text(
+                        text = AppStrings.get("prod_add_deposit", lang),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1
+                    )
                 }
 
                 Button(
                     onClick = onAddToCart,
                     enabled = item.currentStock > 0,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(34.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    shape = RoundedCornerShape(8.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
                 ) {
-                    Icon(Icons.Default.ShoppingCart, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(
+                        Icons.Default.ShoppingCart,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp)
+                    )
                     Spacer(Modifier.width(4.dp))
-                    Text(AppStrings.get("prod_add_to_cart", lang), maxLines = 1)
+                    Text(
+                        text = AppStrings.get("prod_add_to_cart", lang),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1
+                    )
                 }
             }
         }

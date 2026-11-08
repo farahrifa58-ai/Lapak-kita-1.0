@@ -77,7 +77,8 @@ fun SettingsScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = EmeraldContainer,
+                    titleContentColor = EmeraldPrimary
                 )
             )
         },

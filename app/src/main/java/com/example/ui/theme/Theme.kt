@@ -62,7 +62,7 @@ fun LapakKitaTheme(
         SideEffect {
             val window = (view.context as? Activity)?.window
             if (window != null) {
-                window.statusBarColor = colorScheme.surface.toArgb()
+                window.statusBarColor = (if (!darkTheme) EmeraldContainer else colorScheme.surface).toArgb()
                 window.navigationBarColor = colorScheme.surface.toArgb()
                 val controller = WindowCompat.getInsetsController(window, view)
                 controller.isAppearanceLightStatusBars = !darkTheme

@@ -22,10 +22,7 @@ import com.example.data.model.Seller
 import com.example.data.model.SellerStatus
 import com.example.data.repository.SellerDetailItem
 import com.example.i18n.AppStrings
-import com.example.ui.components.SellerLeaveDialog
-import com.example.ui.components.SellerPaymentDialog
-import com.example.ui.components.SellerPaymentReceiptDialog
-import com.example.ui.components.StatusBadge
+import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.LapakViewModel
 
@@ -48,6 +45,8 @@ fun SellersScreen(
     var showAddSellerDialog by remember { mutableStateOf(false) }
     var leaveTargetSeller by remember { mutableStateOf<Seller?>(null) }
     var paymentTargetSellerDetail by remember { mutableStateOf<SellerDetailItem?>(null) }
+    var editTargetSeller by remember { mutableStateOf<Seller?>(null) }
+    var deleteTargetSeller by remember { mutableStateOf<Seller?>(null) }
 
     val filteredSellers = remember(sellersWithStats, searchQuery, statusFilter) {
         sellersWithStats.filter { item ->
@@ -78,7 +77,8 @@ fun SellersScreen(
                     )
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = EmeraldContainer,
+                    titleContentColor = EmeraldPrimary
                 )
             )
         },
@@ -87,16 +87,14 @@ fun SellersScreen(
                 onClick = { showAddSellerDialog = true },
                 containerColor = EmeraldPrimary,
                 contentColor = Color.White,
-                shape = RoundedCornerShape(16.dp)
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.size(50.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.PersonAdd, contentDescription = "Tambah")
-                    Spacer(Modifier.width(4.dp))
-                    Text(AppStrings.get("sellers_btn_add", lang), fontWeight = FontWeight.Bold)
-                }
+                Icon(
+                    Icons.Default.PersonAdd,
+                    contentDescription = AppStrings.get("sellers_btn_add", lang),
+                    modifier = Modifier.size(26.dp)
+                )
             }
         },
         modifier = modifier
@@ -184,7 +182,9 @@ fun SellersScreen(
                             Toast.makeText(context, "${item.seller.name} telah diaktifkan kembali!", Toast.LENGTH_SHORT).show()
                         },
                         onRecordPayment = { paymentTargetSellerDetail = item },
-                        onViewReceipt = { viewModel.showLatestPaymentReceipt(item) }
+                        onViewReceipt = { viewModel.showLatestPaymentReceipt(item) },
+                        onEdit = { editTargetSeller = item.seller },
+                        onDelete = { deleteTargetSeller = item.seller }
                     )
                 }
             }
@@ -287,11 +287,23 @@ fun SellersScreen(
         )
     }
 
+    var soldItemsForPayment by remember { mutableStateOf<List<com.example.data.model.SoldItemSummary>>(emptyList()) }
+
+    LaunchedEffect(paymentTargetSellerDetail) {
+        val target = paymentTargetSellerDetail
+        if (target != null) {
+            soldItemsForPayment = viewModel.getSoldItemsSummary(target.seller.id)
+        } else {
+            soldItemsForPayment = emptyList()
+        }
+    }
+
     // Payout Settlement Dialog
     paymentTargetSellerDetail?.let { sellerDetail ->
         SellerPaymentDialog(
             sellerDetail = sellerDetail,
             lang = lang,
+            soldItems = soldItemsForPayment,
             onConfirm = { amount, notes, method ->
                 viewModel.recordSellerPayment(
                     sellerId = sellerDetail.seller.id,
@@ -339,6 +351,36 @@ fun SellersScreen(
             }
         )
     }
+
+    // Edit Seller Dialog
+    editTargetSeller?.let { seller ->
+        EditSellerDialog(
+            seller = seller,
+            lang = lang,
+            onConfirm = { updated ->
+                viewModel.updateSeller(updated) {
+                    editTargetSeller = null
+                    Toast.makeText(context, "Data penyetor ${updated.name} berhasil diperbarui", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { editTargetSeller = null }
+        )
+    }
+
+    // Delete Seller Dialog
+    deleteTargetSeller?.let { seller ->
+        DeleteConfirmDialog(
+            title = "Hapus Penyetor",
+            message = "Apakah Anda yakin ingin menghapus penyetor '${seller.name}'? Produk dan data terkait akan ikut terhapus.",
+            onConfirm = {
+                viewModel.deleteSeller(seller) {
+                    deleteTargetSeller = null
+                    Toast.makeText(context, "Penyetor ${seller.name} berhasil dihapus", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { deleteTargetSeller = null }
+        )
+    }
 }
 
 @Composable
@@ -348,22 +390,24 @@ fun SellerCard(
     onSetLeave: () -> Unit,
     onReactivate: () -> Unit,
     onRecordPayment: () -> Unit,
-    onViewReceipt: () -> Unit
+    onViewReceipt: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Header Row: Seller Name, WhatsApp, Status Badge
+            // Header Row: Seller Name, WhatsApp, Status Badge, Edit & Delete Buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
                     Text(
                         text = item.seller.name,
                         style = MaterialTheme.typography.titleMedium,
@@ -383,14 +427,43 @@ fun SellerCard(
                     }
                 }
 
-                StatusBadge(status = item.seller.status)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    StatusBadge(status = item.seller.status)
+
+                    IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = "Edit Penyetor",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Hapus Penyetor",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
             }
 
             // Leave information if on leave
             if (item.seller.status == SellerStatus.LIBUR) {
                 Spacer(Modifier.height(8.dp))
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = AmberContainer.copy(alpha = 0.5f)),
+                    colors = CardDefaults.cardColors(containerColor = TealContainer.copy(alpha = 0.5f)),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -398,13 +471,13 @@ fun SellerCard(
                         Text(
                             text = "Status: Libur (${item.seller.leaveReason ?: "Sedang libur sementara"})",
                             style = MaterialTheme.typography.labelSmall,
-                            color = OnAmberContainer,
+                            color = OnTealContainer,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
                             text = "Stok lama tetap dapat dijual, setoran baru ditolak secara default.",
                             style = MaterialTheme.typography.labelSmall,
-                            color = OnAmberContainer
+                            color = OnTealContainer
                         )
                     }
                 }
@@ -447,13 +520,13 @@ fun SellerCard(
                         text = LapakViewModel.formatRupiah(item.remainingBalance),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
-                        color = if (item.remainingBalance > 0) AmberTertiary else EmeraldPrimary
+                        color = if (item.remainingBalance > 0) TealSecondary else EmeraldPrimary
                     )
                     Text(
                         text = item.paymentStatus,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (item.paymentStatus == "Lunas") EmeraldPrimary else AmberTertiary
+                        color = if (item.paymentStatus == "Lunas") EmeraldPrimary else TealSecondary
                     )
                 }
             }

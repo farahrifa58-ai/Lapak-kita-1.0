@@ -69,7 +69,8 @@ fun TransactionsScreen(
                     )
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = EmeraldContainer,
+                    titleContentColor = EmeraldPrimary
                 )
             )
         },

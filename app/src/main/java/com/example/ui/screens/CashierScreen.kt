@@ -14,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -77,12 +78,17 @@ fun CashierScreen(
                 actions = {
                     if (cart.isNotEmpty()) {
                         IconButton(onClick = { viewModel.clearCart() }) {
-                            Icon(Icons.Default.DeleteSweep, contentDescription = "Clear Cart", tint = MaterialTheme.colorScheme.error)
+                            Icon(
+                                Icons.Default.DeleteSweep,
+                                contentDescription = "Clear Cart",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = EmeraldContainer,
+                    titleContentColor = EmeraldPrimary
                 )
             )
         },
@@ -463,43 +469,69 @@ fun CartItemRow(
                 )
             }
 
-            // Qty Stepper Controls
+            // Compact Qty Stepper Controls
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                IconButton(
-                    onClick = onDecrease,
+                Box(
                     modifier = Modifier
-                        .size(32.dp)
-                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable(onClick = onDecrease),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Remove, contentDescription = "Kurang", modifier = Modifier.size(16.dp))
+                    Icon(
+                        Icons.Default.Remove,
+                        contentDescription = "Kurang",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp)
+                    )
                 }
 
                 Text(
                     text = "${item.quantity}",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.widthIn(min = 24.dp),
+                    modifier = Modifier.widthIn(min = 20.dp),
                     textAlign = TextAlign.Center
                 )
 
-                IconButton(
-                    onClick = onIncrease,
-                    enabled = item.quantity < item.stockLot.currentQty,
+                val canIncrease = item.quantity < item.stockLot.currentQty
+                Box(
                     modifier = Modifier
-                        .size(32.dp)
-                        .background(EmeraldContainer, RoundedCornerShape(8.dp))
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (canIncrease) EmeraldContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        .then(
+                            if (canIncrease) Modifier.clickable(onClick = onIncrease) else Modifier
+                        ),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "Tambah", tint = EmeraldDark, modifier = Modifier.size(16.dp))
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "Tambah",
+                        tint = if (canIncrease) EmeraldDark else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                        modifier = Modifier.size(14.dp)
+                    )
                 }
 
-                IconButton(
-                    onClick = onRemove,
-                    modifier = Modifier.size(32.dp)
+                Spacer(Modifier.width(2.dp))
+
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onRemove),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.DeleteOutline, contentDescription = "Hapus", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                    Icon(
+                        Icons.Default.DeleteOutline,
+                        contentDescription = "Hapus",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(17.dp)
+                    )
                 }
             }
         }

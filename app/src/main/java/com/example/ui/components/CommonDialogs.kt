@@ -424,7 +424,7 @@ fun SellerPaymentReceiptDialog(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
+                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                         Text(
                                             text = item.productName,
                                             style = MaterialTheme.typography.bodySmall,
@@ -439,7 +439,9 @@ fun SellerPaymentReceiptDialog(
                                     Text(
                                         text = LapakViewModel.formatRupiah(item.totalSellerShare),
                                         style = MaterialTheme.typography.bodySmall,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -485,7 +487,7 @@ fun SellerPaymentReceiptDialog(
                                 text = LapakViewModel.formatRupiah(remainingBalance),
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Bold,
-                                color = if (remainingBalance <= 0) EmeraldPrimary else AmberTertiary
+                                color = if (remainingBalance <= 0) EmeraldPrimary else TealSecondary
                             )
                         }
 
@@ -745,7 +747,7 @@ fun TransactionAdminDetailDialog(
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Total Hak Penyetor:", style = MaterialTheme.typography.bodyMedium)
-                    Text(LapakViewModel.formatRupiah(transaction.totalSellerShare), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = AmberTertiary)
+                    Text(LapakViewModel.formatRupiah(transaction.totalSellerShare), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = TealSecondary)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Total Laba Admin:", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
@@ -1076,6 +1078,7 @@ fun SellerLeaveDialog(
 fun SellerPaymentDialog(
     sellerDetail: SellerDetailItem,
     lang: String,
+    soldItems: List<com.example.data.model.SoldItemSummary> = emptyList(),
     onConfirm: (Double, String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1099,9 +1102,55 @@ fun SellerPaymentDialog(
                 Text(
                     text = "Sisa Hak Belum Dibayar: ${LapakViewModel.formatRupiah(sellerDetail.remainingBalance)}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = AmberTertiary,
+                    color = TealSecondary,
                     fontWeight = FontWeight.SemiBold
                 )
+
+                if (soldItems.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Rincian Menu yang Terjual:",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = EmeraldContainer.copy(alpha = 0.45f)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            soldItems.forEach { item ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "• ${item.productName} (${item.quantity} ${item.unit})",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                        maxLines = 2
+                                    )
+                                    Text(
+                                        text = LapakViewModel.formatRupiah(item.totalSellerShare),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = EmeraldDark,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(12.dp))
 
                 OutlinedTextField(
