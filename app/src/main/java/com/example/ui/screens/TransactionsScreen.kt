@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.LapakTransaction
 import com.example.i18n.AppStrings
 import com.example.ui.components.CancelTransactionDialog
+import com.example.ui.components.LapakTopHeader
 import com.example.ui.components.ReceiptCustomerDialog
 import com.example.ui.components.TransactionAdminDetailDialog
 import com.example.ui.theme.LocalLapakColors
@@ -58,20 +59,12 @@ fun TransactionsScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = AppStrings.get("history_title", lang),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
+            LapakTopHeader(
+                title = AppStrings.get("history_title", lang),
+                subtitle = "${transactions.count { !it.isCancelled }} transaksi tercatat",
+                paletteKey = shopProfile.headerBgColorKey
             )
         },
         modifier = modifier

@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import android.content.Context
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,9 +20,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -767,7 +770,7 @@ fun TransactionAdminDetailDialog(
     }
 }
 
-// 3. BAGIKAN STOK TERSISA MODAL (DUA PILIHAN: SEMUA PENYETOR vs PER PENYETOR)
+// 3. INFO STOK KE PENYETOR MODAL (2 TAB SEIMBANG: SEMUA DAPUR vs PER PENYETOR)
 @Composable
 fun ShareStockReportDialog(
     sellers: List<Seller>,
@@ -776,6 +779,7 @@ fun ShareStockReportDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val lapakColors = LocalLapakColors.current
     var isAllSellers by remember { mutableStateOf(true) }
     var selectedSellerId by remember { mutableStateOf(sellers.firstOrNull()?.id) }
 
@@ -785,8 +789,9 @@ fun ShareStockReportDialog(
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(22.dp),
             color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, lapakColors.cardBorder),
             tonalElevation = 6.dp,
             modifier = Modifier
                 .fillMaxWidth()
@@ -802,58 +807,98 @@ fun ShareStockReportDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = AppStrings.get("share_stock_title", lang),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = EmeraldPrimary
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Info Stok ke Penyetor",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Dikelompokkan per Nama Dapur untuk grup WA penjual",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
+                        Icon(Icons.Default.Close, contentDescription = "Tutup")
                     }
                 }
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(14.dp))
 
-                // Dua Pilihan Wajib: Semua Penyetor vs Per Penyetor
-                Text(
-                    text = "Pilih Format Laporan:",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
+                // 2 Balanced Full-Width Side-by-Side Tab Buttons (No text wrapping/clipping)
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                    border = BorderStroke(1.dp, lapakColors.cardBorder),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Surface(
+                            onClick = { isAllSellers = true },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isAllSellers) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 42.dp)
+                                .testTag("tab_info_semua_dapur")
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "Semua Dapur",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (isAllSellers) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isAllSellers) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
 
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(
-                        selected = isAllSellers,
-                        onClick = { isAllSellers = true }
-                    )
-                    Text(
-                        text = AppStrings.get("share_option_all", lang),
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.clickable { isAllSellers = true }
-                    )
-
-                    Spacer(Modifier.width(16.dp))
-
-                    RadioButton(
-                        selected = !isAllSellers,
-                        onClick = { isAllSellers = false }
-                    )
-                    Text(
-                        text = AppStrings.get("share_option_per_seller", lang),
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.clickable { isAllSellers = false }
-                    )
+                        Surface(
+                            onClick = { isAllSellers = false },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (!isAllSellers) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 42.dp)
+                                .testTag("tab_info_per_penyetor")
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "Per Penyetor",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (!isAllSellers) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (!isAllSellers) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // If Per Penyetor is selected, show seller dropdown / picker
                 if (!isAllSellers) {
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(10.dp))
                     Text(
                         text = AppStrings.get("share_select_seller", lang),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(Modifier.height(4.dp))
 
                     var expanded by remember { mutableStateOf(false) }
                     val currentSellerName = sellers.firstOrNull { it.id == selectedSellerId }?.name ?: "Pilih Penyetor"
@@ -862,9 +907,15 @@ fun ShareStockReportDialog(
                         OutlinedButton(
                             onClick = { expanded = true },
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text(currentSellerName, modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
+                            Text(
+                                text = currentSellerName,
+                                modifier = Modifier.weight(1f),
+                                textAlign = TextAlign.Start,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                             Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                         }
 
@@ -891,21 +942,23 @@ fun ShareStockReportDialog(
                 Text(
                     text = AppStrings.get("share_preview_label", lang),
                     style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
 
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(6.dp))
 
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+                        .border(1.dp, lapakColors.cardBorder, RoundedCornerShape(12.dp))
                 ) {
                     Text(
                         text = reportText,
                         style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.padding(12.dp)
                     )
                 }
@@ -920,12 +973,22 @@ fun ShareStockReportDialog(
                         } else null
                         viewModel.shareTextToWhatsApp(context, reportText, targetSellerWa)
                     },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("btn_send_info_wa"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    )
                 ) {
                     Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text(AppStrings.get("share_to_whatsapp", lang))
+                    Text(
+                        text = AppStrings.get("share_to_whatsapp", lang),
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -933,6 +996,7 @@ fun ShareStockReportDialog(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = { viewModel.shareTextGeneral(context, reportText) },
+                        shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.weight(1f)
                     ) {
                         Text(AppStrings.get("share_via_other", lang), maxLines = 1)
@@ -940,6 +1004,7 @@ fun ShareStockReportDialog(
 
                     OutlinedButton(
                         onClick = { viewModel.copyToClipboard(context, reportText) },
+                        shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))

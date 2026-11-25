@@ -82,26 +82,12 @@ fun SellersScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = AppStrings.get("sellers_title", lang),
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        Text(
-                            text = "${sellersWithStats.size} penyetor terdaftar • Web Penyetor aktif",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
+            LapakTopHeader(
+                title = AppStrings.get("sellers_title", lang),
+                subtitle = "${sellersWithStats.size} penyetor terdaftar • Web Penyetor aktif",
+                paletteKey = shopProfile.headerBgColorKey
             )
         },
         floatingActionButton = {
@@ -128,7 +114,7 @@ fun SellersScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(bottom = 116.dp), // Generous bottom space so FAB never covers last card buttons
+            contentPadding = PaddingValues(top = 12.dp, bottom = 116.dp), // Generous bottom space so FAB never covers last card buttons
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Search Bar
@@ -389,21 +375,48 @@ fun SellersScreen(
     }
 
     // Vendor Web Link Dialog ("Link Web Penyetor")
-    webLinkTargetSeller?.let { seller ->
-        val portalUrl = remember(seller, appSettings) { viewModel.buildVendorPortalUrl(seller) }
-        val shareText = remember(seller, appSettings, shopProfile) { viewModel.buildVendorPortalShareText(seller) }
+    webLinkTargetSeller?.let { selectedSeller ->
+        // Always read freshest seller row (in case vendorCode/writeToken was just generated)
+        val freshSeller = remember(selectedSeller.id, rawSellers) {
+            rawSellers.firstOrNull { it.id == selectedSeller.id } ?: selectedSeller
+        }
+        val portalUrl = remember(freshSeller, appSettings) { viewModel.buildVendorPortalUrl(freshSeller) }
+        val shareText = remember(freshSeller, appSettings, shopProfile) { viewModel.buildVendorPortalShareText(freshSeller) }
+        var syncStatusLabel by remember(freshSeller.id) { mutableStateOf("Menyinkronkan data & token ke cloud...") }
+        var isSyncedOk by remember(freshSeller.id) { mutableStateOf(false) }
+
+        LaunchedEffect(freshSeller.id, freshSeller.vendorCode, freshSeller.writeToken) {
+            syncStatusLabel = "Menyinkronkan data & token ke cloud..."
+            viewModel.syncSingleSellerToCloud(freshSeller.id) { ok ->
+                isSyncedOk = ok
+                syncStatusLabel = if (ok) {
+                    "Data & Token Kirim tersinkron di Cloud"
+                } else {
+                    "Belum tersinkron (cek internet lalu tekan Sinkronkan)"
+                }
+            }
+        }
 
         VendorWebLinkDialog(
-            seller = seller,
+            seller = freshSeller,
             appSettings = appSettings,
             portalUrl = portalUrl,
             shareText = shareText,
             isSyncing = isSyncingCloud,
+            syncStatusText = syncStatusLabel,
+            isSyncedOk = isSyncedOk,
             onSyncNow = {
-                viewModel.syncSingleSellerToCloud(seller.id) { ok ->
+                syncStatusLabel = "Menyinkronkan data & token ke cloud..."
+                viewModel.syncSingleSellerToCloud(freshSeller.id) { ok ->
+                    isSyncedOk = ok
+                    syncStatusLabel = if (ok) {
+                        "Data & Token Kirim tersinkron di Cloud"
+                    } else {
+                        "Gagal menyinkronkan ke cloud"
+                    }
                     Toast.makeText(
                         context,
-                        if (ok) "Data ${seller.name} tersinkron ke Web Penyetor!" else "Gagal menyinkronkan ke cloud",
+                        if (ok) "Data & token ${freshSeller.name} tersinkron ke Web Penyetor!" else "Gagal menyinkronkan ke cloud",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
@@ -411,8 +424,11 @@ fun SellersScreen(
             onCopyLink = {
                 viewModel.copyToClipboard(context, portalUrl)
             },
+            onCopyToken = {
+                viewModel.copyToClipboard(context, freshSeller.writeToken)
+            },
             onShareWhatsApp = {
-                viewModel.shareTextToWhatsApp(context, shareText, seller.whatsappNumber)
+                viewModel.shareTextToWhatsApp(context, shareText, freshSeller.whatsappNumber)
             },
             onDismiss = { webLinkTargetSeller = null }
         )

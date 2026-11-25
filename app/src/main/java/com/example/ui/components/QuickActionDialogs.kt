@@ -412,8 +412,11 @@ fun VendorWebLinkDialog(
     portalUrl: String,
     shareText: String,
     isSyncing: Boolean,
+    syncStatusText: String = "",
+    isSyncedOk: Boolean = false,
     onSyncNow: () -> Unit,
     onCopyLink: () -> Unit,
+    onCopyToken: () -> Unit = {},
     onShareWhatsApp: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -465,6 +468,34 @@ fun VendorWebLinkDialog(
                     color = MaterialTheme.colorScheme.primary
                 )
 
+                if (syncStatusText.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSyncedOk) lapakColors.stockSafeBg else lapakColors.warningBg,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isSyncedOk) Icons.Default.CloudDone else Icons.Default.CloudSync,
+                                contentDescription = null,
+                                tint = if (isSyncedOk) lapakColors.stockSafeText else lapakColors.warningText,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = syncStatusText,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isSyncedOk) lapakColors.stockSafeText else lapakColors.warningText
+                            )
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(10.dp))
 
                 Surface(
@@ -473,13 +504,38 @@ fun VendorWebLinkDialog(
                     border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Kode Penyetor", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(seller.vendorCode, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.ExtraBold, color = lapakColors.omzetCardAccent)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Token Kirim", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.clickable { onCopyToken() }
+                            ) {
+                                Text(
+                                    text = seller.writeToken.take(10) + "...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Icon(
+                                    Icons.Default.ContentCopy,
+                                    contentDescription = "Salin Token Kirim",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -494,7 +550,7 @@ fun VendorWebLinkDialog(
                 Spacer(Modifier.height(10.dp))
 
                 Text(
-                    text = "Tautan Khusus Penyetor (Privat):",
+                    text = "Tautan Khusus Penyetor (Sudah Termasuk Token):",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

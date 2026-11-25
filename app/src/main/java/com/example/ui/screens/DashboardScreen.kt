@@ -17,6 +17,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -25,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.SoldItemSummary
+import com.example.data.model.ThemeMode
 import com.example.data.repository.SellerDetailItem
 import com.example.i18n.AppStrings
 import com.example.ui.components.*
@@ -40,6 +42,7 @@ fun DashboardScreen(
 ) {
     val context = LocalContext.current
     val lapakColors = LocalLapakColors.current
+    val isDarkNow = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val lang by viewModel.currentLanguage.collectAsState()
     val shopProfile by viewModel.shopProfile.collectAsState()
     val summary by viewModel.dashboardSummary.collectAsState()
@@ -66,52 +69,35 @@ fun DashboardScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = shopProfile.shopName,
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = AppStrings.get("tagline", lang),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (isSyncing) {
-                                Spacer(Modifier.width(6.dp))
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(11.dp),
-                                    strokeWidth = 1.5.dp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-                    }
+            LapakTopHeader(
+                title = shopProfile.shopName,
+                subtitle = if (isSyncing) "Menyinkronkan ke cloud..." else AppStrings.get("tagline", lang),
+                paletteKey = shopProfile.headerBgColorKey,
+                leadingContent = {
+                    ShopAvatarBadge(
+                        iconKey = shopProfile.shopIconKey,
+                        logoUri = shopProfile.logoUri,
+                        size = 42.dp
+                    )
                 },
                 actions = {
-                    IconButton(
+                    HeaderActionIconButton(
+                        icon = if (isDarkNow) Icons.Default.LightMode else Icons.Default.DarkMode,
+                        contentDescription = if (isDarkNow) "Ganti ke Mode Terang" else "Ganti ke Mode Gelap",
+                        onClick = {
+                            viewModel.setThemeMode(if (isDarkNow) ThemeMode.LIGHT else ThemeMode.DARK)
+                        },
+                        modifier = Modifier.testTag("dashboard_theme_toggle")
+                    )
+                    HeaderActionIconButton(
+                        icon = Icons.Default.Settings,
+                        contentDescription = "Pengaturan",
                         onClick = { viewModel.navigateTo(AppScreen.SETTINGS) },
                         modifier = Modifier.testTag("dashboard_settings_button")
-                    ) {
-                        Icon(
-                            Icons.Default.Settings,
-                            contentDescription = "Pengaturan",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
+                    )
+                }
             )
         },
         modifier = modifier
@@ -121,6 +107,7 @@ fun DashboardScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(horizontal = 16.dp),
+            contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // Timeframe Filter Chips

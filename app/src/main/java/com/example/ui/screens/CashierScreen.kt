@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import com.example.data.repository.CartItem
 import com.example.data.repository.ProductDetailItem
 import com.example.i18n.AppStrings
+import com.example.ui.components.HeaderActionIconButton
+import com.example.ui.components.LapakTopHeader
 import com.example.ui.components.ReceiptCustomerDialog
 import com.example.ui.components.SelectSellerLotDialog
 import com.example.ui.theme.LocalLapakColors
@@ -80,34 +82,26 @@ fun CashierScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = AppStrings.get("cashier_title", lang),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+            LapakTopHeader(
+                title = AppStrings.get("cashier_title", lang),
+                subtitle = if (cart.isEmpty()) {
+                    "Pilih menu untuk mulai transaksi"
+                } else {
+                    "${cart.sumOf { it.quantity }} item • ${LapakViewModel.formatRupiah(totalAmount)}"
                 },
+                paletteKey = shopProfile.headerBgColorKey,
                 actions = {
                     if (cart.isNotEmpty()) {
-                        IconButton(
+                        HeaderActionIconButton(
+                            icon = Icons.Default.DeleteSweep,
+                            contentDescription = "Kosongkan Keranjang",
                             onClick = { viewModel.clearCart() },
                             modifier = Modifier.testTag("cashier_clear_cart_button")
-                        ) {
-                            Icon(
-                                Icons.Default.DeleteSweep,
-                                contentDescription = "Kosongkan Keranjang",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        )
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
+                }
             )
         },
         modifier = modifier

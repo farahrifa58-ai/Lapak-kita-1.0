@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
         SellerStatusHistory::class,
         AppSettings::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -51,6 +51,20 @@ abstract class LapakDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE shop_profiles ADD COLUMN shopIconKey TEXT NOT NULL DEFAULT 'STORE'")
+                db.execSQL("ALTER TABLE shop_profiles ADD COLUMN headerBgColorKey TEXT NOT NULL DEFAULT 'SOFT_EMERALD'")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN posterTemplate TEXT NOT NULL DEFAULT 'SOFT_EMERALD'")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN posterIntroText TEXT NOT NULL DEFAULT 'Menu Fresh & Ready Stok Hari Ini!'")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN posterOutroText TEXT NOT NULL DEFAULT 'Yuk pesan sekarang sebelum kehabisan!'")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN posterShowLogo INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN posterShowShopName INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN posterShowContact INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN posterCustomBgUri TEXT DEFAULT NULL")
+            }
+        }
+
         fun getDatabase(context: Context, scope: CoroutineScope): LapakDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -58,7 +72,7 @@ abstract class LapakDatabase : RoomDatabase() {
                     LapakDatabase::class.java,
                     "lapak_kita_database"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .addCallback(LapakDatabaseCallback(scope))
                     .fallbackToDestructiveMigration()
                     .build()

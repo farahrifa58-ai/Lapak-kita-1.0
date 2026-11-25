@@ -713,8 +713,25 @@
           <strong id="tariffDisplay" style="color:var(--primary);">-</strong>
         </div>
 
-        <div id="missingTokenWarn" class="banner-status warn hidden" style="margin:0;">
-          <span>⚠️ Link ini hanya mode lihat. Minta <strong>Link Web Penyetor lengkap</strong> dari Admin agar bisa menambah produk &amp; mengirim stok harian.</span>
+        <div id="missingTokenWarn" class="card hidden" style="margin:0;padding:12px;background:var(--warn-bg);border-color:var(--amber-border);">
+          <div style="font-size:13px;font-weight:700;color:var(--warn-text);margin-bottom:6px;">
+            🔑 Token Kirim Diperlukan untuk Menyimpan
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
+            Buka link lengkap dari WhatsApp Admin, atau tempel <strong>Token Kirim</strong> di bawah agar Anda dapat menambah produk &amp; mengirim stok harian:
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input
+              class="form-input"
+              id="inlineTokenInput"
+              placeholder="Tempel Token Kirim di sini..."
+              autocomplete="off"
+              style="flex:1;padding:9px 11px;font-size:13px;background:var(--surface);"
+            />
+            <button class="btn btn-primary btn-sm" id="btnApplyInlineToken" type="button" style="min-height:40px;white-space:nowrap;">
+              Pakai Token
+            </button>
+          </div>
         </div>
       </div>
 
@@ -938,6 +955,8 @@
     const vendorCodeBadge = el("vendorCodeBadge");
     const tariffDisplay = el("tariffDisplay");
     const missingTokenWarn = el("missingTokenWarn");
+    const inlineTokenInput = el("inlineTokenInput");
+    const btnApplyInlineToken = el("btnApplyInlineToken");
     const statTotalStock = el("statTotalStock");
     const statTotalSold = el("statTotalSold");
     const statUnpaidBalance = el("statUnpaidBalance");
@@ -1000,6 +1019,39 @@
 
     function isValidVendorCode(code) {
       return /^LPK-[A-Z0-9]{6}$/.test(code);
+    }
+
+    function cleanUrlToken(raw) {
+      return String(raw || "")
+        .trim()
+        .replace(/^[*_~`"'<\s]+|[*_~`"'>.,;!\s]+$/g, "")
+        .replace(/[^a-zA-Z0-9_\-]/g, "");
+    }
+
+    function cleanVendorCode(raw) {
+      return String(raw || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9\-]/g, "");
+    }
+
+    function saveStoredToken(code, token) {
+      if (!code || !token) return;
+      try { localStorage.setItem(`lapak_token_${code}`, token); } catch (_) {}
+      try { sessionStorage.setItem(`lapak_token_${code}`, token); } catch (_) {}
+    }
+
+    function loadStoredToken(code) {
+      if (!code) return "";
+      try {
+        const fromLocal = localStorage.getItem(`lapak_token_${code}`);
+        if (fromLocal) return cleanUrlToken(fromLocal);
+      } catch (_) {}
+      try {
+        const fromSession = sessionStorage.getItem(`lapak_token_${code}`);
+        if (fromSession) return cleanUrlToken(fromSession);
+      } catch (_) {}
+      return "";
     }
 
     function calculateSplit(sellingPrice) {
@@ -1207,10 +1259,10 @@
         : "Isi stok kiriman atau tambah/edit produk terlebih dahulu";
 
       btnResetDrafts.classList.toggle("hidden", !hasChanges || isSubmitting);
-      btnSubmitToLapak.disabled = !hasChanges || !activeWriteToken || isSubmitting;
+      btnSubmitToLapak.disabled = !hasChanges || isSubmitting;
       btnSubmitToLapak.textContent = isSubmitting
         ? "Mengirim ke Lapak..."
-        : "Kirim & Simpan ke Lapak";
+        : (!activeWriteToken && hasChanges ? "Masukkan Token & Kirim ke Lapak" : "Kirim & Simpan ke Lapak");
     }
 
     // --- Modal Logic ---
@@ -1376,9 +1428,61 @@
       updateStickyBar();
     });
 
+    // --- Inline Token Kirim Handler ---
+    function applyInlineToken(showToast = true) {
+      const cleaned = cleanUrlToken(inlineTokenInput.value);
+      if (cleaned.length < 12) {
+        if (showToast) {
+          showBanner("warn", "Token Kirim tidak valid (minimal 12 karakter). Salin token lengkap dari Admin Lapak.");
+        }
+        return false;
+      }
+      activeWriteToken = cleaned;
+      saveStoredToken(activeVendorCode, cleaned);
+      missingTokenWarn.classList.add("hidden");
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set("kode", activeVendorCode);
+      nextUrl.searchParams.set("token", cleaned);
+      window.history.replaceState({}, "", nextUrl.toString());
+      if (showToast) {
+        showBanner("success", "✅ Token Kirim aktif! Sekarang Anda bisa menekan Kirim & Simpan ke Lapak.");
+      }
+      updateStickyBar();
+      return true;
+    }
+
+    btnApplyInlineToken.addEventListener("click", () => applyInlineToken(true));
+    inlineTokenInput.addEventListener("input", () => {
+      const cleaned = cleanUrlToken(inlineTokenInput.value);
+      if (cleaned.length >= 12) {
+        activeWriteToken = cleaned;
+        saveStoredToken(activeVendorCode, cleaned);
+        updateStickyBar();
+      }
+    });
+
     // --- Submit to Firestore ---
     btnSubmitToLapak.addEventListener("click", async () => {
-      if (isSubmitting || !vendorData || !activeWriteToken) return;
+      if (isSubmitting || !vendorData) return;
+
+      // If token wasn't in URL, check inline input or prompt clearly
+      if (!activeWriteToken) {
+        if (inlineTokenInput.value.trim()) {
+          if (!applyInlineToken(false)) {
+            missingTokenWarn.classList.remove("hidden");
+            missingTokenWarn.scrollIntoView({ behavior: "smooth", block: "center" });
+            inlineTokenInput.focus();
+            showBanner("warn", "Token Kirim belum valid. Mohon tempel Token Kirim lengkap dari Admin Lapak.");
+            return;
+          }
+        } else {
+          missingTokenWarn.classList.remove("hidden");
+          missingTokenWarn.scrollIntoView({ behavior: "smooth", block: "center" });
+          inlineTokenInput.focus();
+          showBanner("warn", "Masukkan Token Kirim terlebih dahulu di kotak kuning di atas, atau buka link lengkap dari WhatsApp Admin.");
+          return;
+        }
+      }
 
       const newProductsPayload = draftNewProducts.slice(0, 50).map((p) => ({
         name: p.name.slice(0, 100),
@@ -1431,10 +1535,14 @@
         showBanner("info", "📤 Kiriman berhasil dikirim! Menunggu aplikasi Admin Lapak memproses secara otomatis...");
       } catch (err) {
         console.error("Failed to submit vendor update:", err);
-        const msg = err?.code === "permission-denied"
-          ? "Gagal mengirim: Token akses tidak cocok atau link sudah diperbarui. Mohon minta link terbaru dari Admin Lapak."
-          : `Gagal mengirim data (${err?.message || "koneksi bermasalah"}). Silakan coba lagi.`;
-        showBanner("error", msg);
+        if (err?.code === "permission-denied") {
+          inlineTokenInput.value = activeWriteToken;
+          missingTokenWarn.classList.remove("hidden");
+          missingTokenWarn.scrollIntoView({ behavior: "smooth", block: "center" });
+          showBanner("error", "Gagal mengirim: Token Kirim tidak cocok dengan data di Admin Lapak. Pastikan Admin sudah menekan Sinkronkan, lalu tempel Token Kirim terbaru.");
+        } else {
+          showBanner("error", `Gagal mengirim data (${err?.message || "koneksi bermasalah"}). Silakan coba lagi.`);
+        }
       } finally {
         isSubmitting = false;
         updateStickyBar();
@@ -1448,7 +1556,7 @@
         unsubscribeVendor = null;
       }
 
-      const normalizedCode = (code || "").trim().toUpperCase();
+      const normalizedCode = cleanVendorCode(code);
       if (!isValidVendorCode(normalizedCode)) {
         loadingCard.classList.add("hidden");
         portalContent.classList.add("hidden");
@@ -1461,11 +1569,15 @@
       }
 
       activeVendorCode = normalizedCode;
-      if (token) {
-        activeWriteToken = token.trim();
-        try { sessionStorage.setItem(`lapak_token_${normalizedCode}`, activeWriteToken); } catch (_) {}
+      const cleanedToken = cleanUrlToken(token);
+      if (cleanedToken.length >= 12) {
+        activeWriteToken = cleanedToken;
+        saveStoredToken(normalizedCode, cleanedToken);
       } else {
-        try { activeWriteToken = sessionStorage.getItem(`lapak_token_${normalizedCode}`) || ""; } catch (_) {}
+        activeWriteToken = loadStoredToken(normalizedCode);
+      }
+      if (inlineTokenInput) {
+        inlineTokenInput.value = activeWriteToken;
       }
 
       accessCard.classList.add("hidden");
@@ -1501,8 +1613,8 @@
     }
 
     openPortalBtn.addEventListener("click", () => {
-      const code = manualCodeInput.value.trim().toUpperCase();
-      const token = manualTokenInput.value.trim();
+      const code = cleanVendorCode(manualCodeInput.value);
+      const token = cleanUrlToken(manualTokenInput.value);
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.set("kode", code);
       if (token) nextUrl.searchParams.set("token", token);
@@ -1510,10 +1622,19 @@
       connectToVendor(code, token);
     });
 
-    // --- Initial Boot from URL ?kode=LPK-XXXXXX&token=... ---
-    const params = new URLSearchParams(window.location.search);
-    const urlCode = (params.get("kode") || params.get("code") || "").trim().toUpperCase();
-    const urlToken = (params.get("token") || "").trim();
+    // --- Initial Boot from URL ?kode=LPK-XXXXXX&token=... (supports query & hash) ---
+    function extractParams() {
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashStr = window.location.hash.includes("?")
+        ? window.location.hash.slice(window.location.hash.indexOf("?") + 1)
+        : window.location.hash.replace(/^#/, "");
+      const hashParams = new URLSearchParams(hashStr);
+      const code = searchParams.get("kode") || searchParams.get("code") || hashParams.get("kode") || hashParams.get("code") || "";
+      const token = searchParams.get("token") || searchParams.get("writeToken") || hashParams.get("token") || hashParams.get("writeToken") || "";
+      return { code: cleanVendorCode(code), token: cleanUrlToken(token) };
+    }
+
+    const { code: urlCode, token: urlToken } = extractParams();
 
     if (urlCode) {
       connectToVendor(urlCode, urlToken);

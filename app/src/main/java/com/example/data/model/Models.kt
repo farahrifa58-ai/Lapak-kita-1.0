@@ -32,8 +32,42 @@ object ThemeMode {
     const val DARK = "DARK"
 }
 
-const val DEFAULT_WEB_PORTAL_BASE_URL =
-    "https://ais-pre-sr326hryvojgfrxhcnjkpk-79309788941.asia-northeast1.run.app"
+const val DEFAULT_WEB_PORTAL_BASE_URL = "https://lapakkita1.vercel.app"
+
+fun sanitizeWebPortalBaseUrl(rawUrl: String?): String {
+    val trimmed = rawUrl?.trim()?.trimEnd('/').orEmpty()
+    if (trimmed.isEmpty()) return DEFAULT_WEB_PORTAL_BASE_URL
+    val lower = trimmed.lowercase()
+    if (lower.contains("ais-pre-") || lower.contains("ais-dev-") || lower.contains(".run.app")) {
+        return DEFAULT_WEB_PORTAL_BASE_URL
+    }
+    return trimmed
+}
+
+object PosterTemplate {
+    const val SOFT_EMERALD = "SOFT_EMERALD"
+    const val WARM_CREAM = "WARM_CREAM"
+    const val DARK_GOLD = "DARK_GOLD"
+    const val FRESH_TERRACOTTA = "FRESH_TERRACOTTA"
+    const val CUSTOM_IMAGE = "CUSTOM_IMAGE"
+}
+
+object ShopIconKey {
+    const val STORE = "STORE"
+    const val BAKERY = "BAKERY"
+    const val CAFE = "CAFE"
+    const val BASKET = "BASKET"
+    const val RESTAURANT = "RESTAURANT"
+    const val CUSTOM_PHOTO = "CUSTOM_PHOTO"
+}
+
+object HeaderBgColorKey {
+    const val SOFT_EMERALD = "SOFT_EMERALD"
+    const val OCEAN_TEAL = "OCEAN_TEAL"
+    const val WARM_TERRACOTTA = "WARM_TERRACOTTA"
+    const val ROYAL_SLATE = "ROYAL_SLATE"
+    const val BERRY_PLUM = "BERRY_PLUM"
+}
 
 data class AdminFeeBreakdown(
     val sellingPrice: Double,
@@ -126,7 +160,9 @@ data class ShopProfile(
     val whatsappNumber: String = "0812-3456-7890",
     val address: String = "Jl. Pasar Segar No. 18, Sentra Kuliner Lapak Kita",
     val logoUri: String? = null,
-    val footerMessage: String = "Terima kasih atas kunjungan dan kepercayaan Anda!"
+    val footerMessage: String = "Terima kasih atas kunjungan dan kepercayaan Anda!",
+    val shopIconKey: String = ShopIconKey.STORE,
+    val headerBgColorKey: String = HeaderBgColorKey.SOFT_EMERALD
 )
 
 @Entity(tableName = "sellers")
@@ -342,7 +378,14 @@ data class AppSettings(
     val driveAccountEmail: String? = null,
     val adminFeeType: String = AdminFeeType.FIXED, // FIXED, PERCENTAGE
     val adminFeeValue: Double = 2000.0,
-    val webPortalBaseUrl: String = DEFAULT_WEB_PORTAL_BASE_URL
+    val webPortalBaseUrl: String = DEFAULT_WEB_PORTAL_BASE_URL,
+    val posterTemplate: String = PosterTemplate.SOFT_EMERALD,
+    val posterIntroText: String = "Menu Fresh & Ready Stok Hari Ini!",
+    val posterOutroText: String = "Yuk pesan sekarang sebelum kehabisan!",
+    val posterShowLogo: Boolean = true,
+    val posterShowShopName: Boolean = true,
+    val posterShowContact: Boolean = true,
+    val posterCustomBgUri: String? = null
 )
 
 data class SoldItemSummary(

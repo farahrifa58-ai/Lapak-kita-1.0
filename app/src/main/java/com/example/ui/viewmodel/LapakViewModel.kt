@@ -143,7 +143,7 @@ class LapakViewModel(
             } else {
                 feeValue.coerceIn(0.0, 10_000_000.0)
             }
-            val safeUrl = webPortalBaseUrl.trim().trimEnd('/').ifEmpty { DEFAULT_WEB_PORTAL_BASE_URL }
+            val safeUrl = sanitizeWebPortalBaseUrl(webPortalBaseUrl)
             val curr = appSettings.value
             repository.updateAppSettings(
                 curr.copy(
@@ -157,19 +157,81 @@ class LapakViewModel(
         }
     }
 
-    fun updateProfile(name: String, owner: String, wa: String, address: String, footer: String) {
+    fun updateProfile(
+        name: String,
+        owner: String,
+        wa: String,
+        address: String,
+        footer: String,
+        shopIconKey: String? = null,
+        headerBgColorKey: String? = null,
+        logoUri: String? = shopProfile.value.logoUri
+    ) {
         viewModelScope.launch {
             val curr = shopProfile.value
             repository.updateShopProfile(
                 curr.copy(
-                    shopName = name,
-                    ownerName = owner,
-                    whatsappNumber = wa,
-                    address = address,
-                    footerMessage = footer
+                    shopName = name.trim().ifEmpty { "Lapak Kita" },
+                    ownerName = owner.trim(),
+                    whatsappNumber = wa.trim(),
+                    address = address.trim(),
+                    footerMessage = footer.trim(),
+                    shopIconKey = shopIconKey ?: curr.shopIconKey,
+                    headerBgColorKey = headerBgColorKey ?: curr.headerBgColorKey,
+                    logoUri = logoUri
                 )
             )
             syncAllVendorsToCloud()
+        }
+    }
+
+    fun updatePromoSettings(
+        template: String,
+        introText: String,
+        outroText: String,
+        showLogo: Boolean,
+        showShopName: Boolean,
+        showContact: Boolean,
+        customBgUri: String? = appSettings.value.posterCustomBgUri,
+        onDone: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val curr = appSettings.value
+            repository.updateAppSettings(
+                curr.copy(
+                    posterTemplate = template,
+                    posterIntroText = introText.trim().ifEmpty { "Menu Fresh & Ready Stok Hari Ini!" },
+                    posterOutroText = outroText.trim().ifEmpty { "Yuk pesan sekarang sebelum kehabisan!" },
+                    posterShowLogo = showLogo,
+                    posterShowShopName = showShopName,
+                    posterShowContact = showContact,
+                    posterCustomBgUri = customBgUri
+                )
+            )
+            onDone()
+        }
+    }
+
+    fun updateWebPortalBaseUrl(
+        webPortalBaseUrl: String,
+        onDone: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val safeUrl = sanitizeWebPortalBaseUrl(webPortalBaseUrl)
+            val curr = appSettings.value
+            repository.updateAppSettings(curr.copy(webPortalBaseUrl = safeUrl))
+            syncAllVendorsToCloud()
+            onDone(safeUrl)
+        }
+    }
+
+    fun testCloudConnection(onResult: (Boolean, String) -> Unit) {
+        syncAllVendorsToCloud { ok, msg ->
+            if (ok) {
+                onResult(true, "Koneksi Firestore aktif! $msg")
+            } else {
+                onResult(false, "Koneksi bermasalah: $msg")
+            }
         }
     }
 
@@ -225,10 +287,15 @@ class LapakViewModel(
     )
 
     init {
-        // 1. Ensure all existing sellers have valid vendorCode & writeToken and push initial snapshot to Firestore
+        // 1. Migrate legacy preview URL if present, ensure all sellers have valid vendorCode & writeToken, and push initial snapshot to Firestore
         viewModelScope.launch {
+            val currentSettings = repository.appSettings.first()
+            val cleanUrl = sanitizeWebPortalBaseUrl(currentSettings.webPortalBaseUrl)
+            if (cleanUrl != currentSettings.webPortalBaseUrl) {
+                repository.updateAppSettings(currentSettings.copy(webPortalBaseUrl = cleanUrl))
+            }
             repository.ensureAllSellersHaveVendorCodes()
-            delay(350)
+            delay(300)
             syncAllVendorsToCloud()
         }
         // 2. Start real-time Firestore listener for incoming Web Penyetor submissions
@@ -315,8 +382,10 @@ class LapakViewModel(
 
     fun syncSingleSellerToCloud(sellerId: Long, onComplete: ((Boolean) -> Unit)? = null) {
         viewModelScope.launch {
+            _isSyncingCloud.value = true
             try {
-                delay(150)
+                repository.ensureAllSellersHaveVendorCodes()
+                delay(120)
                 val sellers = repository.sellersWithStats.first()
                 val target = sellers.firstOrNull { it.seller.id == sellerId } ?: run {
                     onComplete?.invoke(false)
@@ -338,6 +407,8 @@ class LapakViewModel(
             } catch (e: Exception) {
                 Log.e("LapakViewModel", "Single seller sync error", e)
                 onComplete?.invoke(false)
+            } finally {
+                _isSyncingCloud.value = false
             }
         }
     }
@@ -359,8 +430,10 @@ class LapakViewModel(
     }
 
     fun buildVendorPortalUrl(seller: Seller): String {
-        val base = appSettings.value.webPortalBaseUrl.trim().trimEnd('/').ifEmpty { DEFAULT_WEB_PORTAL_BASE_URL }
-        return "$base/?kode=${Uri.encode(seller.vendorCode)}&token=${Uri.encode(seller.writeToken)}"
+        val base = sanitizeWebPortalBaseUrl(appSettings.value.webPortalBaseUrl)
+        val cleanCode = seller.vendorCode.trim().uppercase()
+        val cleanToken = seller.writeToken.trim()
+        return "$base/?kode=${Uri.encode(cleanCode)}&token=${Uri.encode(cleanToken)}"
     }
 
     fun buildVendorPortalShareText(seller: Seller): String {
@@ -856,47 +929,40 @@ class LapakViewModel(
         val sb = StringBuilder()
 
         if (isAllSellers) {
-            sb.append("Assalamu'alaikum / Halo Bunda & Pelanggan Setia! \n")
-            sb.append("Ready stok jajanan & kuliner hari ini di *${profile.shopName}*:\n")
+            sb.append("*INFO SISA STOK PENYETOR — ${profile.shopName.uppercase()}*\n")
             sb.append("Update: $dateStr WIB\n\n")
 
             val bySeller = availableProducts.groupBy { it.seller.name }
             if (bySeller.isEmpty()) {
-                sb.append("Mohon maaf, seluruh stok hari ini sudah habis terjual. Sampai jumpa besok ya!\n\n")
+                sb.append("Alhamdulillah! Seluruh stok titipan hari ini sudah habis terjual (stok 0).\n\n")
             } else {
                 bySeller.forEach { (sellerName, prodList) ->
-                    sb.append("*$sellerName*\n")
+                    val totalQtySeller = prodList.sumOf { it.currentStock }
+                    sb.append("*$sellerName* (Total sisa: $totalQtySeller)\n")
                     prodList.forEach { p ->
-                        sb.append("- ${p.product.name} — ${formatRupiah(p.product.sellingPrice)} (Sisa ${p.currentStock} ${p.product.unit})\n")
+                        sb.append("- ${p.product.name}: sisa *${p.currentStock} ${p.product.unit}* (${formatRupiah(p.product.sellingPrice)})\n")
                     }
                     sb.append("\n")
                 }
             }
-            sb.append("Yuk langsung mampir atau chat untuk pesan sebelum kehabisan!\n")
-            if (profile.whatsappNumber.isNotBlank()) {
-                sb.append("Order / WA: ${profile.whatsappNumber}\n")
-            }
-            if (profile.address.isNotBlank()) {
-                sb.append("Lokasi: ${profile.address}\n")
-            }
-            sb.append("Terima kasih sudah belanja di *${profile.shopName}*!")
+            sb.append("Bagi penyetor yang ingin menambah stok atau update menu, silakan langsung kirim lewat Link Web Penyetor masing-masing ya. Terima kasih!")
         } else {
             val target = availableProducts.filter { it.seller.id == targetSellerId }
             val sellerName = target.firstOrNull()?.seller?.name
                 ?: rawSellers.value.firstOrNull { it.id == targetSellerId }?.name
                 ?: "Penyetor"
 
-            sb.append("*UPDATE STOK READY — ${profile.shopName.uppercase()}*\n")
-            sb.append("Waktu: $dateStr WIB\n\n")
+            sb.append("*INFO SISA STOK — ${profile.shopName.uppercase()}*\n")
+            sb.append("Update: $dateStr WIB\n\n")
             sb.append("*$sellerName*\n")
             if (target.isEmpty()) {
                 sb.append("- Alhamdulillah semua produk sudah habis terjual (stok 0)!\n")
             } else {
                 target.forEach { p ->
-                    sb.append("- ${p.product.name} — ${formatRupiah(p.product.sellingPrice)} (Sisa ${p.currentStock} ${p.product.unit})\n")
+                    sb.append("- ${p.product.name}: sisa *${p.currentStock} ${p.product.unit}* (${formatRupiah(p.product.sellingPrice)})\n")
                 }
             }
-            sb.append("\nTerima kasih, salam hangat dari *${profile.shopName}*.")
+            sb.append("\nSilakan kirim tambahan stok melalui Link Web Penyetor jika ingin restok. Terima kasih!")
         }
 
         return sb.toString()

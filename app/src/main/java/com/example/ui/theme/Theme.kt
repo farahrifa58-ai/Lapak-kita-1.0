@@ -69,6 +69,7 @@ private val LightColorScheme = lightColorScheme(
 @Composable
 fun LapakKitaTheme(
     darkTheme: Boolean = false,
+    darkHeader: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
@@ -79,11 +80,11 @@ fun LapakKitaTheme(
             val window = (view.context as? Activity)?.window
             if (window != null) {
                 @Suppress("DEPRECATION")
-                window.statusBarColor = colorScheme.background.toArgb()
+                window.statusBarColor = Color.Transparent.toArgb()
                 @Suppress("DEPRECATION")
                 window.navigationBarColor = colorScheme.surface.toArgb()
                 val controller = WindowCompat.getInsetsController(window, view)
-                controller.isAppearanceLightStatusBars = !darkTheme
+                controller.isAppearanceLightStatusBars = !darkHeader && !darkTheme
                 controller.isAppearanceLightNavigationBars = !darkTheme
             }
         }

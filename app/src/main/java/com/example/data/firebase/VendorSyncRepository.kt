@@ -73,8 +73,8 @@ class VendorSyncRepository(
         lastProcessedSubmissionId: String = ""
     ): Result<Unit> {
         val seller = sellerDetail.seller
-        val vendorCode = seller.vendorCode
-        val writeToken = seller.writeToken
+        val vendorCode = seller.vendorCode.trim().uppercase()
+        val writeToken = seller.writeToken.trim()
         if (!VendorCodeGenerator.isValidVendorCode(vendorCode) || !VendorCodeGenerator.isValidWriteToken(writeToken)) {
             return Result.failure(IllegalArgumentException("Kode penyetor atau token tulis tidak valid"))
         }
@@ -159,7 +159,7 @@ class VendorSyncRepository(
                 vendorRef.update(updateData).await()
             }
 
-            // Ensure private writeToken document exists & stays in sync
+            // Guarantee private writeToken document exists & is 100% identical to seller.writeToken
             val existingAuth = authRef.get().await()
             if (!existingAuth.exists()) {
                 authRef.set(
@@ -170,13 +170,19 @@ class VendorSyncRepository(
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 ).await()
-            } else if (existingAuth.getString("writeToken") != writeToken) {
-                authRef.update(
-                    mapOf(
-                        "writeToken" to writeToken,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
+            } else {
+                val existingAuthOwner = existingAuth.getString("ownerUid")
+                if (existingAuthOwner != null && existingAuthOwner != uid) {
+                    return Result.failure(IllegalStateException("Token akses penyetor $vendorCode dimiliki akun lain"))
+                }
+                if (existingAuth.getString("writeToken") != writeToken) {
+                    authRef.update(
+                        mapOf(
+                            "writeToken" to writeToken,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
             }
 
             Result.success(Unit)

@@ -43,6 +43,7 @@ fun ProductsScreen(
     val context = LocalContext.current
     val lapakColors = LocalLapakColors.current
     val lang by viewModel.currentLanguage.collectAsState()
+    val shopProfile by viewModel.shopProfile.collectAsState()
     val appSettings by viewModel.appSettings.collectAsState()
     val products by viewModel.productsWithDetails.collectAsState()
     val sellers by viewModel.rawSellers.collectAsState()
@@ -68,6 +69,7 @@ fun ProductsScreen(
     var onlyInStock by remember { mutableStateOf(false) }
 
     // Dialog states
+    var showPromoPosterDialog by remember { mutableStateOf(false) }
     var showShareDialog by remember { mutableStateOf(false) }
     var showAddProductDialog by remember { mutableStateOf(false) }
     var depositTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
@@ -94,48 +96,12 @@ fun ProductsScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = AppStrings.get("prod_title", lang),
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        Text(
-                            text = "${products.count { it.currentStock > 0 }} menu siap jual • ${products.sumOf { it.currentStock }} stok",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                actions = {
-                    FilledTonalButton(
-                        onClick = { showShareDialog = true },
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = lapakColors.whatsappBg,
-                            contentColor = lapakColors.whatsappText
-                        ),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .padding(end = 12.dp)
-                            .testTag("share_stock_topbar_button")
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(5.dp))
-                        Text(
-                            text = "Bagikan WA",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
+            LapakTopHeader(
+                title = AppStrings.get("prod_title", lang),
+                subtitle = "${products.count { it.currentStock > 0 }} menu siap jual • ${products.sumOf { it.currentStock }} stok",
+                paletteKey = shopProfile.headerBgColorKey
             )
         },
         floatingActionButton = {
@@ -167,30 +133,31 @@ fun ProductsScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                contentPadding = PaddingValues(top = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Promo WhatsApp Share Banner Card
+                // 2 Separated Side-by-Side Share Action Buttons: Promo Pelanggan & Info ke Penyetor
                 item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = lapakColors.omzetCardBg),
-                        border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
-                        shape = RoundedCornerShape(14.dp),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showShareDialog = true }
-                            .testTag("share_stock_banner_card")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Row(
+                        // Button 1: Promo Pelanggan (Poster Gambar tanpa nama dapur)
+                        Card(
+                            onClick = { showPromoPosterDialog = true },
+                            colors = CardDefaults.cardColors(containerColor = lapakColors.omzetCardBg),
+                            border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
+                            shape = RoundedCornerShape(14.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                                .weight(1f)
+                                .testTag("btn_promo_pelanggan")
                         ) {
                             Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 11.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(
                                     modifier = Modifier
@@ -199,32 +166,82 @@ fun ProductsScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
-                                        Icons.Default.Campaign,
+                                        Icons.Default.Image,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.onPrimary,
-                                        modifier = Modifier.size(20.dp)
+                                        modifier = Modifier.size(19.dp)
                                     )
                                 }
-                                Spacer(Modifier.width(10.dp))
-                                Column {
+                                Spacer(Modifier.width(9.dp))
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = AppStrings.get("share_stock_button", lang),
-                                        style = MaterialTheme.typography.titleSmall,
+                                        text = "Promo Pelanggan",
+                                        style = MaterialTheme.typography.labelLarge,
                                         fontWeight = FontWeight.Bold,
-                                        color = lapakColors.omzetCardAccent
+                                        color = lapakColors.omzetCardAccent,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
-                                        text = "Kirim daftar menu ready & harga rapi ke grup WA",
+                                        text = "Poster Menu Ready",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null,
-                                tint = lapakColors.omzetCardAccent
-                            )
+                        }
+
+                        // Button 2: Info ke Penyetor (Teks Rincian Stok grup WA penjual)
+                        Card(
+                            onClick = { showShareDialog = true },
+                            colors = CardDefaults.cardColors(containerColor = lapakColors.whatsappBg),
+                            border = BorderStroke(1.dp, lapakColors.whatsappText.copy(alpha = 0.28f)),
+                            shape = RoundedCornerShape(14.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_info_penyetor")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 11.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .background(lapakColors.whatsappText, RoundedCornerShape(10.dp)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.FactCheck,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(9.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Info ke Penyetor",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = lapakColors.whatsappText,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "Teks Stok Grup WA",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -447,7 +464,17 @@ fun ProductsScreen(
         }
     }
 
-    // Share Dialog
+    // Customer Promo Poster Dialog ("Promo Pelanggan")
+    if (showPromoPosterDialog) {
+        PromoPosterDialog(
+            shopProfile = shopProfile,
+            appSettings = appSettings,
+            productsWithDetails = products,
+            onDismiss = { showPromoPosterDialog = false }
+        )
+    }
+
+    // Vendor Stock Info Text Dialog ("Info ke Penyetor")
     if (showShareDialog) {
         ShareStockReportDialog(
             sellers = sellers,
