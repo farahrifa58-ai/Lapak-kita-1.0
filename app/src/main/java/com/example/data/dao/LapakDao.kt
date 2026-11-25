@@ -24,6 +24,9 @@ interface LapakDao {
     @Query("SELECT * FROM sellers WHERE id = :id LIMIT 1")
     suspend fun getSellerById(id: Long): Seller?
 
+    @Query("SELECT * FROM sellers WHERE vendorCode = :vendorCode LIMIT 1")
+    suspend fun getSellerByVendorCode(vendorCode: String): Seller?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSeller(seller: Seller): Long
 
@@ -42,6 +45,9 @@ interface LapakDao {
 
     @Query("SELECT * FROM products WHERE sellerId = :sellerId ORDER BY name ASC")
     fun getProductsBySellerFlow(sellerId: Long): Flow<List<Product>>
+
+    @Query("SELECT * FROM products WHERE sellerId = :sellerId ORDER BY name ASC")
+    suspend fun getProductsBySellerDirect(sellerId: Long): List<Product>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertProduct(product: Product): Long

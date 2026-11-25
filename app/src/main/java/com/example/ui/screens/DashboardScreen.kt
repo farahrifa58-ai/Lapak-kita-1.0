@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -16,13 +18,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.repository.DashboardSummary
+import com.example.data.model.SoldItemSummary
+import com.example.data.repository.SellerDetailItem
 import com.example.i18n.AppStrings
-import com.example.ui.components.RevenueProfitBarChart
-import com.example.ui.theme.*
+import com.example.ui.components.*
+import com.example.ui.theme.LocalLapakColors
 import com.example.ui.viewmodel.AppScreen
 import com.example.ui.viewmodel.LapakViewModel
 
@@ -32,12 +38,34 @@ fun DashboardScreen(
     viewModel: LapakViewModel,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val lapakColors = LocalLapakColors.current
     val lang by viewModel.currentLanguage.collectAsState()
     val shopProfile by viewModel.shopProfile.collectAsState()
     val summary by viewModel.dashboardSummary.collectAsState()
     val currentTimeframe by viewModel.timeframe.collectAsState()
+    val sellers by viewModel.rawSellers.collectAsState()
+    val sellersWithStats by viewModel.sellersWithStats.collectAsState()
+    val productsWithDetails by viewModel.productsWithDetails.collectAsState()
+    val payoutReceiptState by viewModel.lastSellerPaymentReceipt.collectAsState()
+    val isSyncing by viewModel.isSyncingCloud.collectAsState()
+
+    var showQuickDepositDialog by remember { mutableStateOf(false) }
+    var showQuickPayoutPicker by remember { mutableStateOf(false) }
+    var paymentTargetSeller by remember { mutableStateOf<SellerDetailItem?>(null) }
+    var soldItemsForPayment by remember { mutableStateOf<List<SoldItemSummary>>(emptyList()) }
+
+    LaunchedEffect(paymentTargetSeller) {
+        val target = paymentTargetSeller
+        soldItemsForPayment = if (target != null) {
+            viewModel.getSoldItemsSummary(target.seller.id)
+        } else {
+            emptyList()
+        }
+    }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = {
@@ -45,28 +73,44 @@ fun DashboardScreen(
                         Text(
                             text = shopProfile.shopName,
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = EmeraldPrimary
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Text(
-                            text = AppStrings.get("tagline", lang),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = AppStrings.get("tagline", lang),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (isSyncing) {
+                                Spacer(Modifier.width(6.dp))
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(11.dp),
+                                    strokeWidth = 1.5.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.navigateTo(AppScreen.SETTINGS) }) {
+                    IconButton(
+                        onClick = { viewModel.navigateTo(AppScreen.SETTINGS) },
+                        modifier = Modifier.testTag("dashboard_settings_button")
+                    ) {
                         Icon(
                             Icons.Default.Settings,
                             contentDescription = "Pengaturan",
-                            tint = EmeraldPrimary
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = EmeraldContainer,
-                    titleContentColor = EmeraldPrimary
+                    containerColor = MaterialTheme.colorScheme.background
                 )
             )
         },
@@ -77,7 +121,7 @@ fun DashboardScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // Timeframe Filter Chips
             item {
@@ -90,10 +134,10 @@ fun DashboardScreen(
 
             if (com.example.config.AppConfig.IS_TRIAL) {
                 item {
-                    val context = androidx.compose.ui.platform.LocalContext.current
                     val trialManager = remember { com.example.config.TrialManager(context) }
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = AmberContainer),
+                    Surface(
+                        color = lapakColors.warningBg,
+                        border = BorderStroke(1.dp, lapakColors.warningBorder),
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -101,20 +145,20 @@ fun DashboardScreen(
                             modifier = Modifier.padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Timer, contentDescription = null, tint = OnAmberContainer)
+                            Icon(Icons.Default.Timer, contentDescription = null, tint = lapakColors.warningText)
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 text = "Versi Uji Coba: Sisa waktu ${trialManager.getRemainingMinutes()} menit",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Bold,
-                                color = OnAmberContainer
+                                color = lapakColors.warningText
                             )
                         }
                     }
                 }
             }
 
-            // Key Financial Metrics Grid
+            // 4 Soft Pastel Financial Summary Cards
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
@@ -126,8 +170,9 @@ fun DashboardScreen(
                             value = LapakViewModel.formatRupiah(summary.totalOmzet),
                             subtitle = "${summary.totalItemsSold} ${AppStrings.get("dash_items_sold", lang)}",
                             icon = Icons.Default.Payments,
-                            containerColor = EmeraldContainer,
-                            contentColor = EmeraldDark,
+                            containerColor = lapakColors.omzetCardBg,
+                            borderColor = lapakColors.omzetCardBorder,
+                            contentColor = lapakColors.omzetCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                         MetricCard(
@@ -135,8 +180,9 @@ fun DashboardScreen(
                             value = LapakViewModel.formatRupiah(summary.netAdminProfit),
                             subtitle = "Kotor: ${LapakViewModel.formatRupiah(summary.grossAdminProfit)}",
                             icon = Icons.Default.TrendingUp,
-                            containerColor = TealContainer,
-                            contentColor = TealSecondary,
+                            containerColor = lapakColors.profitCardBg,
+                            borderColor = lapakColors.profitCardBorder,
+                            contentColor = lapakColors.profitCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -150,74 +196,112 @@ fun DashboardScreen(
                             value = LapakViewModel.formatRupiah(summary.totalSellerShare),
                             subtitle = "Hak barang terjual",
                             icon = Icons.Default.Storefront,
-                            containerColor = AmberContainer,
-                            contentColor = AmberTertiary,
+                            containerColor = lapakColors.payoutCardBg,
+                            borderColor = lapakColors.payoutCardBorder,
+                            contentColor = lapakColors.payoutCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                         MetricCard(
                             title = AppStrings.get("dash_operating_expenses", lang),
                             value = LapakViewModel.formatRupiah(summary.operatingExpenses),
-                            subtitle = "Biaya operasional",
+                            subtitle = "Biaya lapak",
                             icon = Icons.Default.ReceiptLong,
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            containerColor = lapakColors.expenseCardBg,
+                            borderColor = lapakColors.expenseCardBorder,
+                            contentColor = lapakColors.expenseCardAccent,
                             modifier = Modifier.weight(1f)
                         )
-                    }
-
-                    // Formula Info Banner
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.Info, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "Laba Bersih = (Omzet - Hak Penyetor) - Biaya Operasional",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
                     }
                 }
             }
 
-            // Quick Operational Health Bar
+            // Operational Seller Count Summary Bar
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, lapakColors.cardBorder),
                     shape = RoundedCornerShape(16.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(14.dp),
+                            .padding(vertical = 14.dp, horizontal = 12.dp),
                         horizontalArrangement = Arrangement.SpaceAround
                     ) {
                         QuickHealthItem(
                             label = AppStrings.get("dash_active_sellers", lang),
                             value = "${summary.activeSellersCount}",
                             icon = Icons.Default.CheckCircle,
-                            iconColor = EmeraldPrimary
+                            iconColor = MaterialTheme.colorScheme.primary
                         )
                         QuickHealthItem(
                             label = AppStrings.get("dash_leave_sellers", lang),
                             value = "${summary.leaveSellersCount}",
                             icon = Icons.Default.EventBusy,
-                            iconColor = AmberTertiary
+                            iconColor = lapakColors.payoutCardAccent
                         )
                         QuickHealthItem(
                             label = AppStrings.get("dash_available_stock", lang),
                             value = "${summary.availableStockCount}",
                             icon = Icons.Default.Inventory2,
-                            iconColor = TealSecondary
+                            iconColor = lapakColors.profitCardAccent
+                        )
+                    }
+                }
+            }
+
+            // 2 Quick Action Buttons directly below Seller Count Summary
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = { showQuickDepositDialog = true },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 50.dp)
+                            .testTag("dashboard_quick_deposit_button")
+                    ) {
+                        Icon(Icons.Default.AddBox, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "+ Terima Titipan",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
+
+                    FilledTonalButton(
+                        onClick = { showQuickPayoutPicker = true },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = lapakColors.payoutCardBg,
+                            contentColor = lapakColors.payoutCardAccent
+                        ),
+                        border = BorderStroke(1.dp, lapakColors.payoutCardBorder),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 50.dp)
+                            .testTag("dashboard_quick_payout_button")
+                    ) {
+                        Icon(Icons.Default.Payments, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Bayar Setoran",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                     }
                 }
@@ -227,32 +311,39 @@ fun DashboardScreen(
             if (summary.totalUnpaidSellerPayables > 0) {
                 item {
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = AmberContainer),
+                        colors = CardDefaults.cardColors(containerColor = lapakColors.warningBg),
+                        border = BorderStroke(1.dp, lapakColors.warningBorder),
                         shape = RoundedCornerShape(14.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { viewModel.navigateTo(AppScreen.SELLERS) }
+                            .clickable { showQuickPayoutPicker = true }
                     ) {
                         Row(
                             modifier = Modifier.padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Warning, contentDescription = null, tint = AmberTertiary, modifier = Modifier.size(24.dp))
+                            Icon(
+                                Icons.Default.AccountBalanceWallet,
+                                contentDescription = null,
+                                tint = lapakColors.warningText,
+                                modifier = Modifier.size(22.dp)
+                            )
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = AppStrings.get("dash_unpaid_rights", lang),
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = OnAmberContainer
+                                    color = lapakColors.warningText
                                 )
                                 Text(
-                                    text = "Total hak penyetor yang belum diselesaikan: ${LapakViewModel.formatRupiah(summary.totalUnpaidSellerPayables)}",
+                                    text = "Total yang belum dibayarkan: ${LapakViewModel.formatRupiah(summary.totalUnpaidSellerPayables)}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = OnAmberContainer
+                                    color = lapakColors.warningText.copy(alpha = 0.9f)
                                 )
                             }
-                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = AmberTertiary)
+                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = lapakColors.warningText)
                         }
                     }
                 }
@@ -269,15 +360,17 @@ fun DashboardScreen(
                     Text(
                         text = AppStrings.get("dash_top_products", lang),
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground
                     )
                 }
 
                 items(summary.topSellingProducts) { top ->
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        shape = RoundedCornerShape(12.dp),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                        border = BorderStroke(1.dp, lapakColors.cardBorder),
+                        shape = RoundedCornerShape(14.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -291,24 +384,26 @@ fun DashboardScreen(
                                 Text(
                                     text = top.productName,
                                     style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    text = "Penyetor: ${top.sellerName}",
+                                    text = top.sellerName,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = EmeraldPrimary
+                                    color = MaterialTheme.colorScheme.primary
                                 )
                             }
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
                                     text = "${top.soldQty} terjual",
                                     style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    text = "Laba: ${LapakViewModel.formatRupiah(top.adminProfit)}",
+                                    text = "Untung: ${LapakViewModel.formatRupiah(top.adminProfit)}",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = TealSecondary,
+                                    color = lapakColors.profitCardAccent,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -324,14 +419,17 @@ fun DashboardScreen(
                         text = AppStrings.get("dash_low_stock", lang),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = AmberTertiary
+                        color = lapakColors.stockLowText
                     )
                 }
 
                 items(summary.lowStockProducts) { low ->
+                    val isZero = low.currentStock == 0
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = AmberContainer.copy(alpha = 0.5f)),
-                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, if (isZero) lapakColors.cardBorder else lapakColors.warningBorder),
+                        shape = RoundedCornerShape(14.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -341,26 +439,30 @@ fun DashboardScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                 Text(
                                     text = low.product.name,
                                     style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    text = "Penyetor: ${low.sellerName}",
+                                    text = low.sellerName,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Box(
                                 modifier = Modifier
-                                    .background(AmberTertiary, RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .background(
+                                        if (isZero) lapakColors.stockEmptyBg else lapakColors.stockLowBg,
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
                             ) {
                                 Text(
-                                    text = "Sisa ${low.currentStock} ${low.product.unit}",
-                                    color = Color.White,
+                                    text = if (isZero) "Habis" else "Sisa ${low.currentStock} ${low.product.unit}",
+                                    color = if (isZero) lapakColors.stockEmptyText else lapakColors.stockLowText,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -371,9 +473,98 @@ fun DashboardScreen(
             }
 
             item {
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(20.dp))
             }
         }
+    }
+
+    // Quick Deposit Popup ("+ Terima Titipan")
+    if (showQuickDepositDialog) {
+        QuickDepositDialog(
+            sellers = sellers,
+            productsWithDetails = productsWithDetails,
+            onConfirm = { sId, pId, qty, unit, sp, ss, note ->
+                viewModel.depositStock(
+                    sellerId = sId,
+                    productId = pId,
+                    quantity = qty,
+                    unit = unit,
+                    sellingPrice = sp,
+                    sellerShare = ss,
+                    notes = note,
+                    onSuccess = {
+                        showQuickDepositDialog = false
+                        Toast.makeText(context, "Titipan +$qty $unit berhasil ditambahkan!", Toast.LENGTH_SHORT).show()
+                    },
+                    onError = { err ->
+                        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                    }
+                )
+            },
+            onDismiss = { showQuickDepositDialog = false }
+        )
+    }
+
+    // Quick Payout Seller Picker ("Bayar Setoran")
+    if (showQuickPayoutPicker) {
+        QuickPayoutPickerDialog(
+            sellersWithStats = sellersWithStats,
+            onSelectSeller = { detail ->
+                showQuickPayoutPicker = false
+                paymentTargetSeller = detail
+            },
+            onDismiss = { showQuickPayoutPicker = false }
+        )
+    }
+
+    // Payout Settlement Dialog
+    paymentTargetSeller?.let { sellerDetail ->
+        SellerPaymentDialog(
+            sellerDetail = sellerDetail,
+            lang = lang,
+            soldItems = soldItemsForPayment,
+            onConfirm = { amount, notes, method ->
+                viewModel.recordSellerPayment(
+                    sellerId = sellerDetail.seller.id,
+                    amount = amount,
+                    notes = notes,
+                    method = method
+                ) {
+                    paymentTargetSeller = null
+                    Toast.makeText(
+                        context,
+                        "Setoran ${LapakViewModel.formatRupiah(amount)} berhasil dicatat!",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            },
+            onDismiss = { paymentTargetSeller = null }
+        )
+    }
+
+    // Payout Receipt Dialog
+    payoutReceiptState?.let { state ->
+        SellerPaymentReceiptDialog(
+            payment = state.payment,
+            seller = state.seller,
+            remainingBalance = state.remainingBalance,
+            shopProfile = shopProfile,
+            lang = lang,
+            soldItems = state.soldItems,
+            onPrint = {
+                viewModel.printSellerPayoutReceipt(
+                    context = context,
+                    payment = state.payment,
+                    seller = state.seller,
+                    remainingBalance = state.remainingBalance,
+                    soldItems = state.soldItems
+                )
+            },
+            onShareWhatsApp = { text -> viewModel.shareTextToWhatsApp(context, text, state.seller.whatsappNumber) },
+            onShareGeneral = { text -> viewModel.shareTextGeneral(context, text) },
+            onCopy = { text -> viewModel.copyToClipboard(context, text) },
+            onDismiss = { viewModel.clearSellerPaymentReceipt() }
+        )
     }
 }
 
@@ -398,10 +589,10 @@ fun TimeframeSelector(
             FilterChip(
                 selected = current == key,
                 onClick = { onSelect(key) },
-                label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+                label = { Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) },
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = EmeraldPrimary,
-                    selectedLabelColor = Color.White
+                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary
                 )
             )
         }
@@ -415,12 +606,15 @@ fun MetricCard(
     subtitle: String,
     icon: ImageVector,
     containerColor: Color,
+    borderColor: Color,
     contentColor: Color,
     modifier: Modifier = Modifier
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = containerColor),
+        border = BorderStroke(1.dp, borderColor),
         shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = modifier
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -432,13 +626,16 @@ fun MetricCard(
                 Text(
                     text = title,
                     style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = contentColor
+                    fontWeight = FontWeight.SemiBold,
+                    color = contentColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
                 Box(
                     modifier = Modifier
                         .size(28.dp)
-                        .background(contentColor.copy(alpha = 0.15f), CircleShape),
+                        .background(contentColor.copy(alpha = 0.14f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(icon, contentDescription = null, tint = contentColor, modifier = Modifier.size(16.dp))
@@ -448,14 +645,18 @@ fun MetricCard(
             Text(
                 text = value,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = contentColor
+                fontWeight = FontWeight.ExtraBold,
+                color = contentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.height(2.dp))
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
-                color = contentColor.copy(alpha = 0.8f)
+                color = contentColor.copy(alpha = 0.8f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -475,7 +676,8 @@ fun QuickHealthItem(
             Text(
                 text = value,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.ExtraBold,
+                color = MaterialTheme.colorScheme.onSurface
             )
         }
         Text(

@@ -1,9 +1,11 @@
 package com.example.data.model
 
 import androidx.room.Entity
-import androidx.room.PrimaryKey
 import androidx.room.ForeignKey
 import androidx.room.Index
+import androidx.room.PrimaryKey
+import java.security.SecureRandom
+import kotlin.math.roundToLong
 
 enum class SellerStatus {
     AKTIF,
@@ -17,6 +19,103 @@ enum class StockMovementType {
     PENJUALAN,
     PENGEMBALIAN,
     KOREKSI
+}
+
+object AdminFeeType {
+    const val FIXED = "FIXED"
+    const val PERCENTAGE = "PERCENTAGE"
+}
+
+object ThemeMode {
+    const val SYSTEM = "SYSTEM"
+    const val LIGHT = "LIGHT"
+    const val DARK = "DARK"
+}
+
+const val DEFAULT_WEB_PORTAL_BASE_URL =
+    "https://ais-pre-sr326hryvojgfrxhcnjkpk-79309788941.asia-northeast1.run.app"
+
+data class AdminFeeBreakdown(
+    val sellingPrice: Double,
+    val adminFee: Double,
+    val sellerShare: Double
+)
+
+object AdminFeeCalculator {
+    fun resolveEffectiveFee(seller: Seller?, settings: AppSettings): Pair<String, Double> {
+        val type = seller?.customAdminFeeType?.takeIf {
+            it == AdminFeeType.FIXED || it == AdminFeeType.PERCENTAGE
+        } ?: settings.adminFeeType.takeIf {
+            it == AdminFeeType.FIXED || it == AdminFeeType.PERCENTAGE
+        } ?: AdminFeeType.FIXED
+
+        val rawValue = if (seller?.customAdminFeeType != null && seller.customAdminFeeValue != null) {
+            seller.customAdminFeeValue
+        } else {
+            settings.adminFeeValue
+        }
+
+        val clampedValue = when (type) {
+            AdminFeeType.PERCENTAGE -> rawValue.coerceIn(0.0, 100.0)
+            else -> rawValue.coerceIn(0.0, 10_000_000.0)
+        }
+        return type to clampedValue
+    }
+
+    fun calculate(sellingPrice: Double, feeType: String, feeValue: Double): AdminFeeBreakdown {
+        val safePrice = sellingPrice.coerceAtLeast(0.0)
+        val fee = when (feeType) {
+            AdminFeeType.PERCENTAGE -> {
+                val pct = feeValue.coerceIn(0.0, 100.0)
+                ((safePrice * pct) / 100.0).roundToLong().toDouble()
+            }
+            else -> feeValue.coerceAtLeast(0.0)
+        }.coerceAtMost(safePrice)
+
+        val sellerShare = (safePrice - fee).coerceAtLeast(0.0)
+        return AdminFeeBreakdown(
+            sellingPrice = safePrice,
+            adminFee = fee,
+            sellerShare = sellerShare
+        )
+    }
+
+    fun formatTariffLabel(feeType: String, feeValue: Double): String {
+        return if (feeType == AdminFeeType.PERCENTAGE) {
+            val formatted = if (feeValue % 1.0 == 0.0) feeValue.toInt().toString() else "%.1f".format(feeValue)
+            "$formatted% dari harga jual"
+        } else {
+            "Rp ${"%,d".format(feeValue.toLong()).replace(',', '.')} / item"
+        }
+    }
+}
+
+object VendorCodeGenerator {
+    private val random = SecureRandom()
+    private val codeChars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    private val tokenChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    private val validCodeRegex = Regex("^LPK-[A-Z0-9]{6}$")
+    private val validTokenRegex = Regex("^[a-zA-Z0-9_\\-]{12,64}$")
+
+    fun generateVendorCode(): String {
+        val suffix = buildString {
+            repeat(6) {
+                append(codeChars[random.nextInt(codeChars.length)])
+            }
+        }
+        return "LPK-$suffix"
+    }
+
+    fun generateWriteToken(): String {
+        return buildString {
+            repeat(24) {
+                append(tokenChars[random.nextInt(tokenChars.length)])
+            }
+        }
+    }
+
+    fun isValidVendorCode(code: String): Boolean = validCodeRegex.matches(code)
+    fun isValidWriteToken(token: String): Boolean = validTokenRegex.matches(token)
 }
 
 @Entity(tableName = "shop_profiles")
@@ -41,7 +140,11 @@ data class Seller(
     val leaveStartDate: Long? = null,
     val leaveEndDate: Long? = null,
     val leaveReason: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val vendorCode: String = "",
+    val writeToken: String = "",
+    val customAdminFeeType: String? = null, // null = follow global setting, else FIXED / PERCENTAGE
+    val customAdminFeeValue: Double? = null
 )
 
 @Entity(
@@ -232,11 +335,14 @@ data class SellerStatusHistory(
 @Entity(tableName = "app_settings")
 data class AppSettings(
     @PrimaryKey val id: Int = 1,
-    val themeMode: String = "LIGHT", // LIGHT, DARK
+    val themeMode: String = ThemeMode.SYSTEM, // SYSTEM, LIGHT, DARK
     val language: String = "id", // id, en
     val isGoogleDriveConnected: Boolean = false,
     val lastBackupDate: Long? = null,
-    val driveAccountEmail: String? = null
+    val driveAccountEmail: String? = null,
+    val adminFeeType: String = AdminFeeType.FIXED, // FIXED, PERCENTAGE
+    val adminFeeValue: Double = 2000.0,
+    val webPortalBaseUrl: String = DEFAULT_WEB_PORTAL_BASE_URL
 )
 
 data class SoldItemSummary(

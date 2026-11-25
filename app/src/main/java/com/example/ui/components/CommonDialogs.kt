@@ -1232,27 +1232,45 @@ fun SellerPaymentDialog(
     )
 }
 
-// 7. TAMBAH MASTER PRODUK BARU
+// 7. TAMBAH MASTER PRODUK BARU (DENGAN KALKULASI OTOMATIS TARIF BIAYA ADMIN)
 @Composable
 fun AddProductDialog(
     sellers: List<Seller>,
     preselectedSellerId: Long?,
+    appSettings: AppSettings = AppSettings(),
     lang: String,
     onConfirm: (Long, String, String, String, Double, Double, Int) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val lapakColors = LocalLapakColors.current
     var selectedSellerId by remember { mutableStateOf(preselectedSellerId ?: sellers.firstOrNull()?.id ?: 0L) }
     var name by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("Makanan") }
     var unit by remember { mutableStateOf("pcs") }
     var sellingPriceText by remember { mutableStateOf("") }
     var sellerShareText by remember { mutableStateOf("") }
+    var isSellerShareManual by remember { mutableStateOf(false) }
     var initialStockText by remember { mutableStateOf("10") }
     var error by remember { mutableStateOf<String?>(null) }
 
+    val selectedSeller = sellers.firstOrNull { it.id == selectedSellerId }
+    val (activeFeeType, activeFeeValue) = remember(selectedSeller, appSettings) {
+        AdminFeeCalculator.resolveEffectiveFee(selectedSeller, appSettings)
+    }
+
     val sellingPrice = sellingPriceText.toDoubleOrNull() ?: 0.0
+    val autoBreakdown = remember(sellingPrice, activeFeeType, activeFeeValue) {
+        AdminFeeCalculator.calculate(sellingPrice, activeFeeType, activeFeeValue)
+    }
+
+    LaunchedEffect(sellingPrice, activeFeeType, activeFeeValue, isSellerShareManual) {
+        if (!isSellerShareManual) {
+            sellerShareText = if (sellingPrice > 0) autoBreakdown.sellerShare.toLong().toString() else ""
+        }
+    }
+
     val sellerShare = sellerShareText.toDoubleOrNull() ?: 0.0
-    val adminProfit = sellingPrice - sellerShare
+    val adminProfit = (sellingPrice - sellerShare).coerceAtLeast(0.0)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1264,22 +1282,44 @@ fun AddProductDialog(
                 // Seller Selector
                 Text("Pilih Penyetor:", style = MaterialTheme.typography.labelSmall)
                 var exp by remember { mutableStateOf(false) }
-                val currentSellerName = sellers.firstOrNull { it.id == selectedSellerId }?.name ?: "Pilih Penyetor"
+                val currentSellerName = selectedSeller?.name ?: "Pilih Penyetor"
 
                 Box(modifier = Modifier.fillMaxWidth()) {
                     OutlinedButton(
                         onClick = { exp = true },
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(10.dp)
                     ) {
                         Text(currentSellerName, modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
                         Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                     }
                     DropdownMenu(expanded = exp, onDismissRequest = { exp = false }) {
                         sellers.forEach { s ->
-                            DropdownMenuItem(text = { Text(s.name) }, onClick = { selectedSellerId = s.id; exp = false })
+                            DropdownMenuItem(
+                                text = { Text(s.name) },
+                                onClick = {
+                                    selectedSellerId = s.id
+                                    isSellerShareManual = false
+                                    exp = false
+                                }
+                            )
                         }
                     }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = lapakColors.omzetCardBg,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Tarif Biaya Admin aktif: ${AdminFeeCalculator.formatTariffLabel(activeFeeType, activeFeeValue)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = lapakColors.omzetCardAccent,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -1289,7 +1329,8 @@ fun AddProductDialog(
                     onValueChange = { name = it },
                     label = { Text("Nama Produk") },
                     placeholder = { Text("Contoh: Risoles Rogout Sapi") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
 
                 Spacer(Modifier.height(8.dp))
@@ -1299,13 +1340,15 @@ fun AddProductDialog(
                         value = category,
                         onValueChange = { category = it },
                         label = { Text("Kategori") },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
                     )
                     OutlinedTextField(
                         value = unit,
                         onValueChange = { unit = it },
                         label = { Text("Satuan") },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
                     )
                 }
 
@@ -1315,26 +1358,64 @@ fun AddProductDialog(
                     value = sellingPriceText,
                     onValueChange = { sellingPriceText = it.filter { c -> c.isDigit() } },
                     label = { Text("Harga Jual ke Pembeli (Rp)") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
 
                 Spacer(Modifier.height(8.dp))
 
                 OutlinedTextField(
                     value = sellerShareText,
-                    onValueChange = { sellerShareText = it.filter { c -> c.isDigit() } },
+                    onValueChange = {
+                        sellerShareText = it.filter { c -> c.isDigit() }
+                        isSellerShareManual = true
+                    },
                     label = { Text("Hak Penyetor per Unit (Rp)") },
-                    modifier = Modifier.fillMaxWidth()
+                    supportingText = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(if (isSellerShareManual) "Diatur manual" else "Otomatis dari tarif admin")
+                            if (isSellerShareManual && sellingPrice > 0) {
+                                Text(
+                                    text = "Hitung Ulang",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.clickable { isSellerShareManual = false }
+                                )
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
 
                 if (sellingPrice > 0 || sellerShare > 0) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "Keuntungan Admin per unit: ${LapakViewModel.formatRupiah(adminProfit)}",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (adminProfit >= 0) EmeraldPrimary else MaterialTheme.colorScheme.error
-                    )
+                    Spacer(Modifier.height(6.dp))
+                    Surface(
+                        color = lapakColors.profitCardBg,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Laba Admin / Untung Lapak:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = LapakViewModel.formatRupiah(adminProfit),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (sellingPrice >= sellerShare) lapakColors.profitCardAccent else MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -1343,7 +1424,8 @@ fun AddProductDialog(
                     value = initialStockText,
                     onValueChange = { initialStockText = it.filter { c -> c.isDigit() } },
                     label = { Text("Jumlah Stok Awal Dititipkan") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
 
                 if (error != null) {
@@ -1361,14 +1443,14 @@ fun AddProductDialog(
                         error = "Nama produk tidak boleh kosong"
                     } else if (sellingPrice <= 0) {
                         error = "Harga jual harus lebih dari 0"
-                    } else if (sellerShare <= 0) {
-                        error = "Hak penyetor harus lebih dari 0"
+                    } else if (sellerShare < 0 || sellerShare > sellingPrice) {
+                        error = "Hak penyetor tidak valid (maksimal sebesar harga jual)"
                     } else {
                         val initStock = initialStockText.toIntOrNull() ?: 0
-                        onConfirm(selectedSellerId, name, category, unit, sellingPrice, sellerShare, initStock)
+                        onConfirm(selectedSellerId, name.trim(), category.trim().ifEmpty { "Makanan" }, unit.trim().ifEmpty { "pcs" }, sellingPrice, sellerShare, initStock)
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
                 Text("Simpan Produk")
             }
@@ -1672,10 +1754,11 @@ fun AddExpenseDialog(
     )
 }
 
-// 11. EDIT DATA PENYETOR
+// 11. EDIT DATA PENYETOR (TERMASUK TARIF KHUSUS PENYETOR)
 @Composable
 fun EditSellerDialog(
     seller: Seller,
+    appSettings: AppSettings = AppSettings(),
     lang: String,
     onConfirm: (Seller) -> Unit,
     onDismiss: () -> Unit
@@ -1684,12 +1767,21 @@ fun EditSellerDialog(
     var wa by remember { mutableStateOf(seller.whatsappNumber) }
     var address by remember { mutableStateOf(seller.address) }
     var notes by remember { mutableStateOf(seller.notes) }
+    var useCustomFee by remember { mutableStateOf(seller.customAdminFeeType != null) }
+    var customFeeType by remember { mutableStateOf(seller.customAdminFeeType ?: appSettings.adminFeeType) }
+    var customFeeValueText by remember {
+        mutableStateOf(
+            (seller.customAdminFeeValue ?: appSettings.adminFeeValue).let {
+                if (it % 1.0 == 0.0) it.toLong().toString() else it.toString()
+            }
+        )
+    }
     var error by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text("Edit Data Penyetor", fontWeight = FontWeight.Bold, color = EmeraldPrimary)
+            Text("Edit Data Penyetor", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
         },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -1697,7 +1789,8 @@ fun EditSellerDialog(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("Nama Penyetor / Penjual *") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
@@ -1705,22 +1798,74 @@ fun EditSellerDialog(
                     onValueChange = { wa = it.filter { c -> c.isDigit() || c == '+' } },
                     label = { Text("Nomor WhatsApp *") },
                     placeholder = { Text("08123456789") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = address,
                     onValueChange = { address = it },
                     label = { Text("Alamat (Opsional)") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = notes,
                     onValueChange = { notes = it },
                     label = { Text("Catatan Tambahan (Opsional)") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
+
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Tarif Biaya Admin Khusus", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (useCustomFee) "Menggunakan tarif khusus untuk penyetor ini"
+                            else "Ikuti tarif global (${AdminFeeCalculator.formatTariffLabel(appSettings.adminFeeType, appSettings.adminFeeValue)})",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(checked = useCustomFee, onCheckedChange = { useCustomFee = it })
+                }
+
+                if (useCustomFee) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = customFeeType == AdminFeeType.FIXED,
+                            onClick = { customFeeType = AdminFeeType.FIXED },
+                            label = { Text("Nominal (Rp)") }
+                        )
+                        FilterChip(
+                            selected = customFeeType == AdminFeeType.PERCENTAGE,
+                            onClick = { customFeeType = AdminFeeType.PERCENTAGE },
+                            label = { Text("Persen (%)") }
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = customFeeValueText,
+                        onValueChange = { customFeeValueText = it.filter { c -> c.isDigit() || c == '.' } },
+                        label = {
+                            Text(if (customFeeType == AdminFeeType.PERCENTAGE) "Persentase Komisi (%)" else "Potongan per Item (Rp)")
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                }
+
                 if (error != null) {
                     Spacer(Modifier.height(6.dp))
                     Text(error!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
@@ -1730,22 +1875,27 @@ fun EditSellerDialog(
         confirmButton = {
             Button(
                 onClick = {
+                    val parsedFee = customFeeValueText.toDoubleOrNull()
                     if (name.isBlank()) {
                         error = "Nama penyetor tidak boleh kosong"
                     } else if (wa.isBlank()) {
                         error = "Nomor WhatsApp wajib diisi"
+                    } else if (useCustomFee && (parsedFee == null || parsedFee < 0 || (customFeeType == AdminFeeType.PERCENTAGE && parsedFee > 100))) {
+                        error = "Masukkan tarif biaya admin yang valid"
                     } else {
                         onConfirm(
                             seller.copy(
                                 name = name.trim(),
                                 whatsappNumber = wa.trim(),
                                 address = address.trim(),
-                                notes = notes.trim()
+                                notes = notes.trim(),
+                                customAdminFeeType = if (useCustomFee) customFeeType else null,
+                                customAdminFeeValue = if (useCustomFee) parsedFee else null
                             )
                         )
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
                 Text("Simpan Perubahan")
             }
@@ -1758,20 +1908,28 @@ fun EditSellerDialog(
     )
 }
 
-// 12. EDIT DATA PRODUK
+// 12. EDIT DATA PRODUK (DENGAN OPSI HITUNG OTOMATIS TARIF ADMIN)
 @Composable
 fun EditProductDialog(
     product: Product,
+    seller: Seller? = null,
+    appSettings: AppSettings = AppSettings(),
     lang: String,
     onConfirm: (Product) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val lapakColors = LocalLapakColors.current
     var name by remember { mutableStateOf(product.name) }
     var category by remember { mutableStateOf(product.category) }
     var unit by remember { mutableStateOf(product.unit) }
     var sellingPriceText by remember { mutableStateOf(product.sellingPrice.toLong().toString()) }
     var sellerShareText by remember { mutableStateOf(product.sellerShare.toLong().toString()) }
+    var autoRecalcOnPriceChange by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    val (activeFeeType, activeFeeValue) = remember(seller, appSettings) {
+        AdminFeeCalculator.resolveEffectiveFee(seller, appSettings)
+    }
 
     val sellingPrice = sellingPriceText.toDoubleOrNull() ?: 0.0
     val sellerShare = sellerShareText.toDoubleOrNull() ?: 0.0
@@ -1780,7 +1938,7 @@ fun EditProductDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text("Edit Data Produk", fontWeight = FontWeight.Bold, color = EmeraldPrimary)
+            Text("Edit Data Produk", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
         },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -1788,47 +1946,82 @@ fun EditProductDialog(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("Nama Produk / Menu *") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = category,
-                    onValueChange = { category = it },
-                    label = { Text("Kategori (Makanan, Minuman, Snack, dll)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = unit,
-                    onValueChange = { unit = it },
-                    label = { Text("Satuan (Pcs, Bungkus, Porsi, Cup, dll)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = category,
+                        onValueChange = { category = it },
+                        label = { Text("Kategori") },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                    OutlinedTextField(
+                        value = unit,
+                        onValueChange = { unit = it },
+                        label = { Text("Satuan") },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = sellingPriceText,
-                    onValueChange = { sellingPriceText = it.filter { c -> c.isDigit() } },
+                    onValueChange = { newText ->
+                        val digits = newText.filter { c -> c.isDigit() }
+                        sellingPriceText = digits
+                        if (autoRecalcOnPriceChange) {
+                            val sp = digits.toDoubleOrNull() ?: 0.0
+                            val calc = AdminFeeCalculator.calculate(sp, activeFeeType, activeFeeValue)
+                            sellerShareText = if (sp > 0) calc.sellerShare.toLong().toString() else ""
+                        }
+                    },
                     label = { Text("Harga Jual Konsumen (Rp) *") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = sellerShareText,
-                    onValueChange = { sellerShareText = it.filter { c -> c.isDigit() } },
+                    onValueChange = {
+                        sellerShareText = it.filter { c -> c.isDigit() }
+                        autoRecalcOnPriceChange = false
+                    },
                     label = { Text("Hak / Harga Bersih Penyetor (Rp) *") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
                 )
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = {
+                        autoRecalcOnPriceChange = true
+                        val calc = AdminFeeCalculator.calculate(sellingPrice, activeFeeType, activeFeeValue)
+                        sellerShareText = calc.sellerShare.toLong().toString()
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Calculate, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Hitung Otomatis (${AdminFeeCalculator.formatTariffLabel(activeFeeType, activeFeeValue)})",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = EmeraldContainer),
+                Surface(
+                    color = lapakColors.profitCardBg,
+                    shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(10.dp)) {
                         Text(
-                            text = "Estimasi Laba Lapak / Unit: ${LapakViewModel.formatRupiah(adminProfit)}",
+                            text = "Untung Lapak / Unit: ${LapakViewModel.formatRupiah(adminProfit)}",
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Bold,
-                            color = EmeraldDark
+                            color = lapakColors.profitCardAccent
                         )
                     }
                 }
@@ -1845,8 +2038,8 @@ fun EditProductDialog(
                         error = "Nama produk tidak boleh kosong"
                     } else if (sellingPrice <= 0) {
                         error = "Harga jual harus lebih dari 0"
-                    } else if (sellerShare <= 0) {
-                        error = "Hak penyetor harus lebih dari 0"
+                    } else if (sellerShare < 0) {
+                        error = "Hak penyetor harus valid"
                     } else if (sellerShare > sellingPrice) {
                         error = "Hak penyetor tidak boleh lebih besar dari harga jual"
                     } else {
@@ -1854,7 +2047,7 @@ fun EditProductDialog(
                             product.copy(
                                 name = name.trim(),
                                 category = category.trim().ifEmpty { "Umum" },
-                                unit = unit.trim().ifEmpty { "Pcs" },
+                                unit = unit.trim().ifEmpty { "pcs" },
                                 sellingPrice = sellingPrice,
                                 sellerShare = sellerShare,
                                 adminProfitPerUnit = adminProfit
@@ -1862,7 +2055,7 @@ fun EditProductDialog(
                         )
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
                 Text("Simpan Perubahan")
             }

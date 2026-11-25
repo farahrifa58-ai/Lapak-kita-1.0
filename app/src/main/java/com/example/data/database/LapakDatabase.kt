@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.dao.LapakDao
 import com.example.data.model.*
@@ -26,7 +27,7 @@ import kotlinx.coroutines.launch
         SellerStatusHistory::class,
         AppSettings::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -38,6 +39,18 @@ abstract class LapakDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: LapakDatabase? = null
 
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sellers ADD COLUMN vendorCode TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE sellers ADD COLUMN writeToken TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE sellers ADD COLUMN customAdminFeeType TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE sellers ADD COLUMN customAdminFeeValue REAL DEFAULT NULL")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN adminFeeType TEXT NOT NULL DEFAULT 'FIXED'")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN adminFeeValue REAL NOT NULL DEFAULT 2000.0")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN webPortalBaseUrl TEXT NOT NULL DEFAULT '$DEFAULT_WEB_PORTAL_BASE_URL'")
+            }
+        }
+
         fun getDatabase(context: Context, scope: CoroutineScope): LapakDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -45,6 +58,7 @@ abstract class LapakDatabase : RoomDatabase() {
                     LapakDatabase::class.java,
                     "lapak_kita_database"
                 )
+                    .addMigrations(MIGRATION_1_2)
                     .addCallback(LapakDatabaseCallback(scope))
                     .fallbackToDestructiveMigration()
                     .build()
@@ -83,8 +97,11 @@ abstract class LapakDatabase : RoomDatabase() {
             dao.insertOrUpdateAppSettings(
                 AppSettings(
                     id = 1,
-                    themeMode = "LIGHT",
-                    language = "id"
+                    themeMode = ThemeMode.SYSTEM,
+                    language = "id",
+                    adminFeeType = AdminFeeType.FIXED,
+                    adminFeeValue = 2000.0,
+                    webPortalBaseUrl = DEFAULT_WEB_PORTAL_BASE_URL
                 )
             )
 
@@ -95,7 +112,9 @@ abstract class LapakDatabase : RoomDatabase() {
                     whatsappNumber = "081298765432",
                     address = "Komp. Flamboyan Blok C-3",
                     notes = "Spesialis burger & jajan pasar",
-                    status = SellerStatus.AKTIF
+                    status = SellerStatus.AKTIF,
+                    vendorCode = VendorCodeGenerator.generateVendorCode(),
+                    writeToken = VendorCodeGenerator.generateWriteToken()
                 )
             )
 
@@ -106,7 +125,9 @@ abstract class LapakDatabase : RoomDatabase() {
                     whatsappNumber = "081311223344",
                     address = "Jl. Melati No. 15",
                     notes = "Spesialis brownies kukus & kue lezat",
-                    status = SellerStatus.AKTIF
+                    status = SellerStatus.AKTIF,
+                    vendorCode = VendorCodeGenerator.generateVendorCode(),
+                    writeToken = VendorCodeGenerator.generateWriteToken()
                 )
             )
 
@@ -118,8 +139,8 @@ abstract class LapakDatabase : RoomDatabase() {
                     category = "Makanan",
                     unit = "pcs",
                     sellingPrice = 15000.0,
-                    sellerShare = 12000.0,
-                    adminProfitPerUnit = 3000.0
+                    sellerShare = 13000.0,
+                    adminProfitPerUnit = 2000.0
                 )
             )
 
@@ -145,7 +166,7 @@ abstract class LapakDatabase : RoomDatabase() {
                     currentQty = 15,
                     unit = "pcs",
                     sellingPrice = 15000.0,
-                    sellerShare = 12000.0,
+                    sellerShare = 13000.0,
                     notes = "Setoran pagi jam 06.00"
                 )
             )

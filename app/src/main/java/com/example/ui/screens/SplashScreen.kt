@@ -15,31 +15,31 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
-import com.example.ui.theme.EmeraldDark
-import com.example.ui.theme.EmeraldPrimary
+import com.example.ui.theme.LocalLapakColors
 import kotlinx.coroutines.delay
 
 @Composable
 fun SplashScreen(
     onTimeout: () -> Unit
 ) {
+    val lapakColors = LocalLapakColors.current
+
     LaunchedEffect(Unit) {
-        delay(2000)
+        delay(1200)
         onTimeout()
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val scale by infiniteTransition.animateFloat(
-        initialValue = 0.96f,
-        targetValue = 1.04f,
+        initialValue = 0.97f,
+        targetValue = 1.03f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = FastOutSlowInEasing),
+            animation = tween(1100, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "scale"
@@ -51,14 +51,13 @@ fun SplashScreen(
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF0F4724), // Hijau tua elegan
-                        Color(0xFF1E703A), // Hijau lapak
-                        Color(0xFFDFF0E4), // Hijau muda lembut
-                        Color(0xFFFFFFFF), // Putih bersih
-                        Color(0xFFFFFFFF)
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f),
+                        MaterialTheme.colorScheme.background,
+                        MaterialTheme.colorScheme.background
                     )
                 )
-            ),
+            )
+            .windowInsetsPadding(WindowInsets.systemBars),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -68,86 +67,76 @@ fun SplashScreen(
                 .padding(24.dp)
                 .scale(scale)
         ) {
-            // Logo Container
             Box(
                 modifier = Modifier
-                    .size(130.dp)
-                    .shadow(16.dp, CircleShape)
+                    .size(124.dp)
+                    .shadow(10.dp, CircleShape)
                     .clip(CircleShape)
-                    .background(Color.White)
-                    .border(3.dp, EmeraldPrimary, CircleShape),
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(2.5.dp, MaterialTheme.colorScheme.primary, CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Image(
                     painter = painterResource(id = R.drawable.ic_lapak_logo),
                     contentDescription = "Logo Lapak Kita",
                     modifier = Modifier
-                        .size(116.dp)
+                        .size(110.dp)
                         .clip(CircleShape)
                 )
             }
 
             Spacer(Modifier.height(20.dp))
 
-            // App Name
             Text(
                 text = "Lapak Kita",
-                fontSize = 32.sp,
+                fontSize = 30.sp,
                 fontWeight = FontWeight.ExtraBold,
-                color = EmeraldDark,
-                letterSpacing = 1.sp
+                color = MaterialTheme.colorScheme.onBackground,
+                letterSpacing = 0.5.sp
             )
 
             Spacer(Modifier.height(4.dp))
 
-            // Tagline
             Text(
-                text = "Manajemen Lapak Titipan & Kasir",
+                text = "Manajemen Lapak Titipan & Web Penyetor",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
-                color = Color(0xFF2C5E3B)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(Modifier.height(14.dp))
 
-            // Developer Badge: "by Rafline Dev"
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = EmeraldPrimary,
-                shadowElevation = 4.dp
+                color = lapakColors.omzetCardBg,
+                border = androidx.compose.foundation.BorderStroke(1.dp, lapakColors.omzetCardBorder)
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "by Rafline Dev",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp
-                    )
-                }
+                Text(
+                    text = "by Rafline Dev",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.4.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                )
             }
 
-            Spacer(Modifier.height(36.dp))
+            Spacer(Modifier.height(32.dp))
 
-            // Smooth loading indicator
             CircularProgressIndicator(
-                modifier = Modifier.size(28.dp),
-                color = EmeraldPrimary,
+                modifier = Modifier.size(26.dp),
+                color = MaterialTheme.colorScheme.primary,
                 strokeWidth = 3.dp
             )
         }
 
-        // Bottom version footer
         Text(
-            text = "Versi 1.0 • Sistem Internal Lapak",
+            text = "Versi 2.0 • Soft Emerald & Cloud Sync",
             fontSize = 11.sp,
-            color = Color(0xFF557760),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 28.dp)
+                .padding(bottom = 24.dp)
         )
     }
 }

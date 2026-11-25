@@ -100,7 +100,129 @@ class LapakRepository(private val dao: LapakDao) {
     val allSellers: Flow<List<Seller>> = dao.getAllSellersFlow()
 
     suspend fun addSeller(seller: Seller): Long = withContext(Dispatchers.IO) {
-        dao.insertSeller(seller)
+        val enriched = seller.copy(
+            vendorCode = seller.vendorCode.takeIf { VendorCodeGenerator.isValidVendorCode(it) }
+                ?: VendorCodeGenerator.generateVendorCode(),
+            writeToken = seller.writeToken.takeIf { VendorCodeGenerator.isValidWriteToken(it) }
+                ?: VendorCodeGenerator.generateWriteToken()
+        )
+        dao.insertSeller(enriched)
+    }
+
+    suspend fun ensureAllSellersHaveVendorCodes(): List<Seller> = withContext(Dispatchers.IO) {
+        val all = dao.getAllSellersDirect()
+        val updatedList = mutableListOf<Seller>()
+        for (s in all) {
+            if (!VendorCodeGenerator.isValidVendorCode(s.vendorCode) || !VendorCodeGenerator.isValidWriteToken(s.writeToken)) {
+                val fixed = s.copy(
+                    vendorCode = s.vendorCode.takeIf { VendorCodeGenerator.isValidVendorCode(it) }
+                        ?: VendorCodeGenerator.generateVendorCode(),
+                    writeToken = s.writeToken.takeIf { VendorCodeGenerator.isValidWriteToken(it) }
+                        ?: VendorCodeGenerator.generateWriteToken()
+                )
+                dao.updateSeller(fixed)
+                updatedList.add(fixed)
+            } else {
+                updatedList.add(s)
+            }
+        }
+        updatedList
+    }
+
+    suspend fun applyWebVendorSubmission(
+        submission: com.example.data.firebase.VendorSubmissionRemote
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val seller = dao.getSellerByVendorCode(submission.vendorCode)
+            ?: return@withContext Result.failure(Exception("Penyetor ${submission.vendorCode} tidak ditemukan"))
+        val settings = dao.getAppSettings() ?: AppSettings()
+        val (feeType, feeValue) = AdminFeeCalculator.resolveEffectiveFee(seller, settings)
+
+        var addedProductsCount = 0
+        var editedProductsCount = 0
+        var totalAddedStock = 0
+
+        // 1. Add new products from Web Penyetor
+        for (np in submission.newProducts) {
+            val calc = AdminFeeCalculator.calculate(np.sellingPrice, feeType, feeValue)
+            val newProdId = dao.insertProduct(
+                Product(
+                    sellerId = seller.id,
+                    name = np.name,
+                    category = np.category,
+                    unit = np.unit,
+                    sellingPrice = calc.sellingPrice,
+                    sellerShare = calc.sellerShare,
+                    adminProfitPerUnit = calc.adminFee
+                )
+            )
+            addedProductsCount++
+            if (np.initialStock > 0) {
+                val noteText = buildString {
+                    append("Kiriman via Web Penyetor")
+                    if (submission.note.isNotBlank()) append(" (${submission.note})")
+                }
+                depositStock(
+                    sellerId = seller.id,
+                    productId = newProdId,
+                    quantity = np.initialStock,
+                    unit = np.unit,
+                    sellingPrice = calc.sellingPrice,
+                    sellerShare = calc.sellerShare,
+                    notes = noteText
+                )
+                totalAddedStock += np.initialStock
+            }
+        }
+
+        // 2. Edit existing products belonging strictly to this seller
+        val existingSellerProducts = dao.getProductsBySellerDirect(seller.id).associateBy { it.id }
+        for (ep in submission.editedProducts) {
+            val existing = existingSellerProducts[ep.localProductId] ?: continue
+            val calc = AdminFeeCalculator.calculate(ep.sellingPrice, feeType, feeValue)
+            dao.updateProduct(
+                existing.copy(
+                    name = ep.name,
+                    category = ep.category,
+                    unit = ep.unit,
+                    sellingPrice = calc.sellingPrice,
+                    sellerShare = calc.sellerShare,
+                    adminProfitPerUnit = calc.adminFee
+                )
+            )
+            editedProductsCount++
+        }
+
+        // 3. Apply daily stock additions belonging strictly to this seller
+        val refreshedSellerProducts = dao.getProductsBySellerDirect(seller.id).associateBy { it.id }
+        for (sa in submission.stockAdditions) {
+            val prod = refreshedSellerProducts[sa.localProductId] ?: continue
+            if (sa.addedQty <= 0) continue
+            val noteText = buildString {
+                append("Kiriman via Web Penyetor")
+                if (submission.note.isNotBlank()) append(" (${submission.note})")
+            }
+            depositStock(
+                sellerId = seller.id,
+                productId = prod.id,
+                quantity = sa.addedQty,
+                unit = prod.unit,
+                sellingPrice = prod.sellingPrice,
+                sellerShare = prod.sellerShare,
+                notes = noteText
+            )
+            totalAddedStock += sa.addedQty
+        }
+
+        val summaryParts = mutableListOf<String>()
+        if (addedProductsCount > 0) summaryParts.add("$addedProductsCount produk baru")
+        if (editedProductsCount > 0) summaryParts.add("$editedProductsCount produk diperbarui")
+        if (totalAddedStock > 0) summaryParts.add("+$totalAddedStock stok masuk")
+        val summaryMsg = if (summaryParts.isEmpty()) {
+            "Update dari ${seller.name} diterima"
+        } else {
+            "Web Penyetor (${seller.name}): ${summaryParts.joinToString(", ")}"
+        }
+        Result.success(summaryMsg)
     }
 
     suspend fun updateSeller(seller: Seller) = withContext(Dispatchers.IO) {
@@ -641,9 +763,23 @@ data class FinancialData(
             o.put("leaveStartDate", s.leaveStartDate ?: JSONObject.NULL)
             o.put("leaveEndDate", s.leaveEndDate ?: JSONObject.NULL)
             o.put("leaveReason", s.leaveReason ?: JSONObject.NULL)
+            o.put("vendorCode", s.vendorCode)
+            o.put("writeToken", s.writeToken)
+            o.put("customAdminFeeType", s.customAdminFeeType ?: JSONObject.NULL)
+            o.put("customAdminFeeValue", s.customAdminFeeValue ?: JSONObject.NULL)
             sellersArr.put(o)
         }
         root.put("sellers", sellersArr)
+
+        // App Settings (Admin fee & theme)
+        val settings = dao.getAppSettings() ?: AppSettings()
+        val settingsObj = JSONObject()
+        settingsObj.put("themeMode", settings.themeMode)
+        settingsObj.put("language", settings.language)
+        settingsObj.put("adminFeeType", settings.adminFeeType)
+        settingsObj.put("adminFeeValue", settings.adminFeeValue)
+        settingsObj.put("webPortalBaseUrl", settings.webPortalBaseUrl)
+        root.put("appSettings", settingsObj)
 
         // Products
         val products = dao.getAllProductsDirect()
@@ -805,7 +941,27 @@ data class FinancialData(
                         status = SellerStatus.valueOf(o.optString("status", "AKTIF")),
                         leaveStartDate = if (o.isNull("leaveStartDate")) null else o.optLong("leaveStartDate"),
                         leaveEndDate = if (o.isNull("leaveEndDate")) null else o.optLong("leaveEndDate"),
-                        leaveReason = if (o.isNull("leaveReason")) null else o.optString("leaveReason")
+                        leaveReason = if (o.isNull("leaveReason")) null else o.optString("leaveReason"),
+                        vendorCode = o.optString("vendorCode", "").takeIf { VendorCodeGenerator.isValidVendorCode(it) }
+                            ?: VendorCodeGenerator.generateVendorCode(),
+                        writeToken = o.optString("writeToken", "").takeIf { VendorCodeGenerator.isValidWriteToken(it) }
+                            ?: VendorCodeGenerator.generateWriteToken(),
+                        customAdminFeeType = if (o.isNull("customAdminFeeType")) null else o.optString("customAdminFeeType"),
+                        customAdminFeeValue = if (o.isNull("customAdminFeeValue")) null else o.optDouble("customAdminFeeValue")
+                    )
+                )
+            }
+
+            if (root.has("appSettings")) {
+                val sObj = root.getJSONObject("appSettings")
+                val curr = dao.getAppSettings() ?: AppSettings()
+                dao.insertOrUpdateAppSettings(
+                    curr.copy(
+                        themeMode = sObj.optString("themeMode", curr.themeMode),
+                        language = sObj.optString("language", curr.language),
+                        adminFeeType = sObj.optString("adminFeeType", curr.adminFeeType),
+                        adminFeeValue = sObj.optDouble("adminFeeValue", curr.adminFeeValue),
+                        webPortalBaseUrl = sObj.optString("webPortalBaseUrl", curr.webPortalBaseUrl)
                     )
                 )
             }

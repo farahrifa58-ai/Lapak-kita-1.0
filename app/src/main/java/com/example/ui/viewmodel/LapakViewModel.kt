@@ -1,18 +1,22 @@
 package com.example.ui.viewmodel
 
-import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import android.widget.Toast
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.database.LapakDatabase
+import com.example.data.firebase.VendorSubmissionRemote
+import com.example.data.firebase.VendorSyncRepository
 import com.example.data.model.*
 import com.example.data.repository.*
 import com.example.i18n.AppStrings
+import com.google.firebase.firestore.FirebaseFirestoreException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
@@ -36,10 +40,11 @@ data class SellerPayoutReceiptState(
     val soldItems: List<SoldItemSummary> = emptyList()
 )
 
-class LapakViewModel(application: Application) : AndroidViewModel(application) {
-
-    private val db = LapakDatabase.getDatabase(application, viewModelScope)
-    private val repository = LapakRepository(db.lapakDao())
+class LapakViewModel(
+    private val repository: LapakRepository,
+    private val vendorSyncRepository: VendorSyncRepository,
+    val currentUserId: String
+) : ViewModel() {
 
     // Navigation
     private val _currentScreen = MutableStateFlow(AppScreen.DASHBOARD)
@@ -47,6 +52,29 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
 
     fun navigateTo(screen: AppScreen) {
         _currentScreen.value = screen
+    }
+
+    // Real-time Web Penyetor Sync Status & Notification Banner
+    private val _webSyncNotification = MutableStateFlow<String?>(null)
+    val webSyncNotification: StateFlow<String?> = _webSyncNotification.asStateFlow()
+
+    private val _isSyncingCloud = MutableStateFlow(false)
+    val isSyncingCloud: StateFlow<Boolean> = _isSyncingCloud.asStateFlow()
+
+    private val _lastCloudSyncAt = MutableStateFlow<Long?>(null)
+    val lastCloudSyncAt: StateFlow<Long?> = _lastCloudSyncAt.asStateFlow()
+
+    private val _cartWarningMessage = MutableStateFlow<String?>(null)
+    val cartWarningMessage: StateFlow<String?> = _cartWarningMessage.asStateFlow()
+
+    private val processedSubmissionIds = mutableSetOf<String>()
+
+    fun dismissWebSyncNotification() {
+        _webSyncNotification.value = null
+    }
+
+    fun clearCartWarning() {
+        _cartWarningMessage.value = null
     }
 
     // Settings & Profile
@@ -68,23 +96,64 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
         "id"
     )
 
-    val isDarkTheme: StateFlow<Boolean> = appSettings.map { it.themeMode == "DARK" }.stateIn(
+    val themeMode: StateFlow<String> = appSettings.map { it.themeMode }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        ThemeMode.SYSTEM
+    )
+
+    val isDarkTheme: StateFlow<Boolean> = appSettings.map { it.themeMode == ThemeMode.DARK }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         false
     )
 
-    fun toggleTheme(dark: Boolean) {
+    fun setThemeMode(mode: String) {
         viewModelScope.launch {
+            val validMode = when (mode) {
+                ThemeMode.LIGHT, ThemeMode.DARK, ThemeMode.SYSTEM -> mode
+                else -> ThemeMode.SYSTEM
+            }
             val curr = appSettings.value
-            repository.updateAppSettings(curr.copy(themeMode = if (dark) "DARK" else "LIGHT"))
+            repository.updateAppSettings(curr.copy(themeMode = validMode))
         }
+    }
+
+    fun toggleTheme(dark: Boolean) {
+        setThemeMode(if (dark) ThemeMode.DARK else ThemeMode.LIGHT)
     }
 
     fun setLanguage(lang: String) {
         viewModelScope.launch {
             val curr = appSettings.value
             repository.updateAppSettings(curr.copy(language = lang))
+        }
+    }
+
+    fun updateAdminFeeSettings(
+        feeType: String,
+        feeValue: Double,
+        webPortalBaseUrl: String,
+        onDone: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val safeType = if (feeType == AdminFeeType.PERCENTAGE) AdminFeeType.PERCENTAGE else AdminFeeType.FIXED
+            val safeValue = if (safeType == AdminFeeType.PERCENTAGE) {
+                feeValue.coerceIn(0.0, 100.0)
+            } else {
+                feeValue.coerceIn(0.0, 10_000_000.0)
+            }
+            val safeUrl = webPortalBaseUrl.trim().trimEnd('/').ifEmpty { DEFAULT_WEB_PORTAL_BASE_URL }
+            val curr = appSettings.value
+            repository.updateAppSettings(
+                curr.copy(
+                    adminFeeType = safeType,
+                    adminFeeValue = safeValue,
+                    webPortalBaseUrl = safeUrl
+                )
+            )
+            syncAllVendorsToCloud()
+            onDone()
         }
     }
 
@@ -100,6 +169,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
                     footerMessage = footer
                 )
             )
+            syncAllVendorsToCloud()
         }
     }
 
@@ -154,24 +224,202 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
         emptyList()
     )
 
-    fun addSeller(name: String, wa: String, address: String, notes: String, onDone: () -> Unit) {
+    init {
+        // 1. Ensure all existing sellers have valid vendorCode & writeToken and push initial snapshot to Firestore
         viewModelScope.launch {
-            repository.addSeller(
+            repository.ensureAllSellersHaveVendorCodes()
+            delay(350)
+            syncAllVendorsToCloud()
+        }
+        // 2. Start real-time Firestore listener for incoming Web Penyetor submissions
+        startWebSubmissionsListener()
+    }
+
+    private fun startWebSubmissionsListener() {
+        viewModelScope.launch {
+            try {
+                vendorSyncRepository.observePendingSubmissions(currentUserId).collect { pendingList ->
+                    for (sub in pendingList) {
+                        if (sub.submissionId in processedSubmissionIds) continue
+                        processedSubmissionIds.add(sub.submissionId)
+                        handleIncomingWebSubmission(sub)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: FirebaseFirestoreException) {
+                Log.e("LapakViewModel", "Firestore submission listener error: ${e.message}", e)
+            } catch (e: Exception) {
+                Log.e("LapakViewModel", "Submission listener error: ${e.message}", e)
+            }
+        }
+    }
+
+    private suspend fun handleIncomingWebSubmission(submission: VendorSubmissionRemote) {
+        val applyResult = repository.applyWebVendorSubmission(submission)
+        if (applyResult.isSuccess) {
+            val message = applyResult.getOrNull() ?: "Pembaruan dari Web Penyetor diterima"
+            vendorSyncRepository.markSubmissionStatus(submission.submissionId, "PROCESSED")
+            // Give Room flows a beat to refresh before pushing updated products & stock back to Firestore
+            delay(200)
+            syncVendorByCodeToCloud(submission.vendorCode, submission.submissionId)
+            _webSyncNotification.value = message
+        } else {
+            Log.w("LapakViewModel", "Submission ${submission.submissionId} rejected: ${applyResult.exceptionOrNull()?.message}")
+            vendorSyncRepository.markSubmissionStatus(submission.submissionId, "REJECTED")
+        }
+    }
+
+    fun syncAllVendorsToCloud(onComplete: ((Boolean, String) -> Unit)? = null) {
+        viewModelScope.launch {
+            _isSyncingCloud.value = true
+            try {
+                repository.ensureAllSellersHaveVendorCodes()
+                val sellers = repository.sellersWithStats.first()
+                val products = repository.productsWithDetails.first()
+                val profile = repository.shopProfile.first()
+                val settings = repository.appSettings.first()
+
+                var successCount = 0
+                var lastError: String? = null
+                for (sellerDetail in sellers) {
+                    val sellerProds = products.filter { it.product.sellerId == sellerDetail.seller.id }
+                    val res = vendorSyncRepository.syncVendorToFirestore(
+                        sellerDetail = sellerDetail,
+                        sellerProducts = sellerProds,
+                        shopProfile = profile,
+                        appSettings = settings
+                    )
+                    if (res.isSuccess) {
+                        successCount++
+                    } else {
+                        lastError = res.exceptionOrNull()?.message
+                    }
+                }
+                _lastCloudSyncAt.value = System.currentTimeMillis()
+                if (lastError == null) {
+                    onComplete?.invoke(true, "$successCount penyetor berhasil disinkronkan ke Web Penyetor.")
+                } else {
+                    onComplete?.invoke(false, "Sinkronisasi sebagian ($successCount/${sellers.size}): $lastError")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("LapakViewModel", "Sync all vendors failed", e)
+                onComplete?.invoke(false, e.message ?: "Gagal menyinkronkan ke cloud")
+            } finally {
+                _isSyncingCloud.value = false
+            }
+        }
+    }
+
+    fun syncSingleSellerToCloud(sellerId: Long, onComplete: ((Boolean) -> Unit)? = null) {
+        viewModelScope.launch {
+            try {
+                delay(150)
+                val sellers = repository.sellersWithStats.first()
+                val target = sellers.firstOrNull { it.seller.id == sellerId } ?: run {
+                    onComplete?.invoke(false)
+                    return@launch
+                }
+                val products = repository.productsWithDetails.first().filter { it.product.sellerId == sellerId }
+                val profile = repository.shopProfile.first()
+                val settings = repository.appSettings.first()
+                val res = vendorSyncRepository.syncVendorToFirestore(
+                    sellerDetail = target,
+                    sellerProducts = products,
+                    shopProfile = profile,
+                    appSettings = settings
+                )
+                if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
+                onComplete?.invoke(res.isSuccess)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("LapakViewModel", "Single seller sync error", e)
+                onComplete?.invoke(false)
+            }
+        }
+    }
+
+    private suspend fun syncVendorByCodeToCloud(vendorCode: String, lastProcessedSubmissionId: String) {
+        val sellers = repository.sellersWithStats.first()
+        val target = sellers.firstOrNull { it.seller.vendorCode == vendorCode } ?: return
+        val products = repository.productsWithDetails.first().filter { it.product.sellerId == target.seller.id }
+        val profile = repository.shopProfile.first()
+        val settings = repository.appSettings.first()
+        val res = vendorSyncRepository.syncVendorToFirestore(
+            sellerDetail = target,
+            sellerProducts = products,
+            shopProfile = profile,
+            appSettings = settings,
+            lastProcessedSubmissionId = lastProcessedSubmissionId
+        )
+        if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
+    }
+
+    fun buildVendorPortalUrl(seller: Seller): String {
+        val base = appSettings.value.webPortalBaseUrl.trim().trimEnd('/').ifEmpty { DEFAULT_WEB_PORTAL_BASE_URL }
+        return "$base/?kode=${Uri.encode(seller.vendorCode)}&token=${Uri.encode(seller.writeToken)}"
+    }
+
+    fun buildVendorPortalShareText(seller: Seller): String {
+        val profile = shopProfile.value
+        val url = buildVendorPortalUrl(seller)
+        val (feeType, feeValue) = AdminFeeCalculator.resolveEffectiveFee(seller, appSettings.value)
+        val feeLabel = AdminFeeCalculator.formatTariffLabel(feeType, feeValue)
+        return buildString {
+            append("Halo ${seller.name}!\n\n")
+            append("Berikut tautan Web Penyetor *${profile.shopName}* khusus untuk dapur Anda:\n")
+            append("$url\n\n")
+            append("Kode Penyetor: *${seller.vendorCode}*\n")
+            append("Tarif Biaya Admin: $feeLabel\n\n")
+            append("Lewat link tersebut, Anda bisa langsung:\n")
+            append("- Cek sisa stok, barang terjual, dan setoran belum dibayar\n")
+            append("- Tambah / ubah daftar produk beserta perhitungan uang bersih otomatis\n")
+            append("- Input stok kiriman harian agar langsung masuk ke kasir lapak\n\n")
+            append("Mohon simpan link ini dan jangan dibagikan ke penyetor lain ya. Terima kasih!")
+        }
+    }
+
+    fun addSeller(
+        name: String,
+        wa: String,
+        address: String,
+        notes: String,
+        customFeeType: String? = null,
+        customFeeValue: Double? = null,
+        onDone: () -> Unit
+    ) {
+        viewModelScope.launch {
+            val newId = repository.addSeller(
                 Seller(
                     name = name,
                     whatsappNumber = wa,
                     address = address,
                     notes = notes,
-                    status = SellerStatus.AKTIF
+                    status = SellerStatus.AKTIF,
+                    vendorCode = VendorCodeGenerator.generateVendorCode(),
+                    writeToken = VendorCodeGenerator.generateWriteToken(),
+                    customAdminFeeType = customFeeType,
+                    customAdminFeeValue = customFeeValue
                 )
             )
+            syncSingleSellerToCloud(newId)
             onDone()
         }
     }
 
     fun updateSeller(seller: Seller, onDone: () -> Unit) {
         viewModelScope.launch {
-            repository.updateSeller(seller)
+            val safeSeller = seller.copy(
+                vendorCode = seller.vendorCode.takeIf { VendorCodeGenerator.isValidVendorCode(it) }
+                    ?: VendorCodeGenerator.generateVendorCode(),
+                writeToken = seller.writeToken.takeIf { VendorCodeGenerator.isValidWriteToken(it) }
+                    ?: VendorCodeGenerator.generateWriteToken()
+            )
+            repository.updateSeller(safeSeller)
+            syncSingleSellerToCloud(safeSeller.id)
             onDone()
         }
     }
@@ -179,6 +427,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteSeller(seller: Seller, onDone: () -> Unit) {
         viewModelScope.launch {
             repository.deleteSeller(seller)
+            vendorSyncRepository.deleteVendorFromFirestore(seller.vendorCode)
             onDone()
         }
     }
@@ -186,6 +435,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
     fun updateProduct(product: Product, onDone: () -> Unit) {
         viewModelScope.launch {
             repository.updateProduct(product)
+            syncSingleSellerToCloud(product.sellerId)
             onDone()
         }
     }
@@ -193,6 +443,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteProduct(product: Product, onDone: () -> Unit) {
         viewModelScope.launch {
             repository.deleteProduct(product)
+            syncSingleSellerToCloud(product.sellerId)
             onDone()
         }
     }
@@ -206,12 +457,14 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             repository.updateSellerStatus(sellerId, newStatus, startDate, endDate, reason)
+            syncSingleSellerToCloud(sellerId)
         }
     }
 
     fun reactivateSeller(sellerId: Long) {
         viewModelScope.launch {
             repository.updateSellerStatus(sellerId, SellerStatus.AKTIF, null, null, "Diaktifkan kembali oleh admin")
+            syncSingleSellerToCloud(sellerId)
         }
     }
 
@@ -235,7 +488,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
                     unit = unit,
                     sellingPrice = sellingPrice,
                     sellerShare = sellerShare,
-                    adminProfitPerUnit = sellingPrice - sellerShare
+                    adminProfitPerUnit = (sellingPrice - sellerShare).coerceAtLeast(0.0)
                 )
             )
             if (initialStock > 0) {
@@ -249,6 +502,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
                     notes = "Setoran awal produk"
                 )
             }
+            syncSingleSellerToCloud(sellerId)
             onDone()
         }
     }
@@ -276,6 +530,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
                 notes = notes
             )
             if (result.isSuccess) {
+                syncSingleSellerToCloud(sellerId)
                 onSuccess()
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Gagal menambah setoran stok")
@@ -297,23 +552,35 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
     private val _lastCompletedTransaction = MutableStateFlow<LapakTransaction?>(null)
     val lastCompletedTransaction: StateFlow<LapakTransaction?> = _lastCompletedTransaction.asStateFlow()
 
-    fun addToCart(product: Product, seller: Seller, stockLot: StockLot, quantity: Int = 1) {
+    fun addToCart(product: Product, seller: Seller, stockLot: StockLot, quantity: Int = 1): Boolean {
         val currentList = _cart.value.toMutableList()
         val existingIndex = currentList.indexOfFirst {
-            it.product.id == product.id && it.seller.id == seller.id && it.stockLot.id == stockLot.id
+            it.product.id == product.id && it.seller.id == seller.id
         }
+        val totalAvailable = productsWithDetails.value
+            .firstOrNull { it.product.id == product.id }
+            ?.currentStock ?: stockLot.currentQty
 
-        if (existingIndex >= 0) {
+        return if (existingIndex >= 0) {
             val existing = currentList[existingIndex]
-            if (existing.quantity + quantity <= stockLot.currentQty) {
+            if (existing.quantity + quantity <= totalAvailable) {
                 currentList[existingIndex] = existing.copy(quantity = existing.quantity + quantity)
+                _cart.value = currentList
+                true
+            } else {
+                _cartWarningMessage.value = "Stok maksimal ${product.name}: $totalAvailable ${product.unit}"
+                false
             }
         } else {
-            if (quantity <= stockLot.currentQty) {
+            if (quantity <= totalAvailable) {
                 currentList.add(CartItem(product, seller, stockLot, quantity))
+                _cart.value = currentList
+                true
+            } else {
+                _cartWarningMessage.value = "Stok ${product.name} tidak mencukupi"
+                false
             }
         }
-        _cart.value = currentList
     }
 
     fun updateCartQty(item: CartItem, newQty: Int) {
@@ -321,13 +588,16 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
             removeFromCart(item)
             return
         }
-        if (newQty > item.stockLot.currentQty) {
-            Toast.makeText(getApplication(), "Stok maksimal: ${item.stockLot.currentQty}", Toast.LENGTH_SHORT).show()
+        val totalAvailable = productsWithDetails.value
+            .firstOrNull { it.product.id == item.product.id }
+            ?.currentStock ?: item.stockLot.currentQty
+        if (newQty > totalAvailable) {
+            _cartWarningMessage.value = "Stok maksimal: $totalAvailable ${item.product.unit}"
             return
         }
         val currentList = _cart.value.toMutableList()
         val index = currentList.indexOfFirst {
-            it.product.id == item.product.id && it.seller.id == item.seller.id && it.stockLot.id == item.stockLot.id
+            it.product.id == item.product.id && it.seller.id == item.seller.id
         }
         if (index >= 0) {
             currentList[index] = item.copy(quantity = newQty)
@@ -337,7 +607,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeFromCart(item: CartItem) {
         _cart.value = _cart.value.filterNot {
-            it.product.id == item.product.id && it.seller.id == item.seller.id && it.stockLot.id == item.stockLot.id
+            it.product.id == item.product.id && it.seller.id == item.seller.id
         }
     }
 
@@ -377,6 +647,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        val affectedSellerIds = items.map { it.seller.id }.distinct()
         viewModelScope.launch {
             val result = repository.checkout(
                 cartItems = items,
@@ -388,6 +659,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
                 val trx = result.getOrThrow()
                 _lastCompletedTransaction.value = trx
                 clearCart()
+                affectedSellerIds.forEach { syncSingleSellerToCloud(it) }
                 onSuccess(trx)
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Gagal memproses transaksi")
@@ -406,8 +678,10 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelTransaction(trxId: Long, reason: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch {
+            val affectedSellers = repository.getItemsForTransaction(trxId).first().map { it.sellerId }.distinct()
             val res = repository.cancelTransaction(trxId, reason)
             if (res.isSuccess) {
+                affectedSellers.forEach { syncSingleSellerToCloud(it) }
                 onSuccess()
             } else {
                 onError(res.exceptionOrNull()?.message ?: "Gagal membatalkan transaksi")
@@ -434,7 +708,12 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
             .sortedByDescending { it.quantity }
     }
 
-    fun showSellerPaymentReceipt(payment: SellerPayment, seller: Seller, remainingBalance: Double, soldItems: List<SoldItemSummary> = emptyList()) {
+    fun showSellerPaymentReceipt(
+        payment: SellerPayment,
+        seller: Seller,
+        remainingBalance: Double,
+        soldItems: List<SoldItemSummary> = emptyList()
+    ) {
         _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(payment, seller, remainingBalance, soldItems)
     }
 
@@ -448,17 +727,27 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
             val latest = payments.filter { it.sellerId == sellerDetail.seller.id }.maxByOrNull { it.paymentDate }
             val soldItems = getSoldItemsSummary(sellerDetail.seller.id)
             if (latest != null) {
-                _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(latest, sellerDetail.seller, sellerDetail.remainingBalance, soldItems)
+                _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(
+                    latest,
+                    sellerDetail.seller,
+                    sellerDetail.remainingBalance,
+                    soldItems
+                )
             } else {
                 val statement = SellerPayment(
                     id = 0,
                     sellerId = sellerDetail.seller.id,
                     paymentDate = System.currentTimeMillis(),
                     amount = sellerDetail.totalPaid,
-                    notes = "Rekapitulasi Hak Penyetor",
+                    notes = "Rekapitulasi Setoran ke Penjual",
                     paymentMethod = "Tunai"
                 )
-                _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(statement, sellerDetail.seller, sellerDetail.remainingBalance, soldItems)
+                _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(
+                    statement,
+                    sellerDetail.seller,
+                    sellerDetail.remainingBalance,
+                    soldItems
+                )
             }
         }
     }
@@ -487,6 +776,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
                 val newRemaining = ((currentDetail?.remainingBalance ?: 0.0) - amount).coerceAtLeast(0.0)
                 _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(savedPayment, seller, newRemaining, soldItems)
             }
+            syncSingleSellerToCloud(sellerId)
             onDone(savedPayment)
         }
     }
@@ -496,13 +786,36 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
         com.example.util.ReceiptPrinter.printHtml(context, html, "Struk_${transaction.transactionNumber}")
     }
 
-    fun printSellerPayoutReceipt(context: Context, payment: SellerPayment, seller: Seller, remainingBalance: Double, soldItems: List<SoldItemSummary> = emptyList()) {
-        val html = com.example.util.ReceiptPrinter.buildSellerPayoutReceiptHtml(payment, seller, shopProfile.value, remainingBalance, soldItems)
+    fun printSellerPayoutReceipt(
+        context: Context,
+        payment: SellerPayment,
+        seller: Seller,
+        remainingBalance: Double,
+        soldItems: List<SoldItemSummary> = emptyList()
+    ) {
+        val html = com.example.util.ReceiptPrinter.buildSellerPayoutReceiptHtml(
+            payment,
+            seller,
+            shopProfile.value,
+            remainingBalance,
+            soldItems
+        )
         com.example.util.ReceiptPrinter.printHtml(context, html, "Bukti_Bayar_${seller.name}")
     }
 
-    fun getSellerPayoutReceiptText(payment: SellerPayment, seller: Seller, remainingBalance: Double, soldItems: List<SoldItemSummary> = emptyList()): String {
-        return com.example.util.ReceiptPrinter.formatSellerPayoutReceiptText(payment, seller, shopProfile.value, remainingBalance, soldItems)
+    fun getSellerPayoutReceiptText(
+        payment: SellerPayment,
+        seller: Seller,
+        remainingBalance: Double,
+        soldItems: List<SoldItemSummary> = emptyList()
+    ): String {
+        return com.example.util.ReceiptPrinter.formatSellerPayoutReceiptText(
+            payment,
+            seller,
+            shopProfile.value,
+            remainingBalance,
+            soldItems
+        )
     }
 
     // Operating Expenses
@@ -531,52 +844,61 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // WhatsApp Stock Report Formatter
+    // WhatsApp Promo & Stock Report Formatter (Customer-friendly grouped by Nama Dapur Penyetor)
     fun generateStockReportText(isAllSellers: Boolean, targetSellerId: Long?): String {
-        val lang = currentLanguage.value
-        val sdf = SimpleDateFormat("d MMMM yyyy, HH:mm", if (lang == "id") Locale("id", "ID") else Locale.ENGLISH)
+        val sdf = SimpleDateFormat("EEEE, d MMMM yyyy • HH:mm", Locale("id", "ID"))
         val dateStr = sdf.format(Date())
         val profile = shopProfile.value
-        val products = productsWithDetails.value.filter { it.currentStock > 0 }
+        val availableProducts = productsWithDetails.value
+            .filter { it.currentStock > 0 && it.product.isActive }
+            .sortedWith(compareBy({ it.seller.name.lowercase() }, { it.product.name.lowercase() }))
 
         val sb = StringBuilder()
-        sb.append(if (lang == "id") "LAPORAN STOK TERSISA\n" else "REMAINING STOCK REPORT\n")
-        sb.append("${profile.shopName.uppercase()}\n")
-        sb.append(if (lang == "id") "Tanggal: $dateStr\n\n" else "Date: $dateStr\n\n")
 
         if (isAllSellers) {
-            val bySeller = products.groupBy { it.seller.name }
+            sb.append("Assalamu'alaikum / Halo Bunda & Pelanggan Setia! \n")
+            sb.append("Ready stok jajanan & kuliner hari ini di *${profile.shopName}*:\n")
+            sb.append("Update: $dateStr WIB\n\n")
+
+            val bySeller = availableProducts.groupBy { it.seller.name }
             if (bySeller.isEmpty()) {
-                sb.append(if (lang == "id") "(Tidak ada stok produk tersisa saat ini)\n\n" else "(No remaining product stock at this time)\n\n")
+                sb.append("Mohon maaf, seluruh stok hari ini sudah habis terjual. Sampai jumpa besok ya!\n\n")
             } else {
                 bySeller.forEach { (sellerName, prodList) ->
-                    sb.append("${sellerName.uppercase()}:\n")
+                    sb.append("*$sellerName*\n")
                     prodList.forEach { p ->
-                        sb.append("- ${p.product.name}: ${p.currentStock} ${p.product.unit}\n")
+                        sb.append("- ${p.product.name} — ${formatRupiah(p.product.sellingPrice)} (Sisa ${p.currentStock} ${p.product.unit})\n")
                     }
                     sb.append("\n")
                 }
             }
+            sb.append("Yuk langsung mampir atau chat untuk pesan sebelum kehabisan!\n")
+            if (profile.whatsappNumber.isNotBlank()) {
+                sb.append("Order / WA: ${profile.whatsappNumber}\n")
+            }
+            if (profile.address.isNotBlank()) {
+                sb.append("Lokasi: ${profile.address}\n")
+            }
+            sb.append("Terima kasih sudah belanja di *${profile.shopName}*!")
         } else {
-            val target = products.filter { it.seller.id == targetSellerId }
+            val target = availableProducts.filter { it.seller.id == targetSellerId }
             val sellerName = target.firstOrNull()?.seller?.name
                 ?: rawSellers.value.firstOrNull { it.id == targetSellerId }?.name
-                ?: if (lang == "id") "PENYETOR" else "SELLER"
+                ?: "Penyetor"
 
-            sb.append("${sellerName.uppercase()}:\n")
+            sb.append("*UPDATE STOK READY — ${profile.shopName.uppercase()}*\n")
+            sb.append("Waktu: $dateStr WIB\n\n")
+            sb.append("*$sellerName*\n")
             if (target.isEmpty()) {
-                sb.append(if (lang == "id") "- (Semua produk sudah habis terjual / stok 0)\n" else "- (All products sold out / 0 stock)\n")
+                sb.append("- Alhamdulillah semua produk sudah habis terjual (stok 0)!\n")
             } else {
                 target.forEach { p ->
-                    sb.append("- ${p.product.name}: ${p.currentStock} ${p.product.unit}\n")
+                    sb.append("- ${p.product.name} — ${formatRupiah(p.product.sellingPrice)} (Sisa ${p.currentStock} ${p.product.unit})\n")
                 }
             }
-            sb.append("\n")
+            sb.append("\nTerima kasih, salam hangat dari *${profile.shopName}*.")
         }
 
-        sb.append(if (lang == "id") "Mohon diperiksa untuk persiapan setoran berikutnya.\n" else "Please check and prepare for next consignment deposit.\n")
-        sb.append(if (lang == "id") "Terima kasih.\n" else "Thank you.\n")
-        sb.append(profile.shopName)
         return sb.toString()
     }
 
@@ -596,7 +918,6 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
             }
             context.startActivity(intent)
         } catch (e: Exception) {
-            // Fallback to chooser
             shareTextGeneral(context, text)
         }
     }
@@ -665,6 +986,7 @@ class LapakViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = repository.importFullBackupJson(json)
             if (res.isSuccess) {
+                syncAllVendorsToCloud()
                 onDone(true, "Data cadangan berhasil dipulihkan!")
             } else {
                 onDone(false, res.exceptionOrNull()?.message ?: "Gagal memulihkan cadangan!")

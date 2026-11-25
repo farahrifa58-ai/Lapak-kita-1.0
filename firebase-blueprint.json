@@ -1,0 +1,199 @@
+{
+  "entities": {
+    "LapakVendor": {
+      "title": "LapakVendor",
+      "description": "Public vendor portal document synced from the Lapak Kita Admin app for a specific consignor/seller.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the Lapak Kita Admin who owns this vendor."
+        },
+        "vendorCode": {
+          "type": "string",
+          "description": "Unique vendor portal code in LPK-XXXXXX format matching the document ID."
+        },
+        "localSellerId": {
+          "type": "integer",
+          "description": "Local Room Seller ID on the Admin device."
+        },
+        "shopName": {
+          "type": "string",
+          "description": "Name of the consignment shop (Lapak)."
+        },
+        "sellerName": {
+          "type": "string",
+          "description": "Display name of the vendor/kitchen (Nama Dapur Penyetor)."
+        },
+        "sellerStatus": {
+          "type": "string",
+          "enum": ["AKTIF", "LIBUR", "NONAKTIF"],
+          "description": "Operational status of the vendor."
+        },
+        "adminFeeType": {
+          "type": "string",
+          "enum": ["FIXED", "PERCENTAGE"],
+          "description": "Active admin commission fee type applied to this vendor."
+        },
+        "adminFeeValue": {
+          "type": "number",
+          "description": "Active admin fee amount (Rupiah if FIXED, percentage 0-100 if PERCENTAGE)."
+        },
+        "summaryTotalStock": {
+          "type": "integer",
+          "description": "Read-only total remaining stock count across the vendor's products."
+        },
+        "summaryTotalSold": {
+          "type": "integer",
+          "description": "Read-only total units sold for this vendor."
+        },
+        "summaryUnpaidBalance": {
+          "type": "number",
+          "description": "Read-only total unpaid settlement balance owed to the vendor."
+        },
+        "products": {
+          "type": "array",
+          "description": "Bounded list (max 100) of the vendor's products with current stock and revenue share details."
+        },
+        "lastProcessedSubmissionId": {
+          "type": "string",
+          "description": "ID of the last vendor web submission processed by the Admin app."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the vendor document was created (clients must write FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest sync (clients must write FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "ownerUid",
+        "vendorCode",
+        "localSellerId",
+        "shopName",
+        "sellerName",
+        "sellerStatus",
+        "adminFeeType",
+        "adminFeeValue",
+        "summaryTotalStock",
+        "summaryTotalSold",
+        "summaryUnpaidBalance",
+        "products",
+        "lastProcessedSubmissionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VendorAuthSecret": {
+      "title": "VendorAuthSecret",
+      "description": "Admin-only private secret document storing the writeToken used to authorize Web Penyetor submissions.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owning Admin."
+        },
+        "writeToken": {
+          "type": "string",
+          "description": "Secret write token shared exclusively with the vendor via their personal portal link."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the secret was created (clients must write FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the secret was last updated (clients must write FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "ownerUid",
+        "writeToken",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VendorSubmission": {
+      "title": "VendorSubmission",
+      "description": "Write-authenticated submission from the public Web Penyetor containing new products, product edits, and daily stock deliveries.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owning Admin (matched against parent LapakVendor)."
+        },
+        "vendorCode": {
+          "type": "string",
+          "description": "Vendor portal code (LPK-XXXXXX)."
+        },
+        "writeToken": {
+          "type": "string",
+          "description": "Secret token verified against /lapak_vendors/{vendorCode}/private/auth."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "PROCESSED", "REJECTED"],
+          "description": "Processing lifecycle status."
+        },
+        "newProducts": {
+          "type": "array",
+          "description": "Bounded list (max 50) of new products submitted by the vendor."
+        },
+        "editedProducts": {
+          "type": "array",
+          "description": "Bounded list (max 50) of product edits submitted by the vendor."
+        },
+        "stockAdditions": {
+          "type": "array",
+          "description": "Bounded list (max 50) of daily stock deliveries submitted by the vendor."
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional note from the vendor."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when submitted (clients must write FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated (clients must write FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "ownerUid",
+        "vendorCode",
+        "writeToken",
+        "status",
+        "newProducts",
+        "editedProducts",
+        "stockAdditions",
+        "note",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/lapak_vendors/{vendorCode}": {
+      "schema": { "$ref": "#/entities/LapakVendor" },
+      "description": "Vendor portal state synced by Admin and read by the corresponding vendor using their unique vendorCode."
+    },
+    "/lapak_vendors/{vendorCode}/private/{docId}": {
+      "schema": { "$ref": "#/entities/VendorAuthSecret" },
+      "description": "Private admin-only subcollection storing writeToken at docId='auth' to verify vendor submissions without exposing the token."
+    },
+    "/lapak_vendor_submissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/VendorSubmission" },
+      "description": "Vendor web portal submissions for new products, edits, and daily stock deliveries, listened in real-time by the owning Admin."
+    }
+  }
+}

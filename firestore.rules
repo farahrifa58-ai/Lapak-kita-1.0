@@ -1,0 +1,203 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidVendorCode(code) {
+      return code is string && code.matches('^LPK-[A-Z0-9]{6}$');
+    }
+
+    function isValidLapakVendor(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             isValidVendorCode(data.vendorCode) &&
+             data.localSellerId is int && data.localSellerId >= 0 &&
+             data.shopName is string && data.shopName.size() >= 1 && data.shopName.size() <= 100 &&
+             data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 100 &&
+             data.sellerStatus is string && data.sellerStatus in ['AKTIF', 'LIBUR', 'NONAKTIF'] &&
+             data.adminFeeType is string && data.adminFeeType in ['FIXED', 'PERCENTAGE'] &&
+             data.adminFeeValue is number && data.adminFeeValue >= 0 &&
+             ((data.adminFeeType == 'PERCENTAGE' && data.adminFeeValue <= 100) ||
+              (data.adminFeeType == 'FIXED' && data.adminFeeValue <= 10000000)) &&
+             data.summaryTotalStock is int && data.summaryTotalStock >= 0 &&
+             data.summaryTotalSold is int && data.summaryTotalSold >= 0 &&
+             data.summaryUnpaidBalance is number && data.summaryUnpaidBalance >= 0 &&
+             data.products is list && data.products.size() <= 100 &&
+             (data.products.size() == 0 || data.products[0] is map) &&
+             data.lastProcessedSubmissionId is string && data.lastProcessedSubmissionId.size() <= 128;
+    }
+
+    function isValidVendorAuthSecret(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             data.writeToken is string && data.writeToken.size() >= 12 && data.writeToken.size() <= 64 &&
+             data.writeToken.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidVendorSubmission(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             isValidVendorCode(data.vendorCode) &&
+             data.writeToken is string && data.writeToken.size() >= 12 && data.writeToken.size() <= 64 &&
+             data.writeToken.matches('^[a-zA-Z0-9_\\-]+$') &&
+             data.status is string && data.status in ['PENDING', 'PROCESSED', 'REJECTED'] &&
+             data.newProducts is list && data.newProducts.size() <= 50 &&
+             (data.newProducts.size() == 0 || data.newProducts[0] is map) &&
+             data.editedProducts is list && data.editedProducts.size() <= 50 &&
+             (data.editedProducts.size() == 0 || data.editedProducts[0] is map) &&
+             data.stockAdditions is list && data.stockAdditions.size() <= 50 &&
+             (data.stockAdditions.size() == 0 || data.stockAdditions[0] is map) &&
+             data.note is string && data.note.size() <= 200;
+    }
+
+    // --- 1. LAPAK VENDORS (Public by exact vendorCode for read-only view; Owner Admin full control) ---
+    match /lapak_vendors/{vendorCode} {
+      // Exact document get allowed by owning Admin OR public Web Penyetor with exact LPK-XXXXXX code (no PII stored here)
+      allow get: if isValidVendorCode(vendorCode);
+
+      // List strictly restricted to owning Admin (client must query .whereEqualTo("ownerUid", uid))
+      allow list: if isSignedIn() && existing().ownerUid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidVendorCode(vendorCode) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       incoming().vendorCode == vendorCode &&
+                       incoming().keys().hasAll([
+                         'ownerUid', 'vendorCode', 'localSellerId', 'shopName', 'sellerName',
+                         'sellerStatus', 'adminFeeType', 'adminFeeValue',
+                         'summaryTotalStock', 'summaryTotalSold', 'summaryUnpaidBalance',
+                         'products', 'lastProcessedSubmissionId', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'ownerUid', 'vendorCode', 'localSellerId', 'shopName', 'sellerName',
+                         'sellerStatus', 'adminFeeType', 'adminFeeValue',
+                         'summaryTotalStock', 'summaryTotalSold', 'summaryUnpaidBalance',
+                         'products', 'lastProcessedSubmissionId', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidLapakVendor(incoming()) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+      allow update: if isSignedIn() &&
+                       isValidVendorCode(vendorCode) &&
+                       existing().ownerUid == request.auth.uid &&
+                       isValidLapakVendor(incoming()) &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().vendorCode == existing().vendorCode &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'localSellerId', 'shopName', 'sellerName', 'sellerStatus',
+                         'adminFeeType', 'adminFeeValue',
+                         'summaryTotalStock', 'summaryTotalSold', 'summaryUnpaidBalance',
+                         'products', 'lastProcessedSubmissionId', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() &&
+                       isValidVendorCode(vendorCode) &&
+                       existing().ownerUid == request.auth.uid;
+
+      // --- 2. PRIVATE AUTH SECRET (writeToken isolated from public vendor doc) ---
+      match /private/{docId} {
+        allow get: if isSignedIn() &&
+                      isValidVendorCode(vendorCode) &&
+                      docId == 'auth' &&
+                      (resource == null || existing().ownerUid == request.auth.uid);
+
+        allow list: if false;
+
+        allow create: if isSignedIn() &&
+                         isValidVendorCode(vendorCode) &&
+                         docId == 'auth' &&
+                         incoming().ownerUid == request.auth.uid &&
+                         incoming().keys().hasAll(['ownerUid', 'writeToken', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['ownerUid', 'writeToken', 'createdAt', 'updatedAt']) &&
+                         isValidVendorAuthSecret(incoming()) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+        allow update: if isSignedIn() &&
+                         isValidVendorCode(vendorCode) &&
+                         docId == 'auth' &&
+                         existing().ownerUid == request.auth.uid &&
+                         isValidVendorAuthSecret(incoming()) &&
+                         incoming().ownerUid == existing().ownerUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['writeToken', 'updatedAt']);
+
+        allow delete: if isSignedIn() &&
+                         isValidVendorCode(vendorCode) &&
+                         docId == 'auth' &&
+                         existing().ownerUid == request.auth.uid;
+      }
+    }
+
+    // --- 3. VENDOR WEB SUBMISSIONS (Token-verified create by Web Penyetor; Admin listens & marks PROCESSED) ---
+    match /lapak_vendor_submissions/{submissionId} {
+      allow get: if isSignedIn() &&
+                    isValidId(submissionId) &&
+                    existing().ownerUid == request.auth.uid;
+
+      allow list: if isSignedIn() &&
+                     existing().ownerUid == request.auth.uid;
+
+      // Static validation first, then relational writeToken & ownerUid verification
+      allow create: if isValidId(submissionId) &&
+                       incoming().keys().hasAll([
+                         'ownerUid', 'vendorCode', 'writeToken', 'status',
+                         'newProducts', 'editedProducts', 'stockAdditions', 'note',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'ownerUid', 'vendorCode', 'writeToken', 'status',
+                         'newProducts', 'editedProducts', 'stockAdditions', 'note',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidVendorSubmission(incoming()) &&
+                       incoming().status == 'PENDING' &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       exists(/databases/$(database)/documents/lapak_vendors/$(incoming().vendorCode)) &&
+                       exists(/databases/$(database)/documents/lapak_vendors/$(incoming().vendorCode)/private/auth) &&
+                       incoming().ownerUid == get(/databases/$(database)/documents/lapak_vendors/$(incoming().vendorCode)).data.ownerUid &&
+                       incoming().writeToken == get(/databases/$(database)/documents/lapak_vendors/$(incoming().vendorCode)/private/auth).data.writeToken;
+
+      // Terminal-state locked update: only owning Admin can transition PENDING -> PROCESSED/REJECTED
+      allow update: if isSignedIn() &&
+                       isValidId(submissionId) &&
+                       existing().ownerUid == request.auth.uid &&
+                       existing().status == 'PENDING' &&
+                       isValidVendorSubmission(incoming()) &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().vendorCode == existing().vendorCode &&
+                       incoming().writeToken == existing().writeToken &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       incoming().status in ['PROCESSED', 'REJECTED'] &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+      allow delete: if isSignedIn() &&
+                       isValidId(submissionId) &&
+                       existing().ownerUid == request.auth.uid;
+    }
+  }
+}

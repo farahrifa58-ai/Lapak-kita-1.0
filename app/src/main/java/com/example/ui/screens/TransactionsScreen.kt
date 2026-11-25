@@ -1,8 +1,8 @@
 package com.example.ui.screens
 
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -13,18 +13,18 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.LapakTransaction
-import com.example.data.model.TransactionItem
 import com.example.i18n.AppStrings
 import com.example.ui.components.CancelTransactionDialog
 import com.example.ui.components.ReceiptCustomerDialog
 import com.example.ui.components.TransactionAdminDetailDialog
-import com.example.ui.theme.*
+import com.example.ui.theme.LocalLapakColors
 import com.example.ui.viewmodel.LapakViewModel
 import java.text.SimpleDateFormat
 import java.util.*
@@ -43,7 +43,6 @@ fun TransactionsScreen(
     var searchQuery by remember { mutableStateOf("") }
     var selectedMethod by remember { mutableStateOf("Semua") }
 
-    // Dialog states
     var customerReceiptTarget by remember { mutableStateOf<LapakTransaction?>(null) }
     var adminDetailTarget by remember { mutableStateOf<LapakTransaction?>(null) }
     var cancelTarget by remember { mutableStateOf<LapakTransaction?>(null) }
@@ -58,19 +57,20 @@ fun TransactionsScreen(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = {
                     Text(
                         text = AppStrings.get("history_title", lang),
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = EmeraldPrimary
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = EmeraldContainer,
-                    titleContentColor = EmeraldPrimary
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         },
@@ -81,9 +81,9 @@ fun TransactionsScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(top = 12.dp, bottom = 36.dp)
         ) {
-            // Search Bar
             item {
                 OutlinedTextField(
                     value = searchQuery,
@@ -93,17 +93,18 @@ fun TransactionsScreen(
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
                             IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Default.Clear, contentDescription = "Clear")
+                                Icon(Icons.Default.Clear, contentDescription = "Hapus Pencarian")
                             }
                         }
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("history_search_input"),
                     shape = RoundedCornerShape(12.dp),
                     singleLine = true
                 )
             }
 
-            // Payment Method Filter Chips
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -115,21 +116,20 @@ fun TransactionsScreen(
                             onClick = { selectedMethod = method },
                             label = { Text(method, style = MaterialTheme.typography.labelSmall) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = EmeraldPrimary,
-                                selectedLabelColor = Color.White
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
                             )
                         )
                     }
                 }
             }
 
-            // Transaction History List
             if (filteredTransactions.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 40.dp),
+                            .padding(vertical = 48.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -149,7 +149,7 @@ fun TransactionsScreen(
                     }
                 }
             } else {
-                items(filteredTransactions) { trx ->
+                items(filteredTransactions, key = { it.id }) { trx ->
                     TransactionCard(
                         trx = trx,
                         lang = lang,
@@ -159,14 +159,9 @@ fun TransactionsScreen(
                     )
                 }
             }
-
-            item {
-                Spacer(Modifier.height(30.dp))
-            }
         }
     }
 
-    // Customer Receipt Dialog (NO SELLER NAME)
     customerReceiptTarget?.let { trx ->
         val itemsFlow = remember(trx.id) { viewModel.getTransactionItems(trx.id) }
         val items by itemsFlow.collectAsState(initial = emptyList())
@@ -184,7 +179,6 @@ fun TransactionsScreen(
         )
     }
 
-    // Admin Internal Detail Dialog (SHOWS SELLER NAME & ADMIN PROFIT)
     adminDetailTarget?.let { trx ->
         val itemsFlow = remember(trx.id) { viewModel.getTransactionItems(trx.id) }
         val items by itemsFlow.collectAsState(initial = emptyList())
@@ -197,7 +191,6 @@ fun TransactionsScreen(
         )
     }
 
-    // Cancellation Dialog
     cancelTarget?.let { trx ->
         CancelTransactionDialog(
             transaction = trx,
@@ -228,16 +221,17 @@ fun TransactionCard(
     onOpenAdminDetail: () -> Unit,
     onCancel: () -> Unit
 ) {
-    val sdf = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+    val lapakColors = LocalLapakColors.current
+    val sdf = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = BorderStroke(1.dp, lapakColors.cardBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Header Row: TRX Number & Status
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -247,7 +241,8 @@ fun TransactionCard(
                     Text(
                         text = trx.transactionNumber,
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         text = sdf.format(Date(trx.timestamp)),
@@ -259,12 +254,13 @@ fun TransactionCard(
                 if (trx.isCancelled) {
                     Box(
                         modifier = Modifier
-                            .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(lapakColors.dangerBg)
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
                     ) {
                         Text(
                             text = AppStrings.get("history_cancelled", lang),
-                            color = MaterialTheme.colorScheme.error,
+                            color = lapakColors.dangerText,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -272,12 +268,13 @@ fun TransactionCard(
                 } else {
                     Box(
                         modifier = Modifier
-                            .background(EmeraldContainer, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(lapakColors.stockSafeBg)
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
                     ) {
                         Text(
                             text = trx.paymentMethod,
-                            color = EmeraldDark,
+                            color = lapakColors.stockSafeText,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -287,16 +284,16 @@ fun TransactionCard(
 
             Spacer(Modifier.height(10.dp))
 
-            // Breakdown Summary: Total Omzet, Hak Penyetor, Laba Admin
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                     .padding(10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column {
-                    Text("Total Omzet:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Total Omzet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         text = LapakViewModel.formatRupiah(trx.totalAmount),
                         style = MaterialTheme.typography.titleSmall,
@@ -311,22 +308,22 @@ fun TransactionCard(
                 }
 
                 Column {
-                    Text("Hak Penyetor:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Setoran Penjual", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         text = LapakViewModel.formatRupiah(trx.totalSellerShare),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
-                        color = AmberTertiary
+                        color = lapakColors.payoutCardAccent
                     )
                 }
 
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("Laba Admin:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Untung Lapak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         text = LapakViewModel.formatRupiah(trx.totalAdminProfit),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
-                        color = EmeraldPrimary
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
             }
@@ -342,15 +339,16 @@ fun TransactionCard(
 
             Spacer(Modifier.height(12.dp))
 
-            // Action Buttons Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(
                     onClick = onOpenCustomerReceipt,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, lapakColors.cardBorder)
                 ) {
                     Icon(Icons.Default.Receipt, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
@@ -361,7 +359,10 @@ fun TransactionCard(
                     onClick = onOpenAdminDetail,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    )
                 ) {
                     Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
@@ -375,7 +376,7 @@ fun TransactionCard(
                     ) {
                         Icon(
                             Icons.Default.Cancel,
-                            contentDescription = "Batalkan",
+                            contentDescription = "Batalkan Transaksi",
                             tint = MaterialTheme.colorScheme.error
                         )
                     }
