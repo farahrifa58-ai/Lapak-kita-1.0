@@ -229,6 +229,170 @@ abstract class LapakDatabase : RoomDatabase() {
                     notes = "Pembelian 2 pak kantong belanja lapak"
                 )
             )
+
+            // 5 Contoh Dapur Penyetor Tambahan (15 Produk)
+            ensureSampleKitchensSeeded(dao)
+        }
+
+        private data class SampleProductSpec(
+            val name: String,
+            val category: String,
+            val sellingPrice: Double,
+            val initialStock: Int,
+            val unit: String
+        )
+
+        private data class SampleKitchenSpec(
+            val name: String,
+            val whatsappNumber: String,
+            val address: String,
+            val notes: String,
+            val products: List<SampleProductSpec>
+        )
+
+        private val sampleSeedMutex = kotlinx.coroutines.sync.Mutex()
+
+        private val defaultSampleKitchens = listOf(
+            SampleKitchenSpec(
+                name = "Dapur Bu Sari",
+                whatsappNumber = "081211112201",
+                address = "Jl. Kenanga No. 8",
+                notes = "Spesialis sarapan & nasi tradisional",
+                products = listOf(
+                    SampleProductSpec("Nasi Kuning Komplit", "Makan Berat", 12000.0, 15, "porsi"),
+                    SampleProductSpec("Nasi Ayam Lengkuas", "Makan Berat", 14000.0, 12, "porsi"),
+                    SampleProductSpec("Lontong Sayur Medan", "Makan Berat", 10000.0, 10, "porsi")
+                )
+            ),
+            SampleKitchenSpec(
+                name = "Pawon Mbak Rina",
+                whatsappNumber = "081211112202",
+                address = "Perum Griya Asri Blok B-12",
+                notes = "Spesialis nasi bakar, cumi & dimsum",
+                products = listOf(
+                    SampleProductSpec("Nasi Bakar Ayam Suwir", "Makan Berat", 13000.0, 14, "bungkus"),
+                    SampleProductSpec("Nasi Cumi Cabe Ijo", "Makan Berat", 15000.0, 10, "porsi"),
+                    SampleProductSpec("Dimsum Ayam Mentai", "Cemilan", 14000.0, 16, "porsi"),
+                    SampleProductSpec("Otak-Otak Bakar", "Cemilan", 8000.0, 20, "porsi")
+                )
+            ),
+            SampleKitchenSpec(
+                name = "Kue & Jajanan Bu Tini",
+                whatsappNumber = "081211112203",
+                address = "Jl. Mawar Raya No. 21",
+                notes = "Aneka jajanan pasar & gorengan fresh",
+                products = listOf(
+                    SampleProductSpec("Donat Kentang Gula", "Cemilan", 4000.0, 25, "pcs"),
+                    SampleProductSpec("Pastel Sayur Telur", "Cemilan", 4000.0, 20, "pcs"),
+                    SampleProductSpec("Lemper Ayam Bakar", "Cemilan", 4000.0, 18, "pcs"),
+                    SampleProductSpec("Dadar Gulung Unti", "Cemilan", 3000.0, 22, "pcs")
+                )
+            ),
+            SampleKitchenSpec(
+                name = "Dapur Sehat Teh Nia",
+                whatsappNumber = "081211112204",
+                address = "Komp. Taman Melati Blok A-5",
+                notes = "Dessert segar, salad buah & puding",
+                products = listOf(
+                    SampleProductSpec("Salad Buah Segar", "Cemilan", 12000.0, 12, "cup"),
+                    SampleProductSpec("Puding Coklat Vla Susu", "Cemilan", 6000.0, 15, "cup")
+                )
+            ),
+            SampleKitchenSpec(
+                name = "Kedai Minuman Mas Eko",
+                whatsappNumber = "081211112205",
+                address = "Jl. Anggrek No. 14",
+                notes = "Minuman kekinian & kopi gula aren",
+                products = listOf(
+                    SampleProductSpec("Es Kopi Susu Gula Aren", "Minuman", 10000.0, 18, "botol"),
+                    SampleProductSpec("Es Teh Tarik Jelly", "Minuman", 7000.0, 20, "cup")
+                )
+            )
+        )
+
+        /**
+         * Idempotently inserts the 5 sample kitchens (15 products total) if they are not yet
+         * present in the local Room database. Uses default admin fee Rp 2.000/item.
+         */
+        suspend fun ensureSampleKitchensSeeded(dao: LapakDao): Int {
+            sampleSeedMutex.lock()
+            try {
+                val existingSellers = dao.getAllSellersDirect()
+                val existingNames = existingSellers.map { it.name.trim().lowercase() }.toMutableSet()
+                val usedCodes = existingSellers.map { it.vendorCode.uppercase() }.toMutableSet()
+                var insertedSellers = 0
+
+                for (kitchen in defaultSampleKitchens) {
+                    val normName = kitchen.name.trim().lowercase()
+                    if (normName in existingNames) continue
+
+                    var code = VendorCodeGenerator.generateVendorCode()
+                    while (code in usedCodes) {
+                        code = VendorCodeGenerator.generateVendorCode()
+                    }
+                    usedCodes.add(code)
+
+                    val sellerId = dao.insertSeller(
+                        Seller(
+                            name = kitchen.name,
+                            whatsappNumber = kitchen.whatsappNumber,
+                            address = kitchen.address,
+                            notes = kitchen.notes,
+                            status = SellerStatus.AKTIF,
+                            vendorCode = code,
+                            writeToken = VendorCodeGenerator.generateWriteToken(),
+                            customAdminFeeType = null,
+                            customAdminFeeValue = null
+                        )
+                    )
+                    existingNames.add(normName)
+                    insertedSellers++
+
+                    val defaultAdminFee = 2000.0
+                    for (prod in kitchen.products) {
+                        val sellerShare = (prod.sellingPrice - defaultAdminFee).coerceAtLeast(0.0)
+                        val prodId = dao.insertProduct(
+                            Product(
+                                sellerId = sellerId,
+                                name = prod.name,
+                                category = prod.category,
+                                unit = prod.unit,
+                                sellingPrice = prod.sellingPrice,
+                                sellerShare = sellerShare,
+                                adminProfitPerUnit = defaultAdminFee,
+                                isActive = true
+                            )
+                        )
+                        val lotId = dao.insertStockLot(
+                            StockLot(
+                                productId = prodId,
+                                sellerId = sellerId,
+                                initialQty = prod.initialStock,
+                                currentQty = prod.initialStock,
+                                unit = prod.unit,
+                                sellingPrice = prod.sellingPrice,
+                                sellerShare = sellerShare,
+                                notes = "Setoran awal"
+                            )
+                        )
+                        dao.insertMovement(
+                            StockMovement(
+                                productId = prodId,
+                                sellerId = sellerId,
+                                stockLotId = lotId,
+                                type = StockMovementType.SETORAN_AWAL,
+                                quantityChange = prod.initialStock,
+                                finalStock = prod.initialStock,
+                                reasonOrNote = "Setoran awal ${prod.initialStock} ${prod.unit}"
+                            )
+                        )
+                    }
+                }
+                return insertedSellers
+            } finally {
+                sampleSeedMutex.unlock()
+            }
         }
     }
 }
+

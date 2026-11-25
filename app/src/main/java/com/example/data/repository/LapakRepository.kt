@@ -129,6 +129,10 @@ class LapakRepository(private val dao: LapakDao) {
         updatedList
     }
 
+    suspend fun ensureSampleKitchensSeeded(): Int = withContext(Dispatchers.IO) {
+        com.example.data.database.LapakDatabase.ensureSampleKitchensSeeded(dao)
+    }
+
     suspend fun applyWebVendorSubmission(
         submission: com.example.data.firebase.VendorSubmissionRemote
     ): Result<String> = withContext(Dispatchers.IO) {

@@ -250,7 +250,6 @@ fun LapakTopHeader(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp))
             .background(Brush.verticalGradient(gradientColors))
             .statusBarsPadding()
             .padding(horizontal = 16.dp, vertical = 14.dp)

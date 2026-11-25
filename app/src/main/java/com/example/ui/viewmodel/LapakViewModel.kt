@@ -294,6 +294,7 @@ class LapakViewModel(
             if (cleanUrl != currentSettings.webPortalBaseUrl) {
                 repository.updateAppSettings(currentSettings.copy(webPortalBaseUrl = cleanUrl))
             }
+            repository.ensureSampleKitchensSeeded()
             repository.ensureAllSellersHaveVendorCodes()
             delay(300)
             syncAllVendorsToCloud()

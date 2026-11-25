@@ -5,6 +5,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,15 +23,21 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -40,7 +47,6 @@ import com.example.data.model.PosterTemplate
 import com.example.data.model.ShopProfile
 import com.example.data.repository.ProductDetailItem
 import com.example.ui.theme.LocalLapakColors
-import com.example.ui.viewmodel.LapakViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -61,12 +67,17 @@ fun PromoPosterDialog(
             .filter { it.currentStock > 0 && it.product.isActive }
             .sortedBy { it.product.name.lowercase() }
     }
+    val groupedProducts = remember(readyProducts) {
+        PromoPosterGenerator.groupReadyProductsByCategory(readyProducts)
+    }
+    val colCount = if (readyProducts.size <= 15) 2 else 3
 
     // Live customizable state initialized from Settings -> Kustomisasi Promosi defaults
     var selectedTemplate by remember(appSettings.posterTemplate) { mutableStateOf(appSettings.posterTemplate) }
     var showLogo by remember(appSettings.posterShowLogo) { mutableStateOf(appSettings.posterShowLogo) }
     var showShopName by remember(appSettings.posterShowShopName) { mutableStateOf(appSettings.posterShowShopName) }
     var showContact by remember(appSettings.posterShowContact) { mutableStateOf(appSettings.posterShowContact) }
+    var showStock by remember { mutableStateOf(false) }
     var customBgPath by remember(appSettings.posterCustomBgUri) { mutableStateOf(appSettings.posterCustomBgUri) }
     var isExporting by remember { mutableStateOf(false) }
 
@@ -91,7 +102,7 @@ fun PromoPosterDialog(
 
     val renderConfig = remember(
         selectedTemplate, appSettings.posterIntroText, appSettings.posterOutroText,
-        showLogo, showShopName, showContact, customBgPath
+        showLogo, showShopName, showContact, showStock, customBgPath
     ) {
         PosterRenderConfig(
             template = selectedTemplate,
@@ -100,6 +111,7 @@ fun PromoPosterDialog(
             showLogo = showLogo,
             showShopName = showShopName,
             showContact = showContact,
+            showStock = showStock,
             customBgPath = customBgPath
         )
     }
@@ -114,7 +126,7 @@ fun PromoPosterDialog(
             border = BorderStroke(1.dp, lapakColors.cardBorder),
             modifier = Modifier
                 .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.92f)
+                .fillMaxHeight(0.93f)
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
                 // Dialog Top Header
@@ -133,7 +145,7 @@ fun PromoPosterDialog(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "${readyProducts.size} menu ready stok • Tanpa nama penyetor",
+                            text = "${readyProducts.size} menu ready • ${groupedProducts.size} kategori • Layout $colCount kolom",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.SemiBold
@@ -154,10 +166,11 @@ fun PromoPosterDialog(
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // 1. LIVE POSTER PREVIEW CARD
+                    // 1. LIVE BORDERLESS POSTER PREVIEW
                     PosterLivePreviewCard(
                         shopProfile = shopProfile,
-                        readyProducts = readyProducts,
+                        groupedProducts = groupedProducts,
+                        totalItems = readyProducts.size,
                         config = renderConfig
                     )
 
@@ -247,7 +260,7 @@ fun PromoPosterDialog(
                         }
                     }
 
-                    // 3. QUICK ELEMENT TOGGLES
+                    // 3. QUICK ELEMENT TOGGLES (including Tampilkan Sisa Stok)
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
                         border = BorderStroke(1.dp, lapakColors.cardBorder),
@@ -257,9 +270,29 @@ fun PromoPosterDialog(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            PosterToggleRow("Tampilkan Icon / Logo Lapak", showLogo) { showLogo = it }
-                            PosterToggleRow("Tampilkan Nama Lapak", showShopName) { showShopName = it }
-                            PosterToggleRow("Tampilkan Nomor WA & Alamat", showContact) { showContact = it }
+                            PosterToggleRow(
+                                label = "Tampilkan Sisa Stok",
+                                subtitle = if (showStock) "Menampilkan angka stok kecil (14) di sebelah harga" else "Super ringkas tanpa stok (muat hingga 100+ produk)",
+                                checked = showStock,
+                                testTag = "poster_toggle_show_stock",
+                                onCheckedChange = { showStock = it }
+                            )
+                            HorizontalDivider(color = lapakColors.cardBorder.copy(alpha = 0.6f))
+                            PosterToggleRow(
+                                label = "Tampilkan Icon / Logo Lapak",
+                                checked = showLogo,
+                                onCheckedChange = { showLogo = it }
+                            )
+                            PosterToggleRow(
+                                label = "Tampilkan Nama Lapak",
+                                checked = showShopName,
+                                onCheckedChange = { showShopName = it }
+                            )
+                            PosterToggleRow(
+                                label = "Tampilkan Nomor WA & Alamat",
+                                checked = showContact,
+                                onCheckedChange = { showContact = it }
+                            )
                         }
                     }
                 }
@@ -348,22 +381,35 @@ fun PromoPosterDialog(
 private fun PosterToggleRow(
     label: String,
     checked: Boolean,
+    subtitle: String? = null,
+    testTag: String? = null,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
             .clickable { onCheckedChange(!checked) }
-            .padding(vertical = 2.dp),
+            .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 10.sp
+                )
+            }
+        }
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange
@@ -374,29 +420,29 @@ private fun PosterToggleRow(
 @Composable
 private fun PosterLivePreviewCard(
     shopProfile: ShopProfile,
-    readyProducts: List<ProductDetailItem>,
+    groupedProducts: List<PosterCategoryGroup>,
+    totalItems: Int,
     config: PosterRenderConfig
 ) {
-    val style = remember(config.template) { PromoPosterStyles.resolve(config.template) }
     val customBgBitmap = if (config.template == PosterTemplate.CUSTOM_IMAGE && !config.customBgPath.isNullOrBlank()) {
         rememberLocalBitmap(config.customBgPath, maxDim = 720)
     } else null
-
-    val titleColor = if (customBgBitmap != null) Color.White else Color(style.titleColor)
-    val subColor = if (customBgBitmap != null) Color(0xFFE6F4EE) else Color(style.subtitleColor)
-    val footerTextColor = if (customBgBitmap != null) Color.White else Color(style.footerText)
-    val footerBgColor = if (customBgBitmap != null) Color.White.copy(alpha = 0.2f) else Color(style.footerBg)
+    val style = remember(config.template, customBgBitmap) {
+        if (customBgBitmap != null) PromoPosterStyles.softEmerald else PromoPosterStyles.resolve(config.template)
+    }
+    val colCount = if (totalItems <= 15) 2 else 3
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(
                 Brush.verticalGradient(
                     listOf(Color(style.bgStart), Color(style.bgEnd))
                 )
             )
     ) {
+        // Custom Gallery Photo + Dark Scrim OR Subtle Geometric & Culinary Watermark Texture (6%-10% opacity)
         if (customBgBitmap != null) {
             Image(
                 bitmap = customBgBitmap.asImageBitmap(),
@@ -409,199 +455,283 @@ private fun PosterLivePreviewCard(
                     .matchParentSize()
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color(0xB810241D), Color(0xD40B1713))
+                            listOf(Color(0xCC0D231B), Color(0xE0091813))
                         )
                     )
             )
+        } else {
+            val patternColor = Color(style.patternColor)
+            val goldAccent = Color(style.accentGoldColor)
+            Canvas(modifier = Modifier.matchParentSize()) {
+                // Subtle diagonal diamond lattice (~6% opacity)
+                val step = 42.dp.toPx()
+                var x = -size.height
+                while (x < size.width + size.height) {
+                    drawLine(
+                        color = patternColor.copy(alpha = 0.06f),
+                        start = Offset(x, 0f),
+                        end = Offset(x + size.height, size.height),
+                        strokeWidth = 1f
+                    )
+                    drawLine(
+                        color = patternColor.copy(alpha = 0.06f),
+                        start = Offset(x + size.height, 0f),
+                        end = Offset(x, size.height),
+                        strokeWidth = 1f
+                    )
+                    x += step
+                }
+                // Subtle golden accent corner rings (~8% opacity)
+                drawCircle(
+                    color = goldAccent.copy(alpha = 0.08f),
+                    radius = 68.dp.toPx(),
+                    center = Offset(size.width - 14.dp.toPx(), 26.dp.toPx()),
+                    style = Stroke(width = 1.5f)
+                )
+                drawCircle(
+                    color = goldAccent.copy(alpha = 0.08f),
+                    radius = 58.dp.toPx(),
+                    center = Offset(18.dp.toPx(), size.height - 32.dp.toPx()),
+                    style = Stroke(width = 1.5f)
+                )
+                // Subtle translucent culinary dome/stall shapes (~8% opacity)
+                val domeSize = 34.dp.toPx()
+                drawArc(
+                    color = patternColor.copy(alpha = 0.08f),
+                    startAngle = 180f,
+                    sweepAngle = 180f,
+                    useCenter = false,
+                    topLeft = Offset(size.width - 54.dp.toPx(), size.height * 0.36f),
+                    size = Size(domeSize, domeSize * 0.72f),
+                    style = Stroke(width = 2f)
+                )
+                drawArc(
+                    color = patternColor.copy(alpha = 0.08f),
+                    startAngle = 0f,
+                    sweepAngle = 180f,
+                    useCenter = false,
+                    topLeft = Offset(16.dp.toPx(), size.height * 0.52f),
+                    size = Size(domeSize, domeSize * 0.72f),
+                    style = Stroke(width = 2f)
+                )
+            }
         }
+
+        // Subtle inner poster border
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .padding(7.dp)
+                .border(1.dp, Color(style.dividerColor), RoundedCornerShape(12.dp))
+        )
 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(horizontal = 13.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // === HEADER ===
             if (config.showLogo) {
                 ShopAvatarBadge(
                     iconKey = shopProfile.shopIconKey,
                     logoUri = shopProfile.logoUri,
-                    size = 46.dp,
-                    containerColor = if (config.template == PosterTemplate.WARM_CREAM && customBgBitmap == null) {
-                        Color.White
-                    } else {
-                        Color.White.copy(alpha = 0.18f)
-                    },
-                    iconTint = if (config.template == PosterTemplate.WARM_CREAM && customBgBitmap == null) {
-                        Color(0xFFB4690E)
-                    } else {
-                        Color.White
-                    }
+                    size = 42.dp,
+                    containerColor = Color(style.accentGoldColor).copy(alpha = 0.16f),
+                    iconTint = Color(style.accentGoldColor),
+                    borderColor = Color(style.accentGoldColor).copy(alpha = 0.7f)
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(7.dp))
             }
 
             if (config.showShopName) {
                 Text(
-                    text = shopProfile.shopName,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = titleColor,
+                    text = shopProfile.shopName.trim().ifEmpty { "LAPAK KITA" }.uppercase(),
+                    fontSize = 20.sp,
+                    letterSpacing = 1.4.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(style.titleColor),
                     textAlign = TextAlign.Center
                 )
             }
 
             Text(
-                text = config.introText,
-                style = MaterialTheme.typography.labelMedium,
+                text = config.introText.trim().ifEmpty { "Menu Fresh & Ready Stok Hari Ini!" },
+                fontSize = 11.5.sp,
                 fontWeight = FontWeight.Bold,
-                color = subColor,
+                color = Color(style.subtitleColor),
                 textAlign = TextAlign.Center
             )
 
+            Spacer(Modifier.height(8.dp))
+
+            // "LIST MENU READY STOK" Ribbon Label with Flanking Lines
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(1.dp)
+                        .background(Color(style.accentGoldColor).copy(alpha = 0.42f))
+                )
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Color(style.listLabelBg))
+                        .border(1.dp, Color(style.accentGoldColor).copy(alpha = 0.55f), RoundedCornerShape(999.dp))
+                        .padding(horizontal = 10.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = "LIST MENU READY STOK",
+                        fontSize = 9.sp,
+                        letterSpacing = 1.1.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(style.listLabelText)
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(1.dp)
+                        .background(Color(style.accentGoldColor).copy(alpha = 0.42f))
+                )
+            }
+
             Spacer(Modifier.height(12.dp))
 
-            // Menu Card (STRICTLY NO SELLER NAME; auto 2 columns when > 8 items)
-            val useTwoColumns = readyProducts.size > 8
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = Color(style.cardBg),
-                border = BorderStroke(1.dp, Color(style.cardBorder)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(if (useTwoColumns) 10.dp else 12.dp)) {
-                    if (readyProducts.isEmpty()) {
-                        Text(
-                            text = "Belum ada produk dengan stok tersedia (> 0).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(style.itemNameColor).copy(alpha = 0.7f),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 16.dp)
-                        )
-                    } else if (useTwoColumns) {
-                        val rows = remember(readyProducts) { readyProducts.chunked(2) }
-                        rows.forEachIndexed { rowIdx, pair ->
+            // === BORDERLESS MENU LIST BY CATEGORY (NO WHITE CARD, NO SELLER NAME) ===
+            if (groupedProducts.isEmpty()) {
+                Text(
+                    text = "Belum ada produk dengan stok tersedia (> 0).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(style.itemNameColor).copy(alpha = 0.75f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 18.dp)
+                )
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    groupedProducts.forEach { group ->
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            // Soft Yellow/Orange Category Capsule Badge
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(IntrinsicSize.Min)
-                                    .padding(vertical = 5.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                PosterTwoColPreviewItem(
-                                    detail = pair[0],
-                                    style = style,
-                                    modifier = Modifier.weight(1f)
-                                )
                                 Box(
                                     modifier = Modifier
-                                        .width(1.dp)
-                                        .fillMaxHeight()
-                                        .background(Color(style.cardBorder))
-                                )
-                                if (pair.size > 1) {
-                                    PosterTwoColPreviewItem(
-                                        detail = pair[1],
-                                        style = style,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                } else {
-                                    Spacer(Modifier.weight(1f))
-                                }
-                            }
-                            if (rowIdx < rows.lastIndex) {
-                                HorizontalDivider(color = Color(style.cardBorder))
-                            }
-                        }
-                    } else {
-                        readyProducts.forEachIndexed { idx, detail ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 7.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                    Text(
-                                        text = detail.product.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(style.itemNameColor),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "${LapakViewModel.formatRupiah(detail.product.sellingPrice)} / ${detail.product.unit}",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = Color(style.priceColor)
-                                    )
-                                }
-                                val isLow = detail.currentStock <= 3
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = Color(if (isLow) style.stockLowBg else style.stockSafeBg)
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(
+                                            Brush.horizontalGradient(
+                                                listOf(
+                                                    Color(style.categoryBadgeStart),
+                                                    Color(style.categoryBadgeEnd)
+                                                )
+                                            )
+                                        )
+                                        .padding(horizontal = 9.dp, vertical = 3.dp)
                                 ) {
                                     Text(
-                                        text = "Sisa ${detail.currentStock} ${detail.product.unit}",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(if (isLow) style.stockLowText else style.stockSafeText),
-                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                        text = group.categoryName.uppercase(),
+                                        fontSize = 8.5.sp,
+                                        letterSpacing = 0.6.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(style.categoryBadgeText)
                                     )
                                 }
+                                Spacer(Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(1.dp)
+                                        .background(Color(style.accentGoldColor).copy(alpha = 0.28f))
+                                )
                             }
-                            if (idx < readyProducts.lastIndex) {
-                                HorizontalDivider(color = Color(style.cardBorder))
+
+                            // 3-Column Dense Grid (> 15 products) or 2-Column Grid (<= 15 products)
+                            val chunkedRows = remember(group.items, colCount) {
+                                group.items.chunked(colCount)
+                            }
+                            chunkedRows.forEachIndexed { rowIdx, rowItems ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 1.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    for (c in 0 until colCount) {
+                                        val item = rowItems.getOrNull(c)
+                                        if (item != null) {
+                                            val number = rowIdx * colCount + c + 1
+                                            PosterCompactMenuCell(
+                                                number = number,
+                                                detail = item,
+                                                style = style,
+                                                showStock = config.showStock,
+                                                compact = colCount == 3,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        } else {
+                                            Spacer(Modifier.weight(1f))
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(14.dp))
 
-            // Footer Outro & Optional Contact
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = footerBgColor,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
+            // === INTEGRATED FOOTER (NO WHITE BOX) ===
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.9f)
+                    .height(1.dp)
+                    .background(Color(style.accentGoldColor).copy(alpha = 0.4f))
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = config.outroText.trim().ifEmpty { "Yuk pesan sekarang sebelum kehabisan!" },
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(style.footerOutroColor),
+                textAlign = TextAlign.Center
+            )
+            if (config.showContact) {
+                if (shopProfile.whatsappNumber.isNotBlank()) {
+                    Spacer(Modifier.height(3.dp))
                     Text(
-                        text = config.outroText,
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "WA Order: ${shopProfile.whatsappNumber}",
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = footerTextColor,
+                        color = Color(style.footerContactColor),
                         textAlign = TextAlign.Center
                     )
-                    if (config.showContact) {
-                        if (shopProfile.whatsappNumber.isNotBlank()) {
-                            Spacer(Modifier.height(3.dp))
-                            Text(
-                                text = "WA Order: ${shopProfile.whatsappNumber}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = footerTextColor.copy(alpha = 0.9f),
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                        if (shopProfile.address.isNotBlank()) {
-                            Text(
-                                text = shopProfile.address,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = footerTextColor.copy(alpha = 0.85f),
-                                textAlign = TextAlign.Center,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
+                }
+                if (shopProfile.address.isNotBlank()) {
+                    Text(
+                        text = shopProfile.address,
+                        fontSize = 9.sp,
+                        color = Color(style.footerContactColor).copy(alpha = 0.85f),
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -609,54 +739,59 @@ private fun PosterLivePreviewCard(
 }
 
 @Composable
-private fun PosterTwoColPreviewItem(
+private fun PosterCompactMenuCell(
+    number: Int,
     detail: ProductDetailItem,
     style: PosterStyleSpec,
+    showStock: Boolean,
+    compact: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val isLow = detail.currentStock <= 3
-    Column(
-        modifier = modifier.padding(vertical = 2.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+    val fontSize = if (compact) 8.5.sp else 10.sp
+    val priceStr = PromoPosterGenerator.formatShortPrice(detail.product.sellingPrice)
+
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = detail.product.name,
-            style = MaterialTheme.typography.labelMedium,
+            text = "$number. ${detail.product.name}",
+            fontSize = fontSize,
+            lineHeight = if (compact) 11.sp else 13.sp,
             fontWeight = FontWeight.Bold,
             color = Color(style.itemNameColor),
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 3.dp)
         )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = LapakViewModel.formatRupiah(detail.product.sellingPrice),
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.ExtraBold,
-                color = Color(style.priceColor),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(end = 4.dp)
-            )
-            Surface(
-                shape = RoundedCornerShape(999.dp),
-                color = Color(if (isLow) style.stockLowBg else style.stockSafeBg)
-            ) {
-                Text(
-                    text = "Sisa ${detail.currentStock}",
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(if (isLow) style.stockLowText else style.stockSafeText),
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                    maxLines = 1
-                )
-            }
-        }
+        Text(
+            text = buildAnnotatedString {
+                withStyle(
+                    SpanStyle(
+                        color = Color(style.priceColor),
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                ) {
+                    append(priceStr)
+                }
+                if (showStock) {
+                    withStyle(
+                        SpanStyle(
+                            color = Color(style.stockColor),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = if (compact) 7.5.sp else 8.5.sp
+                        )
+                    ) {
+                        append("(${detail.currentStock})")
+                    }
+                }
+            },
+            fontSize = fontSize,
+            lineHeight = if (compact) 11.sp else 13.sp,
+            maxLines = 1
+        )
     }
 }
-
