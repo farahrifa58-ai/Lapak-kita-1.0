@@ -146,6 +146,10 @@ object PromoPosterGenerator {
     /**
      * Generates a crisp 1080px-wide customer promo poster PNG bitmap.
      * STRICT PRIVACY: Only shows items with currentStock > 0 and NEVER includes seller/kitchen names.
+     * AUTO LAYOUT:
+     * - <= 8 items: spacious 1-column vertical poster (min 4:5 ratio, 1080x1350+)
+     * - > 8 items: clean 2-column side-by-side layout inside a vertical poster (4:5 to 9:16)
+     *   so 15-24+ items remain super crisp and legible on mobile screens without tiny text.
      */
     fun generatePosterBitmap(
         context: Context,
@@ -154,15 +158,27 @@ object PromoPosterGenerator {
         config: PosterRenderConfig
     ): Bitmap {
         val items = readyProducts.filter { it.currentStock > 0 && it.product.isActive }
+        val useTwoColumns = items.size > 8
         val style = PromoPosterStyles.resolve(config.template)
         val width = 1080
-        val pad = 56f
+        val pad = if (useTwoColumns) 44f else 56f
 
-        val headerHeight = buildHeaderHeight(config)
-        val rowHeight = 112f
-        val listBodyHeight = if (items.isEmpty()) 220f else (items.size * rowHeight) + 44f
-        val footerHeight = if (config.showContact) 220f else 128f
-        val height = (pad + headerHeight + listBodyHeight + footerHeight + pad).toInt().coerceAtLeast(1180)
+        val headerHeight = buildHeaderHeight(config, compact = useTwoColumns)
+        val rowHeight = if (useTwoColumns) {
+            when {
+                items.size <= 16 -> 114f
+                items.size <= 22 -> 104f
+                else -> 96f
+            }
+        } else {
+            112f
+        }
+        val numRows = if (items.isEmpty()) 0 else if (useTwoColumns) (items.size + 1) / 2 else items.size
+        val listBodyHeight = if (items.isEmpty()) 220f else (numRows * rowHeight) + 40f
+        val footerHeight = if (config.showContact) 208f else 120f
+        val rawHeight = (pad + headerHeight + listBodyHeight + footerHeight + pad).toInt()
+        // Enforce clean vertical 4:5 (1080x1350) minimum height; naturally expands toward 9:16 (1080x1920) for 15-24+ items
+        val height = rawHeight.coerceAtLeast(1350)
 
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
@@ -204,12 +220,14 @@ object PromoPosterGenerator {
         val effectiveTitleColor = if (customBgBitmap != null) Color.WHITE else style.titleColor
         val effectiveSubColor = if (customBgBitmap != null) 0xFFE6F4EE.toInt() else style.subtitleColor
 
-        // 2. Draw Header Section
-        var cursorY = pad + 12f
+        // Distribute any extra vertical space gracefully so 4:5 posters look balanced
+        val extraSpace = (height - rawHeight).coerceAtLeast(0).toFloat()
+        var cursorY = pad + 10f + (extraSpace * 0.35f)
         val centerX = width / 2f
 
+        // 2. Draw Header Section
         if (config.showLogo) {
-            val badgeSize = 116f
+            val badgeSize = if (useTwoColumns) 96f else 116f
             val badgeRect = RectF(
                 centerX - badgeSize / 2f,
                 cursorY,
@@ -223,7 +241,7 @@ object PromoPosterGenerator {
                     0x2AFFFFFF
                 }
             }
-            canvas.drawRoundRect(badgeRect, 32f, 32f, badgeBgPaint)
+            canvas.drawRoundRect(badgeRect, 28f, 28f, badgeBgPaint)
 
             val customLogo = if (shopProfile.shopIconKey == ShopIconKey.CUSTOM_PHOTO && !shopProfile.logoUri.isNullOrBlank()) {
                 loadLocalBitmap(context, shopProfile.logoUri, maxDim = 256)
@@ -231,7 +249,7 @@ object PromoPosterGenerator {
 
             if (customLogo != null) {
                 val save = canvas.save()
-                val clipPath = Path().apply { addRoundRect(badgeRect, 32f, 32f, Path.Direction.CW) }
+                val clipPath = Path().apply { addRoundRect(badgeRect, 28f, 28f, Path.Direction.CW) }
                 canvas.clipPath(clipPath)
                 drawCenterCropBitmap(canvas, customLogo, badgeRect)
                 canvas.restoreToCount(save)
@@ -244,44 +262,44 @@ object PromoPosterGenerator {
                     else -> "🏪"
                 }
                 val emojiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    textSize = 56f
+                    textSize = if (useTwoColumns) 48f else 56f
                     textAlign = Paint.Align.CENTER
                 }
-                canvas.drawText(iconEmoji, centerX, cursorY + 78f, emojiPaint)
+                canvas.drawText(iconEmoji, centerX, cursorY + badgeSize * 0.67f, emojiPaint)
             }
-            cursorY += badgeSize + 24f
+            cursorY += badgeSize + (if (useTwoColumns) 18f else 24f)
         }
 
         if (config.showShopName) {
             val shopPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = effectiveTitleColor
-                textSize = 56f
+                textSize = if (useTwoColumns) 50f else 56f
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 textAlign = Paint.Align.CENTER
             }
-            canvas.drawText(shopProfile.shopName.take(28), centerX, cursorY + 48f, shopPaint)
-            cursorY += 66f
+            canvas.drawText(shopProfile.shopName.take(28), centerX, cursorY + 44f, shopPaint)
+            cursorY += if (useTwoColumns) 58f else 66f
         }
 
-        // Intro Promo Tagline Pill
+        // Intro Promo Tagline
         val introPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = effectiveSubColor
-            textSize = 31f
+            textSize = if (useTwoColumns) 29f else 31f
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
         }
-        canvas.drawText(config.introText.take(54), centerX, cursorY + 34f, introPaint)
-        cursorY += 52f
+        canvas.drawText(config.introText.take(54), centerX, cursorY + 32f, introPaint)
+        cursorY += if (useTwoColumns) 44f else 52f
 
         val sdf = SimpleDateFormat("EEEE, dd MMM yyyy • HH:mm", Locale("id", "ID"))
         val datePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = effectiveSubColor
             alpha = 215
-            textSize = 24f
+            textSize = 23f
             textAlign = Paint.Align.CENTER
         }
-        canvas.drawText("Update: ${sdf.format(Date())} WIB", centerX, cursorY + 24f, datePaint)
-        cursorY += 54f
+        canvas.drawText("Update: ${sdf.format(Date())} WIB", centerX, cursorY + 22f, datePaint)
+        cursorY += if (useTwoColumns) 42f else 54f
 
         // 3. Draw Menu Card Container (STRICTLY NO SELLER NAME!)
         val cardLeft = pad
@@ -296,21 +314,9 @@ object PromoPosterGenerator {
             this.style = Paint.Style.STROKE
             strokeWidth = 3f
         }
-        canvas.drawRoundRect(cardRect, 36f, 36f, cardPaint)
-        canvas.drawRoundRect(cardRect, 36f, 36f, cardBorderPaint)
+        canvas.drawRoundRect(cardRect, 34f, 34f, cardPaint)
+        canvas.drawRoundRect(cardRect, 34f, 34f, cardBorderPaint)
 
-        val namePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = style.itemNameColor
-            textSize = 33f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.LEFT
-        }
-        val pricePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = style.priceColor
-            textSize = 31f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.LEFT
-        }
         val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = style.cardBorder
             strokeWidth = 2f
@@ -323,11 +329,102 @@ object PromoPosterGenerator {
                 textAlign = Paint.Align.CENTER
             }
             canvas.drawText("Semua stok hari ini sudah habis terjual", centerX, cardTop + 120f, emptyPaint)
+        } else if (useTwoColumns) {
+            // === 2-COLUMN SIDE-BY-SIDE LAYOUT (> 8 items) ===
+            val cardInnerPadX = 24f
+            val colGap = 28f
+            val usableW = (cardRight - cardLeft) - (cardInnerPadX * 2f)
+            val colW = (usableW - colGap) / 2f
+            val leftColStart = cardLeft + cardInnerPadX
+            val rightColStart = leftColStart + colW + colGap
+
+            // Subtle vertical center divider between column 1 and column 2
+            canvas.drawLine(
+                centerX,
+                cardTop + 22f,
+                centerX,
+                cardBottom - 22f,
+                dividerPaint
+            )
+
+            val namePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = style.itemNameColor
+                textSize = if (items.size <= 18) 27f else 25f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.LEFT
+            }
+            val pricePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = style.priceColor
+                textSize = if (items.size <= 18) 25f else 23f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.LEFT
+            }
+            val badgeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 20f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.CENTER
+            }
+
+            var rowY = cardTop + 20f
+            for (r in 0 until numRows) {
+                val leftIdx = r * 2
+                val rightIdx = leftIdx + 1
+
+                drawTwoColPosterCell(
+                    canvas = canvas,
+                    detail = items[leftIdx],
+                    cellLeft = leftColStart,
+                    cellTop = rowY,
+                    cellWidth = colW,
+                    cellHeight = rowHeight,
+                    style = style,
+                    namePaint = namePaint,
+                    pricePaint = pricePaint,
+                    badgeTextPaint = badgeTextPaint
+                )
+
+                if (rightIdx < items.size) {
+                    drawTwoColPosterCell(
+                        canvas = canvas,
+                        detail = items[rightIdx],
+                        cellLeft = rightColStart,
+                        cellTop = rowY,
+                        cellWidth = colW,
+                        cellHeight = rowHeight,
+                        style = style,
+                        namePaint = namePaint,
+                        pricePaint = pricePaint,
+                        badgeTextPaint = badgeTextPaint
+                    )
+                }
+
+                if (r < numRows - 1) {
+                    canvas.drawLine(leftColStart, rowY + rowHeight, leftColStart + colW, rowY + rowHeight, dividerPaint)
+                    if (rightIdx < items.size) {
+                        canvas.drawLine(rightColStart, rowY + rowHeight, rightColStart + colW, rowY + rowHeight, dividerPaint)
+                    }
+                }
+                rowY += rowHeight
+            }
         } else {
-            var itemY = cardTop + 26f
+            // === SPACIOUS 1-COLUMN LAYOUT (<= 8 items) ===
+            val namePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = style.itemNameColor
+                textSize = 33f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.LEFT
+            }
+            val pricePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = style.priceColor
+                textSize = 31f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.LEFT
+            }
+
+            var itemY = cardTop + 22f
             items.forEachIndexed { idx, detail ->
                 val rowCenterY = itemY + rowHeight / 2f
-                val textLeft = cardLeft + 38f
+                val textLeft = cardLeft + 36f
 
                 // Product Name ONLY (never seller name!)
                 val cleanName = truncateText(detail.product.name, namePaint, 580f)
@@ -368,36 +465,36 @@ object PromoPosterGenerator {
         }
 
         // 4. Footer Outro & Optional Contact Info
-        val footerTop = cardBottom + 32f
-        val footerRect = RectF(cardLeft, footerTop, cardRight, footerTop + footerHeight - 20f)
+        val footerTop = cardBottom + 28f
+        val footerRect = RectF(cardLeft, footerTop, cardRight, footerTop + footerHeight - 16f)
         val footerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = if (customBgBitmap != null) 0x33FFFFFF else style.footerBg
         }
-        canvas.drawRoundRect(footerRect, 28f, 28f, footerPaint)
+        canvas.drawRoundRect(footerRect, 26f, 26f, footerPaint)
 
         val footerMainTextColor = if (customBgBitmap != null) Color.WHITE else style.footerText
         val outroPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = footerMainTextColor
-            textSize = 30f
+            textSize = 29f
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
         }
-        var footerCursorY = footerTop + 56f
+        var footerCursorY = footerTop + 54f
         canvas.drawText(config.outroText.take(56), centerX, footerCursorY, outroPaint)
 
         if (config.showContact) {
             val contactPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = footerMainTextColor
                 alpha = 230
-                textSize = 26f
+                textSize = 25f
                 textAlign = Paint.Align.CENTER
             }
             if (shopProfile.whatsappNumber.isNotBlank()) {
-                footerCursorY += 48f
+                footerCursorY += 46f
                 canvas.drawText("Order / WhatsApp: ${shopProfile.whatsappNumber}", centerX, footerCursorY, contactPaint)
             }
             if (shopProfile.address.isNotBlank()) {
-                footerCursorY += 40f
+                footerCursorY += 38f
                 val addrLine = truncateText(shopProfile.address, contactPaint, width - pad * 2 - 64f)
                 canvas.drawText(addrLine, centerX, footerCursorY, contactPaint)
             }
@@ -406,10 +503,49 @@ object PromoPosterGenerator {
         return bitmap
     }
 
-    private fun buildHeaderHeight(config: PosterRenderConfig): Float {
-        var h = 110f
-        if (config.showLogo) h += 140f
-        if (config.showShopName) h += 68f
+    private fun drawTwoColPosterCell(
+        canvas: Canvas,
+        detail: ProductDetailItem,
+        cellLeft: Float,
+        cellTop: Float,
+        cellWidth: Float,
+        cellHeight: Float,
+        style: PosterStyleSpec,
+        namePaint: Paint,
+        pricePaint: Paint,
+        badgeTextPaint: Paint
+    ) {
+        // Line 1: Product Name ONLY (never seller name!)
+        val cleanName = truncateText(detail.product.name, namePaint, cellWidth - 6f)
+        canvas.drawText(cleanName, cellLeft + 4f, cellTop + cellHeight * 0.40f, namePaint)
+
+        // Line 2: Selling Price (left) + Compact Stock Badge (right)
+        val isLow = detail.currentStock <= 3
+        val stockText = "Sisa ${detail.currentStock}"
+        badgeTextPaint.color = if (isLow) style.stockLowText else style.stockSafeText
+        val pillW = (badgeTextPaint.measureText(stockText) + 28f).coerceAtLeast(94f)
+        val pillH = 38f
+        val pillRight = cellLeft + cellWidth - 2f
+        val pillLeft = pillRight - pillW
+        val pillTop = cellTop + cellHeight * 0.54f
+        val pillRect = RectF(pillLeft, pillTop, pillRight, pillTop + pillH)
+
+        val pillBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = if (isLow) style.stockLowBg else style.stockSafeBg
+        }
+        canvas.drawRoundRect(pillRect, 19f, 19f, pillBgPaint)
+        canvas.drawText(stockText, pillRect.centerX(), pillRect.centerY() + 7f, badgeTextPaint)
+
+        val priceLabel = LapakViewModel.formatRupiah(detail.product.sellingPrice)
+        val maxPriceW = (pillLeft - cellLeft - 14f).coerceAtLeast(100f)
+        val cleanPrice = truncateText(priceLabel, pricePaint, maxPriceW)
+        canvas.drawText(cleanPrice, cellLeft + 4f, cellTop + cellHeight * 0.80f, pricePaint)
+    }
+
+    private fun buildHeaderHeight(config: PosterRenderConfig, compact: Boolean = false): Float {
+        var h = if (compact) 88f else 110f
+        if (config.showLogo) h += if (compact) 114f else 140f
+        if (config.showShopName) h += if (compact) 58f else 68f
         return h
     }
 

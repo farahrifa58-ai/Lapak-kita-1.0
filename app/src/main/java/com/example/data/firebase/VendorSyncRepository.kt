@@ -26,7 +26,8 @@ data class WebNewProductPayload(
     val category: String,
     val unit: String,
     val sellingPrice: Double,
-    val initialStock: Int
+    val initialStock: Int,
+    val clientItemId: String = ""
 )
 
 data class WebEditedProductPayload(
@@ -290,7 +291,8 @@ class VendorSyncRepository(
             val unit = (map["unit"] as? String)?.trim().orEmpty().ifEmpty { "pcs" }
             val sellingPrice = (map["sellingPrice"] as? Number)?.toDouble()?.coerceAtLeast(0.0) ?: 0.0
             val initialStock = (map["initialStock"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0
-            WebNewProductPayload(name, category, unit, sellingPrice, initialStock)
+            val clientItemId = (map["clientItemId"] as? String)?.trim().orEmpty()
+            WebNewProductPayload(name, category, unit, sellingPrice, initialStock, clientItemId)
         }
 
         val rawEdited = doc.get("editedProducts") as? List<*> ?: emptyList<Any>()

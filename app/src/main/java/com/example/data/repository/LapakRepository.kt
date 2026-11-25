@@ -141,21 +141,52 @@ class LapakRepository(private val dao: LapakDao) {
         var editedProductsCount = 0
         var totalAddedStock = 0
 
-        // 1. Add new products from Web Penyetor
+        // 1. Add new products from Web Penyetor (with strict anti-duplication check)
+        val existingByNormName = dao.getProductsBySellerDirect(seller.id)
+            .associateBy { it.name.trim().lowercase() }
+            .toMutableMap()
+        val seenClientIds = mutableSetOf<String>()
+        val seenBatchNames = mutableSetOf<String>()
+
         for (np in submission.newProducts) {
+            val cleanName = np.name.trim()
+            if (cleanName.isEmpty()) continue
+            val normName = cleanName.lowercase()
+            if (np.clientItemId.isNotBlank() && !seenClientIds.add(np.clientItemId)) continue
+            if (!seenBatchNames.add(normName)) continue
+
             val calc = AdminFeeCalculator.calculate(np.sellingPrice, feeType, feeValue)
-            val newProdId = dao.insertProduct(
-                Product(
+            val alreadyExists = existingByNormName[normName]
+            val targetProdId = if (alreadyExists != null) {
+                // Prevent duplicate product creation on slow-network retries: update existing product instead
+                val updated = alreadyExists.copy(
+                    category = np.category,
+                    unit = np.unit,
+                    sellingPrice = calc.sellingPrice,
+                    sellerShare = calc.sellerShare,
+                    adminProfitPerUnit = calc.adminFee,
+                    isActive = true
+                )
+                dao.updateProduct(updated)
+                existingByNormName[normName] = updated
+                editedProductsCount++
+                updated.id
+            } else {
+                val created = Product(
                     sellerId = seller.id,
-                    name = np.name,
+                    name = cleanName,
                     category = np.category,
                     unit = np.unit,
                     sellingPrice = calc.sellingPrice,
                     sellerShare = calc.sellerShare,
                     adminProfitPerUnit = calc.adminFee
                 )
-            )
-            addedProductsCount++
+                val insertedId = dao.insertProduct(created)
+                existingByNormName[normName] = created.copy(id = insertedId)
+                addedProductsCount++
+                insertedId
+            }
+
             if (np.initialStock > 0) {
                 val noteText = buildString {
                     append("Kiriman via Web Penyetor")
@@ -163,7 +194,7 @@ class LapakRepository(private val dao: LapakDao) {
                 }
                 depositStock(
                     sellerId = seller.id,
-                    productId = newProdId,
+                    productId = targetProdId,
                     quantity = np.initialStock,
                     unit = np.unit,
                     sellingPrice = calc.sellingPrice,

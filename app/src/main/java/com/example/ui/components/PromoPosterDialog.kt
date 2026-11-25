@@ -460,14 +460,15 @@ private fun PosterLivePreviewCard(
 
             Spacer(Modifier.height(12.dp))
 
-            // Menu Card (STRICTLY NO SELLER NAME)
+            // Menu Card (STRICTLY NO SELLER NAME; auto 2 columns when > 8 items)
+            val useTwoColumns = readyProducts.size > 8
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = Color(style.cardBg),
                 border = BorderStroke(1.dp, Color(style.cardBorder)),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+                Column(modifier = Modifier.padding(if (useTwoColumns) 10.dp else 12.dp)) {
                     if (readyProducts.isEmpty()) {
                         Text(
                             text = "Belum ada produk dengan stok tersedia (> 0).",
@@ -478,9 +479,44 @@ private fun PosterLivePreviewCard(
                                 .fillMaxWidth()
                                 .padding(vertical = 16.dp)
                         )
+                    } else if (useTwoColumns) {
+                        val rows = remember(readyProducts) { readyProducts.chunked(2) }
+                        rows.forEachIndexed { rowIdx, pair ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(IntrinsicSize.Min)
+                                    .padding(vertical = 5.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                PosterTwoColPreviewItem(
+                                    detail = pair[0],
+                                    style = style,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .width(1.dp)
+                                        .fillMaxHeight()
+                                        .background(Color(style.cardBorder))
+                                )
+                                if (pair.size > 1) {
+                                    PosterTwoColPreviewItem(
+                                        detail = pair[1],
+                                        style = style,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                } else {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                            if (rowIdx < rows.lastIndex) {
+                                HorizontalDivider(color = Color(style.cardBorder))
+                            }
+                        }
                     } else {
-                        val previewItems = readyProducts.take(8)
-                        previewItems.forEachIndexed { idx, detail ->
+                        readyProducts.forEachIndexed { idx, detail ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -518,20 +554,9 @@ private fun PosterLivePreviewCard(
                                     )
                                 }
                             }
-                            if (idx < previewItems.lastIndex) {
+                            if (idx < readyProducts.lastIndex) {
                                 HorizontalDivider(color = Color(style.cardBorder))
                             }
-                        }
-                        if (readyProducts.size > 8) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = "+ ${readyProducts.size - 8} menu ready lainnya akan ikut tercetak penuh di gambar PNG",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(style.priceColor),
-                                fontWeight = FontWeight.SemiBold,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth()
-                            )
                         }
                     }
                 }
@@ -582,3 +607,56 @@ private fun PosterLivePreviewCard(
         }
     }
 }
+
+@Composable
+private fun PosterTwoColPreviewItem(
+    detail: ProductDetailItem,
+    style: PosterStyleSpec,
+    modifier: Modifier = Modifier
+) {
+    val isLow = detail.currentStock <= 3
+    Column(
+        modifier = modifier.padding(vertical = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = detail.product.name,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = Color(style.itemNameColor),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = LapakViewModel.formatRupiah(detail.product.sellingPrice),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(style.priceColor),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 4.dp)
+            )
+            Surface(
+                shape = RoundedCornerShape(999.dp),
+                color = Color(if (isLow) style.stockLowBg else style.stockSafeBg)
+            ) {
+                Text(
+                    text = "Sisa ${detail.currentStock}",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(if (isLow) style.stockLowText else style.stockSafeText),
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+

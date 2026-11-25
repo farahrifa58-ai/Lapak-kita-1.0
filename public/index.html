@@ -291,7 +291,47 @@
     }
 
     .btn:active { transform: scale(0.98); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn:disabled { opacity: 0.48; cursor: not-allowed; filter: grayscale(0.2); }
+
+    @keyframes lapakSpin {
+      to { transform: rotate(360deg); }
+    }
+
+    .btn-spinner {
+      width: 16px;
+      height: 16px;
+      border: 2.5px solid rgba(255, 255, 255, 0.35);
+      border-top-color: #FFFFFF;
+      border-radius: 50%;
+      display: inline-block;
+      animation: lapakSpin 0.75s linear infinite;
+      flex-shrink: 0;
+    }
+
+    .toast-success {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: #1F6E4E;
+      color: #FFFFFF;
+      padding: 12px 18px;
+      border-radius: 14px;
+      font-size: 13px;
+      font-weight: 700;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+      z-index: 120;
+      max-width: calc(100vw - 32px);
+      text-align: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+
+    .toast-success.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
 
     .btn-primary {
       background: var(--primary);
@@ -668,6 +708,7 @@
 
     <!-- Live Status / Notification Banner -->
     <div id="statusBanner" class="banner-status hidden"></div>
+    <div id="successToast" class="toast-success" role="status" aria-live="polite"></div>
 
     <!-- Manual Access Screen (when ?kode= is missing or invalid) -->
     <div id="accessCard" class="card hidden">
@@ -931,8 +972,10 @@
     let draftNewProducts = [];       // { tempId, name, category, unit, sellingPrice, initialStock }
     let draftEditedProducts = {};    // localProductId -> { localProductId, name, category, unit, sellingPrice }
     let draftStockAdditions = {};    // localProductId -> addedQty (int > 0)
+    let activeSubmissionId = null;   // Deterministic ID per draft batch to prevent duplicate writes on slow retries
     let lastSubmittedId = null;
     let isSubmitting = false;
+    let toastTimer = null;
 
     // Modal editing mode
     let modalMode = "new"; // "new" | "editExisting" | "editDraftNew"
@@ -943,6 +986,7 @@
     const shopNameHeader = el("shopNameHeader");
     const themeToggleBtn = el("themeToggleBtn");
     const statusBanner = el("statusBanner");
+    const successToast = el("successToast");
     const accessCard = el("accessCard");
     const loadingCard = el("loadingCard");
     const portalContent = el("portalContent");
@@ -1084,8 +1128,33 @@
       statusBanner.classList.remove("hidden");
     }
 
+    function showSuccessToast(message) {
+      if (!successToast) return;
+      successToast.textContent = message;
+      successToast.classList.add("show");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        successToast.classList.remove("show");
+      }, 4500);
+    }
+
     function hideBanner() {
       statusBanner.classList.add("hidden");
+    }
+
+    function clearAllDrafts() {
+      draftNewProducts = [];
+      draftEditedProducts = {};
+      draftStockAdditions = {};
+      activeSubmissionId = null;
+      if (deliveryNoteInput) deliveryNoteInput.value = "";
+    }
+
+    function ensureBatchSubmissionId() {
+      if (!activeSubmissionId) {
+        activeSubmissionId = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      }
+      return activeSubmissionId;
     }
 
     // --- Render ---
@@ -1110,10 +1179,7 @@
       // Check if Admin has processed our latest submission
       if (lastSubmittedId && vendorData.lastProcessedSubmissionId === lastSubmittedId) {
         showBanner("success", "✅ Kiriman Anda sudah diterima & otomatis tersimpan di aplikasi Admin Lapak!");
-        draftNewProducts = [];
-        draftEditedProducts = {};
-        draftStockAdditions = {};
-        deliveryNoteInput.value = "";
+        showSuccessToast("✅ Data & stok sudah masuk di aplikasi Admin!");
         lastSubmittedId = null;
       }
 
@@ -1254,15 +1320,23 @@
       if (editCount > 0) parts.push(`${editCount} edit produk`);
       if (totalStockAdded > 0) parts.push(`+${totalStockAdded} stok kiriman`);
 
+      if (isSubmitting) {
+        pendingSummaryText.textContent = "Mohon tunggu, sedang menyimpan data ke Lapak...";
+        btnResetDrafts.classList.add("hidden");
+        btnSubmitToLapak.disabled = true;
+        btnSubmitToLapak.innerHTML = `<span class="btn-spinner" aria-hidden="true"></span><span>Sedang Mengirim...</span>`;
+        return;
+      }
+
       pendingSummaryText.textContent = hasChanges
         ? `Siap dikirim: ${parts.join(" • ")}`
         : "Isi stok kiriman atau tambah/edit produk terlebih dahulu";
 
-      btnResetDrafts.classList.toggle("hidden", !hasChanges || isSubmitting);
-      btnSubmitToLapak.disabled = !hasChanges || isSubmitting;
-      btnSubmitToLapak.textContent = isSubmitting
-        ? "Mengirim ke Lapak..."
-        : (!activeWriteToken && hasChanges ? "Masukkan Token & Kirim ke Lapak" : "Kirim & Simpan ke Lapak");
+      btnResetDrafts.classList.toggle("hidden", !hasChanges);
+      btnSubmitToLapak.disabled = !hasChanges;
+      btnSubmitToLapak.textContent = (!activeWriteToken && hasChanges)
+        ? "Masukkan Token & Kirim ke Lapak"
+        : "Kirim & Simpan ke Lapak";
     }
 
     // --- Modal Logic ---
@@ -1346,19 +1420,35 @@
       }
 
       if (modalMode === "new") {
-        draftNewProducts.push({
-          tempId: "tmp_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6),
-          name,
-          category,
-          unit,
-          sellingPrice,
-          initialStock
-        });
+        const normalizedName = name.toLowerCase();
+        const existingDraftIdx = draftNewProducts.findIndex((d) => d.name.trim().toLowerCase() === normalizedName);
+        if (existingDraftIdx >= 0) {
+          // Update existing draft entry instead of creating a duplicate
+          draftNewProducts[existingDraftIdx] = {
+            ...draftNewProducts[existingDraftIdx],
+            name,
+            category,
+            unit,
+            sellingPrice,
+            initialStock
+          };
+        } else {
+          draftNewProducts.push({
+            tempId: "item_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
+            name,
+            category,
+            unit,
+            sellingPrice,
+            initialStock
+          });
+        }
+        ensureBatchSubmissionId();
       } else if (modalMode === "editDraftNew") {
         const idx = draftNewProducts.findIndex((d) => d.tempId === modalTargetId);
         if (idx >= 0) {
           draftNewProducts[idx] = { ...draftNewProducts[idx], name, category, unit, sellingPrice, initialStock };
         }
+        ensureBatchSubmissionId();
       } else if (modalMode === "editExisting") {
         const numId = Number(modalTargetId);
         draftEditedProducts[numId] = {
@@ -1368,6 +1458,7 @@
           unit,
           sellingPrice
         };
+        ensureBatchSubmissionId();
       }
 
       closeProductModal();
@@ -1419,10 +1510,8 @@
     });
 
     btnResetDrafts.addEventListener("click", () => {
-      draftNewProducts = [];
-      draftEditedProducts = {};
-      draftStockAdditions = {};
-      deliveryNoteInput.value = "";
+      if (isSubmitting) return;
+      clearAllDrafts();
       renderNewProducts();
       renderExistingProducts();
       updateStickyBar();
@@ -1461,9 +1550,9 @@
       }
     });
 
-    // --- Submit to Firestore ---
+    // --- Submit to Firestore (Strict Anti-Double / Anti-Spam Click) ---
     btnSubmitToLapak.addEventListener("click", async () => {
-      if (isSubmitting || !vendorData) return;
+      if (isSubmitting || btnSubmitToLapak.disabled || !vendorData) return;
 
       // If token wasn't in URL, check inline input or prompt clearly
       if (!activeWriteToken) {
@@ -1484,19 +1573,29 @@
         }
       }
 
-      const newProductsPayload = draftNewProducts.slice(0, 50).map((p) => ({
-        name: p.name.slice(0, 100),
-        category: p.category.slice(0, 50),
-        unit: p.unit.slice(0, 20),
-        sellingPrice: Number(p.sellingPrice),
-        initialStock: Math.max(0, Math.round(Number(p.initialStock) || 0))
-      }));
+      // Deduplicate new products by unique clientItemId and normalized product name
+      const seenItemKeys = new Set();
+      const newProductsPayload = [];
+      for (const p of draftNewProducts.slice(0, 50)) {
+        const cleanName = String(p.name || "").trim().slice(0, 100);
+        const dedupeKey = cleanName.toLowerCase();
+        if (!cleanName || seenItemKeys.has(dedupeKey)) continue;
+        seenItemKeys.add(dedupeKey);
+        newProductsPayload.push({
+          clientItemId: String(p.tempId || ("item_" + Date.now())),
+          name: cleanName,
+          category: String(p.category || "Makanan").slice(0, 50),
+          unit: String(p.unit || "pcs").slice(0, 20),
+          sellingPrice: Number(p.sellingPrice),
+          initialStock: Math.max(0, Math.round(Number(p.initialStock) || 0))
+        });
+      }
 
       const editedProductsPayload = Object.values(draftEditedProducts).slice(0, 50).map((p) => ({
         localProductId: Number(p.localProductId),
-        name: p.name.slice(0, 100),
-        category: p.category.slice(0, 50),
-        unit: p.unit.slice(0, 20),
+        name: String(p.name || "").trim().slice(0, 100),
+        category: String(p.category || "Makanan").slice(0, 50),
+        unit: String(p.unit || "pcs").slice(0, 20),
         sellingPrice: Number(p.sellingPrice)
       }));
 
@@ -1509,13 +1608,18 @@
         }));
 
       if (newProductsPayload.length === 0 && editedProductsPayload.length === 0 && stockAdditionsPayload.length === 0) {
+        updateStickyBar();
         return;
       }
 
+      // Lock button IMMEDIATELY before awaiting network call
       isSubmitting = true;
-      updateStickyBar();
+      btnSubmitToLapak.disabled = true;
+      btnResetDrafts.classList.add("hidden");
+      btnSubmitToLapak.innerHTML = `<span class="btn-spinner" aria-hidden="true"></span><span>Sedang Mengirim...</span>`;
+      pendingSummaryText.textContent = "Mohon tunggu, sedang menyimpan data ke Lapak...";
 
-      const submissionId = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const submissionId = ensureBatchSubmissionId();
       const payload = {
         ownerUid: vendorData.ownerUid,
         vendorCode: vendorData.vendorCode,
@@ -1532,7 +1636,16 @@
       try {
         await setDoc(doc(db, "lapak_vendor_submissions", submissionId), payload);
         lastSubmittedId = submissionId;
-        showBanner("info", "📤 Kiriman berhasil dikirim! Menunggu aplikasi Admin Lapak memproses secara otomatis...");
+
+        // Immediately clear all draft queues & reset UI back to initial clean disabled state
+        clearAllDrafts();
+        renderNewProducts();
+        renderExistingProducts();
+
+        const successMsg = "✅ Data & stok kiriman berhasil dikirim ke Lapak! Aplikasi Admin akan menyinkronkan otomatis.";
+        showBanner("success", successMsg);
+        showSuccessToast("✅ Berhasil dikirim & disimpan ke Lapak!");
+        window.scrollTo({ top: 0, behavior: "smooth" });
       } catch (err) {
         console.error("Failed to submit vendor update:", err);
         if (err?.code === "permission-denied") {

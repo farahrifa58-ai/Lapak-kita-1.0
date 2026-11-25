@@ -59,6 +59,7 @@ fun SellersScreen(
     var stockDetailTargetSeller by remember { mutableStateOf<SellerDetailItem?>(null) }
     var addStockTargetSellerId by remember { mutableStateOf<Long?>(null) }
     var webLinkTargetSeller by remember { mutableStateOf<Seller?>(null) }
+    var showShareAllLinksDialog by remember { mutableStateOf(false) }
     var editTargetSeller by remember { mutableStateOf<Seller?>(null) }
     var deleteTargetSeller by remember { mutableStateOf<Seller?>(null) }
 
@@ -140,6 +141,45 @@ fun SellersScreen(
                     ),
                     singleLine = true
                 )
+            }
+
+            // Bulk Share All Active Vendor Links to WhatsApp Group Button
+            item {
+                val activeCount = remember(rawSellers) { rawSellers.count { it.status == SellerStatus.AKTIF } }
+                FilledTonalButton(
+                    onClick = { showShareAllLinksDialog = true },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = lapakColors.whatsappBg,
+                        contentColor = lapakColors.whatsappText
+                    ),
+                    border = BorderStroke(1.dp, lapakColors.whatsappText.copy(alpha = 0.28f)),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 11.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("btn_share_all_vendor_links")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Groups,
+                        contentDescription = null,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Bagikan Link Semua Penyetor ($activeCount Aktif)",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
             }
 
             // Status Filter Chips
@@ -431,6 +471,51 @@ fun SellersScreen(
                 viewModel.shareTextToWhatsApp(context, shareText, freshSeller.whatsappNumber)
             },
             onDismiss = { webLinkTargetSeller = null }
+        )
+    }
+
+    // Bulk Share All Active Vendor Links Dialog (Grup WA)
+    if (showShareAllLinksDialog) {
+        val activeSellerCount = remember(rawSellers) { rawSellers.count { it.status == SellerStatus.AKTIF } }
+        val bulkMessageText = remember(rawSellers, appSettings, shopProfile) {
+            viewModel.buildAllActiveVendorLinksShareText(rawSellers)
+        }
+        var bulkSyncStatus by remember { mutableStateOf("Menyinkronkan semua token penyetor ke Cloud...") }
+        var bulkSyncedOk by remember { mutableStateOf(false) }
+
+        LaunchedEffect(Unit) {
+            bulkSyncStatus = "Menyinkronkan semua token penyetor ke Cloud..."
+            viewModel.syncAllVendorsToCloud { ok, _ ->
+                bulkSyncedOk = ok
+                bulkSyncStatus = if (ok) {
+                    "Semua link & token penyetor aktif tersinkron di Cloud"
+                } else {
+                    "Sebagian belum tersinkron (cek internet lalu tekan Sinkronkan)"
+                }
+            }
+        }
+
+        ShareAllVendorLinksDialog(
+            activeSellerCount = activeSellerCount,
+            messageText = bulkMessageText,
+            isSyncing = isSyncingCloud,
+            syncStatusText = bulkSyncStatus,
+            isSyncedOk = bulkSyncedOk,
+            onSyncNow = {
+                bulkSyncStatus = "Menyinkronkan semua token penyetor ke Cloud..."
+                viewModel.syncAllVendorsToCloud { ok, msg ->
+                    bulkSyncedOk = ok
+                    bulkSyncStatus = if (ok) "Semua link & token penyetor aktif tersinkron di Cloud" else msg
+                }
+            },
+            onShareWhatsAppGroup = {
+                viewModel.shareTextToWhatsApp(context, bulkMessageText, null)
+            },
+            onCopyAllLinks = {
+                viewModel.copyToClipboard(context, bulkMessageText)
+                Toast.makeText(context, "Daftar semua link penyetor disalin!", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { showShareAllLinksDialog = false }
         )
     }
 

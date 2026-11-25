@@ -455,6 +455,28 @@ class LapakViewModel(
         }
     }
 
+    fun buildAllActiveVendorLinksShareText(sellers: List<Seller> = rawSellers.value): String {
+        val profile = shopProfile.value
+        val activeSellers = sellers
+            .filter { it.status == SellerStatus.AKTIF }
+            .sortedBy { it.name.lowercase() }
+
+        return buildString {
+            append("Halo Bapak/Ibu Penyetor ${profile.shopName},\n")
+            append("Berikut link khusus masing-masing dapur untuk cek stok, setoran, dan input kiriman harian:\n\n")
+            if (activeSellers.isEmpty()) {
+                append("(Belum ada penyetor berstatus Aktif saat ini)\n\n")
+            } else {
+                activeSellers.forEach { seller ->
+                    val url = buildVendorPortalUrl(seller)
+                    append("*${seller.name}*\n")
+                    append("$url\n\n")
+                }
+            }
+            append("Silakan klik link sesuai nama dapur masing-masing ya. Terima kasih!")
+        }
+    }
+
     fun addSeller(
         name: String,
         wa: String,
