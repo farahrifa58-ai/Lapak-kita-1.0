@@ -58,8 +58,6 @@ import com.example.data.repository.LapakRepository
 import com.example.i18n.AppStrings
 import com.example.ui.auth.AuthGateTab
 import com.example.ui.auth.AuthScreen
-import com.example.ui.auth.GoogleAuthHelper
-import com.example.ui.auth.GoogleSignInOutcome
 import com.example.ui.components.LucideIcons
 import com.example.ui.components.NeuCard
 import com.example.ui.components.neuExtruded
@@ -84,8 +82,6 @@ import kotlinx.coroutines.delay
 private sealed class AccessGateState {
     data object Checking : AccessGateState()
     data class RequireAuth(
-        val initialTab: AuthGateTab = AuthGateTab.LOGIN,
-        val errorMessage: String? = null,
         val autoRestoreHint: DeviceAutoRestoreHint? = null
     ) : AccessGateState()
     data class Granted(
@@ -139,6 +135,11 @@ class MainActivity : ComponentActivity() {
             var currentUser by remember { mutableStateOf<FirebaseUser?>(auth.currentUser) }
             var gateState by remember { mutableStateOf<AccessGateState>(AccessGateState.Checking) }
 
+            // Hoisted auth UI states so AuthStateListener / recompositions NEVER wipe authError or reset the form!
+            var authError by remember { mutableStateOf<String?>(null) }
+            var authActiveTab by remember { mutableStateOf(AuthGateTab.LOGIN) }
+            var isAuthActionRunning by remember { mutableStateOf(false) }
+
             DisposableEffect(auth) {
                 val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
                     currentUser = firebaseAuth.currentUser
@@ -149,8 +150,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Auto-Restore & Single Device Lock verification (Offline-First!)
-            LaunchedEffect(currentUser?.uid) {
+            // Startup Auto-Restore & Single Device Lock verification (Offline-First!)
+            // IMPORTANT: Skipped completely while AuthScreen is actively executing Login/Register
+            // so there is ZERO race condition and authError is NEVER cleared or flashed!
+            LaunchedEffect(currentUser?.uid, isAuthActionRunning) {
+                if (isAuthActionRunning) return@LaunchedEffect
+
                 val deviceId = licenseStorage.getDeviceId()
                 val fbUser = currentUser
                 val offlineSession = licenseStorage.getOfflineSession()
@@ -185,33 +190,30 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                             is LoginDeviceCheckResult.BlockedOtherDevice -> {
-                                GoogleAuthHelper.signOut(context)
+                                authError = onlineCheck.message
+                                authActiveTab = AuthGateTab.LOGIN
+                                Firebase.auth.signOut()
                                 licenseStorage.clearSession()
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.LOGIN,
-                                    errorMessage = onlineCheck.message
-                                )
+                                gateState = AccessGateState.RequireAuth()
                             }
                             is LoginDeviceCheckResult.InactiveAccount -> {
-                                GoogleAuthHelper.signOut(context)
+                                authError = onlineCheck.message
+                                authActiveTab = AuthGateTab.LOGIN
+                                Firebase.auth.signOut()
                                 licenseStorage.clearSession()
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.LOGIN,
-                                    errorMessage = onlineCheck.message
-                                )
+                                gateState = AccessGateState.RequireAuth()
                             }
                             is LoginDeviceCheckResult.NotRegistered -> {
-                                GoogleAuthHelper.signOut(context)
+                                authError = "Akun belum memiliki lisensi aktif. Daftar menggunakan Kode Aktivasi Pembelian."
+                                authActiveTab = AuthGateTab.REGISTER
+                                Firebase.auth.signOut()
                                 licenseStorage.clearSession()
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.REGISTER,
-                                    errorMessage = "Akun belum terdaftar dengan Kode Aktivasi."
-                                )
+                                gateState = AccessGateState.RequireAuth()
                             }
                             is LoginDeviceCheckResult.OfflineFallback -> Unit // Stay gracefully in offline mode!
                         }
                     } else {
-                        // Firebase Auth session exists (e.g., reinstalled or freshly signed in), verify users/{uid}
+                        // Existing Firebase Auth session without local cache -> verify users/{uid}
                         gateState = AccessGateState.Checking
                         when (
                             val onlineCheck = activationAuthRepository.verifySingleDeviceOnLogin(
@@ -229,67 +231,52 @@ class MainActivity : ComponentActivity() {
                                     deviceId = deviceId,
                                     active = true
                                 )
+                                authError = null
                                 gateState = AccessGateState.Granted(
                                     uid = onlineCheck.profile.userId,
                                     licenseCode = onlineCheck.profile.licenseCode
                                 )
                             }
                             is LoginDeviceCheckResult.BlockedOtherDevice -> {
-                                GoogleAuthHelper.signOut(context)
+                                authError = onlineCheck.message
+                                authActiveTab = AuthGateTab.LOGIN
+                                Firebase.auth.signOut()
                                 licenseStorage.clearSession()
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.LOGIN,
-                                    errorMessage = onlineCheck.message
-                                )
+                                gateState = AccessGateState.RequireAuth()
                             }
                             is LoginDeviceCheckResult.InactiveAccount -> {
-                                GoogleAuthHelper.signOut(context)
+                                authError = onlineCheck.message
+                                authActiveTab = AuthGateTab.LOGIN
+                                Firebase.auth.signOut()
                                 licenseStorage.clearSession()
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.LOGIN,
-                                    errorMessage = onlineCheck.message
-                                )
+                                gateState = AccessGateState.RequireAuth()
                             }
                             is LoginDeviceCheckResult.NotRegistered -> {
-                                GoogleAuthHelper.signOut(context)
+                                authError = "Akun belum terdaftar. Masukkan Kode Aktivasi Pembelian di tab Daftar Akun Baru."
+                                authActiveTab = AuthGateTab.REGISTER
+                                Firebase.auth.signOut()
                                 licenseStorage.clearSession()
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.REGISTER,
-                                    errorMessage = "Akun Google belum terdaftar. Masukkan Kode Aktivasi Pembelian."
-                                )
+                                gateState = AccessGateState.RequireAuth()
                             }
                             is LoginDeviceCheckResult.OfflineFallback -> {
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.LOGIN,
-                                    errorMessage = "Perlu koneksi internet untuk verifikasi lisensi pertama kali."
-                                )
+                                authError = "Perlu koneksi internet untuk verifikasi lisensi pertama kali."
+                                gateState = AccessGateState.RequireAuth()
                             }
                         }
                     }
                 } else {
-                    // No active Firebase Auth session yet -> check device_registry for same-HP Auto-Restore!
+                    // Already showing AuthScreen? Keep it mounted with its current inputs & authError!
+                    if (gateState is AccessGateState.RequireAuth) {
+                        return@LaunchedEffect
+                    }
+
+                    // Initial startup with no Auth session -> check device_registry for same-HP Auto-Restore hint
                     gateState = AccessGateState.Checking
                     val hint = activationAuthRepository.lookupDeviceRegistration(deviceId)
                     if (hint != null) {
-                        // Device was previously activated on this exact phone! Try silent Google restore first.
-                        when (GoogleAuthHelper.attemptAutoSignIn(context)) {
-                            is GoogleSignInOutcome.Success -> {
-                                // AuthStateListener will update currentUser and trigger the branch above!
-                                return@LaunchedEffect
-                            }
-                            else -> {
-                                gateState = AccessGateState.RequireAuth(
-                                    initialTab = AuthGateTab.LOGIN,
-                                    autoRestoreHint = hint
-                                )
-                            }
-                        }
-                    } else {
-                        gateState = AccessGateState.RequireAuth(
-                            initialTab = AuthGateTab.LOGIN,
-                            autoRestoreHint = null
-                        )
+                        authActiveTab = AuthGateTab.LOGIN
                     }
+                    gateState = AccessGateState.RequireAuth(autoRestoreHint = hint)
                 }
             }
 
@@ -333,10 +320,14 @@ class MainActivity : ComponentActivity() {
                             AuthScreen(
                                 activationAuthRepository = activationAuthRepository,
                                 licenseStorage = licenseStorage,
-                                initialTab = state.initialTab,
-                                initialErrorMessage = state.errorMessage,
+                                activeTab = authActiveTab,
+                                onTabChange = { authActiveTab = it },
+                                authError = authError,
+                                onSetAuthError = { authError = it },
+                                onAuthFlowRunningChange = { isAuthActionRunning = it },
                                 autoRestoreHint = state.autoRestoreHint,
                                 onAuthenticated = { profile ->
+                                    authError = null
                                     gateState = AccessGateState.Granted(
                                         uid = profile.userId,
                                         licenseCode = profile.licenseCode
@@ -367,7 +358,9 @@ class MainActivity : ComponentActivity() {
                                 activeLicenseCode = state.licenseCode,
                                 onSignedOut = {
                                     licenseStorage.clearSession()
-                                    gateState = AccessGateState.RequireAuth(initialTab = AuthGateTab.LOGIN)
+                                    authError = null
+                                    authActiveTab = AuthGateTab.LOGIN
+                                    gateState = AccessGateState.RequireAuth()
                                 }
                             )
                         }
@@ -568,7 +561,6 @@ private fun LapakModernBottomBar(
             .background(lapakColors.neuSurface)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Subtle light bevel line on top of Neumorphic bottom bar
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -602,7 +594,6 @@ private fun LapakModernBottomBar(
                     modifier = Modifier.weight(1f)
                 )
 
-                // Raised Neumorphic Floating Pill Center Kasir Button
                 CenterCashierNavButton(
                     label = AppStrings.get("nav_cashier", lang),
                     selected = currentScreen == AppScreen.CASHIER,
@@ -734,7 +725,6 @@ private fun CenterCashierNavButton(
                 }
             }
         ) {
-            // Raised Neumorphic Floating Pill
             Box(
                 modifier = Modifier
                     .height(44.dp)

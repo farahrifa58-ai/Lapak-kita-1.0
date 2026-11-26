@@ -2,13 +2,14 @@ package com.example.ui.auth
 
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
+import android.util.Patterns
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -22,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -30,6 +32,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,8 +51,16 @@ import com.example.ui.components.neuExtruded
 import com.example.ui.components.neuInset
 import com.example.ui.theme.LocalLapakColors
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseNetworkException
+import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
+import com.google.firebase.auth.FirebaseAuthInvalidUserException
+import com.google.firebase.auth.FirebaseAuthUserCollisionException
+import com.google.firebase.auth.FirebaseAuthWeakPasswordException
 import com.google.firebase.auth.auth
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
 enum class AuthGateTab {
     LOGIN,
@@ -55,17 +68,93 @@ enum class AuthGateTab {
 }
 
 /**
- * Unified Soft UI / Neumorphism Authentication & License Activation Screen.
- * - Tab 1 (Login): Google Sign-In via CredentialManager + Single Device Lock (users/{uid}).
- * - Tab 2 (Daftar Akun Baru): Validates `activation_codes/{code}` (`status == "available"`),
- *   signs in with Google, creates `users/{uid}`, and marks the code `"used"`.
+ * Translates Firebase Auth exceptions into clear, actionable Indonesian messages.
+ */
+fun mapFirebaseAuthErrorToIndonesian(throwable: Throwable): String {
+    if (throwable is FirebaseNetworkException) {
+        return "Gagal terhubung ke server. Periksa koneksi internet Anda."
+    }
+    if (throwable is FirebaseAuthUserCollisionException) {
+        return "Email ini sudah terdaftar, silakan pindah ke tab Login."
+    }
+    if (throwable is FirebaseAuthWeakPasswordException) {
+        return "Password minimal 6 karakter."
+    }
+    if (throwable is FirebaseAuthInvalidUserException) {
+        return "Email atau password salah."
+    }
+    if (throwable is FirebaseAuthInvalidCredentialsException) {
+        val code = throwable.errorCode.uppercase()
+        return when (code) {
+            "ERROR_INVALID_EMAIL" -> "Format alamat email tidak valid."
+            else -> "Email atau password salah."
+        }
+    }
+    if (throwable is FirebaseAuthException) {
+        val code = throwable.errorCode.uppercase()
+        return when (code) {
+            "ERROR_EMAIL_ALREADY_IN_USE", "EMAIL_EXISTS" ->
+                "Email ini sudah terdaftar, silakan pindah ke tab Login."
+            "ERROR_INVALID_CREDENTIAL",
+            "ERROR_WRONG_PASSWORD",
+            "ERROR_USER_NOT_FOUND",
+            "INVALID_LOGIN_CREDENTIALS" ->
+                "Email atau password salah."
+            "ERROR_WEAK_PASSWORD" ->
+                "Password minimal 6 karakter."
+            "ERROR_INVALID_EMAIL" ->
+                "Format alamat email tidak valid."
+            "ERROR_USER_DISABLED" ->
+                "Akun ini telah dinonaktifkan oleh admin."
+            "ERROR_TOO_MANY_REQUESTS" ->
+                "Terlalu banyak percobaan gagal. Tunggu beberapa saat lalu coba lagi."
+            "ERROR_OPERATION_NOT_ALLOWED" ->
+                "Metode Email & Password belum diaktifkan di Firebase Console (Authentication → Sign-in method → Email/Password)."
+            "ERROR_NETWORK_REQUEST_FAILED" ->
+                "Gagal terhubung ke server. Periksa koneksi internet Anda."
+            else ->
+                "Autentikasi gagal ($code): ${throwable.localizedMessage ?: "Silakan coba lagi."}"
+        }
+    }
+
+    val raw = throwable.message.orEmpty()
+    val lower = raw.lowercase()
+    return when {
+        "email-already-in-use" in lower || "email_exists" in lower ->
+            "Email ini sudah terdaftar, silakan pindah ke tab Login."
+        "invalid-credential" in lower || "wrong-password" in lower || "user-not-found" in lower || "invalid_login_credentials" in lower ->
+            "Email atau password salah."
+        "weak-password" in lower ->
+            "Password minimal 6 karakter."
+        "invalid-email" in lower ->
+            "Format alamat email tidak valid."
+        "operation-not-allowed" in lower || "operation_not_allowed" in lower ->
+            "Metode Email & Password belum diaktifkan di Firebase Console (Authentication → Sign-in method → Email/Password)."
+        "network" in lower || "timeout" in lower || "unable to resolve host" in lower ->
+            "Gagal terhubung ke server. Periksa koneksi internet Anda."
+        raw.isNotBlank() -> raw
+        else -> "Terjadi kesalahan saat memproses autentikasi. Silakan coba lagi."
+    }
+}
+
+/**
+ * Unified Soft UI / Neumorphism Email & Password Authentication + Activation Screen.
+ *
+ * Key stability guarantees:
+ * - `authError` is hoisted in MainActivity so `AuthStateListener` or recompositions NEVER clear or flash it.
+ * - `onAuthFlowRunningChange(true/false)` pauses MainActivity's startup auth observer while Login/Register executes,
+ *   completely eliminating race conditions and accidental bounce-backs.
+ * - Red alert box stays pinned directly above the submit button until the user edits input or taps the `×` close icon.
  */
 @Composable
 fun AuthScreen(
     activationAuthRepository: ActivationAuthRepository,
     licenseStorage: LicenseStorage,
-    initialTab: AuthGateTab = AuthGateTab.LOGIN,
-    initialErrorMessage: String? = null,
+    activeTab: AuthGateTab,
+    onTabChange: (AuthGateTab) -> Unit,
+    authError: String?,
+    onSetAuthError: (String?) -> Unit,
+    onAuthFlowRunningChange: (Boolean) -> Unit,
     autoRestoreHint: DeviceAutoRestoreHint? = null,
     onAuthenticated: (UserProfileDoc) -> Unit
 ) {
@@ -74,14 +163,28 @@ fun AuthScreen(
     val lapakColors = LocalLapakColors.current
     val currentDeviceId = remember { licenseStorage.getDeviceId() }
 
-    var activeTab by remember(initialTab, autoRestoreHint) {
-        mutableStateOf(if (autoRestoreHint != null) AuthGateTab.LOGIN else initialTab)
+    // Login form state (pre-filled with registered email if same-HP reinstall detected)
+    var loginEmail by remember(autoRestoreHint?.emailHint) {
+        mutableStateOf(autoRestoreHint?.emailHint.orEmpty())
     }
+    var loginPassword by remember { mutableStateOf("") }
+    var showLoginPassword by remember { mutableStateOf(false) }
+
+    // Register form state
     var businessName by remember { mutableStateOf(autoRestoreHint?.businessName.orEmpty()) }
+    var registerEmail by remember { mutableStateOf("") }
+    var registerPassword by remember { mutableStateOf("") }
+    var showRegisterPassword by remember { mutableStateOf(false) }
     var activationCode by remember { mutableStateOf("") }
+
     var isLoading by remember { mutableStateOf(false) }
     var statusStep by remember { mutableStateOf<String?>(null) }
-    var errorMessage by remember(initialErrorMessage) { mutableStateOf(initialErrorMessage) }
+
+    fun clearErrorOnEdit() {
+        if (authError != null) {
+            onSetAuthError(null)
+        }
+    }
 
     fun openContactAdminEmail() {
         val subject = Uri.encode("Pesan Kode Aktivasi Lapak Kita")
@@ -102,6 +205,217 @@ fun AuthScreen(
                 "Hubungi Admin via Email: ${LicenseStorage.DEVELOPER_EMAIL}",
                 Toast.LENGTH_LONG
             ).show()
+        }
+    }
+
+    fun submitLogin() {
+        if (isLoading) return
+        val email = loginEmail.trim()
+        val password = loginPassword
+
+        if (email.isBlank() || !Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
+            onSetAuthError("Masukkan alamat email yang valid.")
+            return
+        }
+        if (password.length < 6) {
+            onSetAuthError("Password minimal 6 karakter.")
+            return
+        }
+
+        scope.launch {
+            onSetAuthError(null)
+            isLoading = true
+            statusStep = "Memeriksa akun..."
+            onAuthFlowRunningChange(true)
+
+            try {
+                val authResult = Firebase.auth.signInWithEmailAndPassword(email, password).await()
+                val fbUser = authResult.user
+                if (fbUser == null) {
+                    onSetAuthError("Gagal memuat sesi akun. Silakan coba lagi.")
+                    return@launch
+                }
+
+                statusStep = "Memeriksa lisensi & kunci perangkat..."
+                when (
+                    val check = activationAuthRepository.verifySingleDeviceOnLogin(
+                        uid = fbUser.uid,
+                        email = fbUser.email ?: email,
+                        currentDeviceId = currentDeviceId
+                    )
+                ) {
+                    is LoginDeviceCheckResult.Allowed -> {
+                        licenseStorage.saveOfflineSession(
+                            uid = check.profile.userId,
+                            email = check.profile.email,
+                            businessName = check.profile.businessName,
+                            licenseCode = check.profile.licenseCode,
+                            deviceId = currentDeviceId,
+                            active = true
+                        )
+                        onSetAuthError(null)
+                        onAuthenticated(check.profile)
+                    }
+                    is LoginDeviceCheckResult.NotRegistered -> {
+                        Firebase.auth.signOut()
+                        licenseStorage.clearSession()
+                        onSetAuthError(
+                            "Akun ($email) belum memiliki lisensi aktif. Silakan daftar dengan Kode Aktivasi Pembelian di tab Daftar Akun Baru."
+                        )
+                    }
+                    is LoginDeviceCheckResult.BlockedOtherDevice -> {
+                        Firebase.auth.signOut()
+                        licenseStorage.clearSession()
+                        onSetAuthError(check.message)
+                    }
+                    is LoginDeviceCheckResult.InactiveAccount -> {
+                        Firebase.auth.signOut()
+                        licenseStorage.clearSession()
+                        onSetAuthError(check.message)
+                    }
+                    is LoginDeviceCheckResult.OfflineFallback -> {
+                        val cached = licenseStorage.getOfflineSession()
+                        if (cached != null && cached.uid == fbUser.uid) {
+                            onSetAuthError(null)
+                            onAuthenticated(
+                                UserProfileDoc(
+                                    userId = cached.uid,
+                                    email = cached.email,
+                                    businessName = cached.businessName,
+                                    licenseCode = cached.licenseCode,
+                                    registeredDeviceId = cached.registeredDeviceId,
+                                    active = true
+                                )
+                            )
+                        } else {
+                            Firebase.auth.signOut()
+                            onSetAuthError("Tidak dapat terhubung ke server. Pastikan koneksi internet aktif saat login.")
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("AuthScreen", "Email/Password login error", e)
+                onSetAuthError(mapFirebaseAuthErrorToIndonesian(e))
+            } finally {
+                isLoading = false
+                statusStep = null
+                onAuthFlowRunningChange(false)
+            }
+        }
+    }
+
+    fun submitRegister() {
+        if (isLoading) return
+        val cleanBiz = businessName.trim()
+        val email = registerEmail.trim()
+        val password = registerPassword
+        val cleanCode = activationAuthRepository.normalizeCode(activationCode)
+
+        if (cleanBiz.isBlank()) {
+            onSetAuthError("Silakan isi Nama Usaha / Pemilik terlebih dahulu.")
+            return
+        }
+        if (email.isBlank() || !Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
+            onSetAuthError("Format alamat email tidak valid.")
+            return
+        }
+        if (password.length < 6) {
+            onSetAuthError("Password minimal 6 karakter.")
+            return
+        }
+        if (cleanCode.length < 4) {
+            onSetAuthError("Masukkan Kode Aktivasi Pembelian yang valid (contoh: RAFDEV-XXXX-XXXX).")
+            return
+        }
+
+        scope.launch {
+            onSetAuthError(null)
+            isLoading = true
+            statusStep = "Memeriksa kode aktivasi..."
+            onAuthFlowRunningChange(true)
+
+            var createdNewAuthUser = false
+            try {
+                // Step 1: Strictly verify activation_codes/{code} has status == "available" FIRST
+                when (val codeCheck = activationAuthRepository.checkActivationCodeAvailable(cleanCode)) {
+                    is CodeAvailabilityResult.InvalidOrUsed -> {
+                        onSetAuthError(codeCheck.message)
+                        return@launch
+                    }
+                    is CodeAvailabilityResult.NetworkError -> {
+                        onSetAuthError(codeCheck.message)
+                        return@launch
+                    }
+                    is CodeAvailabilityResult.Available -> {
+                        // Step 2: Create Firebase Auth account with Email & Password
+                        statusStep = "Membuat akun baru..."
+                        val authResult = Firebase.auth.createUserWithEmailAndPassword(email, password).await()
+                        val fbUser = authResult.user
+                        if (fbUser == null) {
+                            onSetAuthError("Gagal membuat akun Firebase Auth. Silakan coba lagi.")
+                            return@launch
+                        }
+                        createdNewAuthUser = true
+
+                        // Step 3: Save profile in users/{uid} (with registeredDeviceId) & mark activation_codes/{code} -> "used"
+                        statusStep = "Menyimpan profil & mengaktifkan kode..."
+                        val regResult = activationAuthRepository.completeRegistrationWithCode(
+                            uid = fbUser.uid,
+                            email = fbUser.email ?: email,
+                            businessName = cleanBiz,
+                            rawCode = codeCheck.normalizedCode,
+                            deviceId = currentDeviceId
+                        )
+
+                        regResult.fold(
+                            onSuccess = { profile ->
+                                // Step 4: Persist active session locally so user enters Dashboard immediately without bouncing back
+                                licenseStorage.saveOfflineSession(
+                                    uid = profile.userId,
+                                    email = profile.email,
+                                    businessName = profile.businessName,
+                                    licenseCode = profile.licenseCode,
+                                    deviceId = currentDeviceId,
+                                    active = true
+                                )
+                                onSetAuthError(null)
+                                Toast.makeText(
+                                    context,
+                                    "Aktivasi berhasil! Selamat datang di Lapak Kita.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                onAuthenticated(profile)
+                            },
+                            onFailure = { err ->
+                                // Clean up half-created auth user so user can fix code/network and retry cleanly
+                                if (createdNewAuthUser) {
+                                    runCatching { Firebase.auth.currentUser?.delete()?.await() }
+                                }
+                                Firebase.auth.signOut()
+                                licenseStorage.clearSession()
+                                onSetAuthError(
+                                    err.message ?: "Kode aktivasi tidak valid atau sudah pernah digunakan."
+                                )
+                            }
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("AuthScreen", "Email/Password registration error", e)
+                if (createdNewAuthUser) {
+                    runCatching { Firebase.auth.currentUser?.delete()?.await() }
+                    Firebase.auth.signOut()
+                }
+                onSetAuthError(mapFirebaseAuthErrorToIndonesian(e))
+            } finally {
+                isLoading = false
+                statusStep = null
+                onAuthFlowRunningChange(false)
+            }
         }
     }
 
@@ -128,7 +442,7 @@ fun AuthScreen(
                 // Raised Neumorphic Brand Logo
                 Box(
                     modifier = Modifier
-                        .size(92.dp)
+                        .size(88.dp)
                         .neuExtruded(
                             cornerRadius = 24.dp,
                             shadowOffset = 6.dp,
@@ -146,7 +460,7 @@ fun AuthScreen(
                     )
                 }
 
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(14.dp))
 
                 Text(
                     text = "Lapak Kita",
@@ -162,7 +476,7 @@ fun AuthScreen(
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(Modifier.height(22.dp))
+                Spacer(Modifier.height(20.dp))
 
                 // Main Neumorphic Card Container
                 NeuCard(
@@ -189,8 +503,8 @@ fun AuthScreen(
                                 selected = activeTab == AuthGateTab.LOGIN,
                                 onClick = {
                                     if (!isLoading) {
-                                        activeTab = AuthGateTab.LOGIN
-                                        errorMessage = null
+                                        onTabChange(AuthGateTab.LOGIN)
+                                        onSetAuthError(null)
                                     }
                                 },
                                 modifier = Modifier
@@ -202,8 +516,8 @@ fun AuthScreen(
                                 selected = activeTab == AuthGateTab.REGISTER,
                                 onClick = {
                                     if (!isLoading) {
-                                        activeTab = AuthGateTab.REGISTER
-                                        errorMessage = null
+                                        onTabChange(AuthGateTab.REGISTER)
+                                        onSetAuthError(null)
                                     }
                                 },
                                 modifier = Modifier
@@ -214,7 +528,7 @@ fun AuthScreen(
 
                         Spacer(Modifier.height(18.dp))
 
-                        // Auto-Restore Device Detected Banner (same HP after reinstall)
+                        // Auto-Restore Info Banner (same HP after reinstall)
                         if (autoRestoreHint != null && activeTab == AuthGateTab.LOGIN) {
                             Box(
                                 modifier = Modifier
@@ -240,7 +554,7 @@ fun AuthScreen(
                                         )
                                         Spacer(Modifier.height(2.dp))
                                         Text(
-                                            text = "Akun: ${autoRestoreHint.emailHint}\nUsaha: ${autoRestoreHint.businessName.ifBlank { "Lapak Kita" }}\nMasuk dengan akun Google tersebut untuk memulihkan sesi & data Anda.",
+                                            text = "Email terdaftar otomatis diisi (${autoRestoreHint.emailHint}). Masukkan password Anda untuk masuk kembali.",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
@@ -252,7 +566,7 @@ fun AuthScreen(
 
                         if (activeTab == AuthGateTab.LOGIN) {
                             // ===========================================================
-                            // TAB 1: LOGIN (Single Device Lock)
+                            // TAB 1: LOGIN (Email & Password)
                             // ===========================================================
                             Text(
                                 text = "Masuk ke Akun Terdaftar",
@@ -260,126 +574,68 @@ fun AuthScreen(
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                            Spacer(Modifier.height(6.dp))
+                            Spacer(Modifier.height(4.dp))
                             Text(
-                                text = "Gunakan akun Google yang sudah Anda aktifkan. Sistem otomatis menjaga keamanan 1 akun untuk 1 perangkat.",
+                                text = "Masukkan email dan password akun Lapak Kita Anda.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
 
-                            if (autoRestoreHint != null) {
-                                Spacer(Modifier.height(12.dp))
-                                NeuInputField(
-                                    label = "Email Terdaftar di Perangkat Ini",
-                                    value = autoRestoreHint.emailHint,
-                                    onValueChange = {},
-                                    placeholder = "",
-                                    readOnly = true,
-                                    leadingIcon = Icons.Default.Email
+                            Spacer(Modifier.height(14.dp))
+
+                            NeuInputField(
+                                label = "Email",
+                                value = loginEmail,
+                                onValueChange = {
+                                    loginEmail = it
+                                    clearErrorOnEdit()
+                                },
+                                placeholder = "nama@email.com",
+                                leadingIcon = Icons.Default.Email,
+                                enabled = !isLoading,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Email,
+                                    capitalization = KeyboardCapitalization.None
+                                ),
+                                modifier = Modifier.testTag("login_email_input")
+                            )
+
+                            Spacer(Modifier.height(12.dp))
+
+                            NeuPasswordInputField(
+                                label = "Password",
+                                value = loginPassword,
+                                onValueChange = {
+                                    loginPassword = it
+                                    clearErrorOnEdit()
+                                },
+                                placeholder = "Masukkan password",
+                                passwordVisible = showLoginPassword,
+                                onTogglePasswordVisibility = { showLoginPassword = !showLoginPassword },
+                                enabled = !isLoading,
+                                modifier = Modifier.testTag("login_password_input")
+                            )
+
+                            // Persistent Red Alert Box pinned directly above Submit button
+                            if (!authError.isNullOrBlank()) {
+                                Spacer(Modifier.height(14.dp))
+                                PersistentAuthErrorBanner(
+                                    message = authError,
+                                    onDismiss = { onSetAuthError(null) }
                                 )
                             }
 
                             Spacer(Modifier.height(18.dp))
 
                             NeuPrimaryActionButton(
-                                text = if (isLoading) (statusStep ?: "Memverifikasi...") else "Masuk dengan Google",
+                                text = if (isLoading) (statusStep ?: "Memproses...") else "Masuk ke Lapak",
                                 isLoading = isLoading,
-                                onClick = {
-                                    if (isLoading) return@NeuPrimaryActionButton
-                                    scope.launch {
-                                        errorMessage = null
-                                        isLoading = true
-                                        statusStep = "Menghubungkan akun Google..."
-                                        when (val signIn = GoogleAuthHelper.signInWithGoogle(context)) {
-                                            is GoogleSignInOutcome.Cancelled -> {
-                                                isLoading = false
-                                                statusStep = null
-                                            }
-                                            is GoogleSignInOutcome.Error -> {
-                                                errorMessage = signIn.message
-                                                isLoading = false
-                                                statusStep = null
-                                            }
-                                            is GoogleSignInOutcome.Success -> {
-                                                val fbUser = Firebase.auth.currentUser
-                                                if (fbUser == null) {
-                                                    errorMessage = "Sesi akun Google gagal dimuat. Coba lagi."
-                                                    isLoading = false
-                                                    statusStep = null
-                                                    return@launch
-                                                }
-                                                statusStep = "Memeriksa lisensi & kunci perangkat..."
-                                                when (
-                                                    val check = activationAuthRepository.verifySingleDeviceOnLogin(
-                                                        uid = fbUser.uid,
-                                                        email = fbUser.email.orEmpty(),
-                                                        currentDeviceId = currentDeviceId
-                                                    )
-                                                ) {
-                                                    is LoginDeviceCheckResult.Allowed -> {
-                                                        licenseStorage.saveOfflineSession(
-                                                            uid = check.profile.userId,
-                                                            email = check.profile.email,
-                                                            businessName = check.profile.businessName,
-                                                            licenseCode = check.profile.licenseCode,
-                                                            deviceId = currentDeviceId,
-                                                            active = true
-                                                        )
-                                                        isLoading = false
-                                                        statusStep = null
-                                                        onAuthenticated(check.profile)
-                                                    }
-                                                    is LoginDeviceCheckResult.NotRegistered -> {
-                                                        GoogleAuthHelper.signOut(context)
-                                                        licenseStorage.clearSession()
-                                                        activeTab = AuthGateTab.REGISTER
-                                                        errorMessage = "Akun Google (${fbUser.email ?: "ini"}) belum diaktifkan. Masukkan Kode Aktivasi Pembelian di tab Daftar Akun Baru."
-                                                        isLoading = false
-                                                        statusStep = null
-                                                    }
-                                                    is LoginDeviceCheckResult.BlockedOtherDevice -> {
-                                                        GoogleAuthHelper.signOut(context)
-                                                        licenseStorage.clearSession()
-                                                        errorMessage = check.message
-                                                        isLoading = false
-                                                        statusStep = null
-                                                    }
-                                                    is LoginDeviceCheckResult.InactiveAccount -> {
-                                                        GoogleAuthHelper.signOut(context)
-                                                        licenseStorage.clearSession()
-                                                        errorMessage = check.message
-                                                        isLoading = false
-                                                        statusStep = null
-                                                    }
-                                                    is LoginDeviceCheckResult.OfflineFallback -> {
-                                                        val cached = licenseStorage.getOfflineSession()
-                                                        if (cached != null && cached.uid == fbUser.uid) {
-                                                            onAuthenticated(
-                                                                UserProfileDoc(
-                                                                    userId = cached.uid,
-                                                                    email = cached.email,
-                                                                    businessName = cached.businessName,
-                                                                    licenseCode = cached.licenseCode,
-                                                                    registeredDeviceId = cached.registeredDeviceId,
-                                                                    active = true
-                                                                )
-                                                            )
-                                                        } else {
-                                                            errorMessage = "Tidak dapat terhubung ke server. Pastikan internet aktif saat login pertama kali."
-                                                        }
-                                                        isLoading = false
-                                                        statusStep = null
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                                modifier = Modifier.testTag("google_sign_in_button")
+                                onClick = { submitLogin() },
+                                modifier = Modifier.testTag("login_submit_button")
                             )
                         } else {
                             // ===========================================================
-                            // TAB 2: DAFTAR AKUN BARU (Sinkron License Admin)
+                            // TAB 2: DAFTAR AKUN BARU (Email, Password & Kode Aktivasi)
                             // ===========================================================
                             Text(
                                 text = "Aktivasi & Daftar Akun Baru",
@@ -387,9 +643,9 @@ fun AuthScreen(
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                            Spacer(Modifier.height(6.dp))
+                            Spacer(Modifier.height(4.dp))
                             Text(
-                                text = "Masukkan nama usaha dan Kode Aktivasi Pembelian resmi dari admin, lalu hubungkan dengan akun Google Anda.",
+                                text = "Lengkapi data akun dan Kode Aktivasi Pembelian resmi dari admin.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -401,12 +657,50 @@ fun AuthScreen(
                                 value = businessName,
                                 onValueChange = {
                                     businessName = it
-                                    errorMessage = null
+                                    clearErrorOnEdit()
                                 },
                                 placeholder = "Contoh: Lapak Kue Bu Sari",
                                 leadingIcon = Icons.Default.Storefront,
                                 enabled = !isLoading,
+                                keyboardOptions = KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.Words
+                                ),
                                 modifier = Modifier.testTag("register_business_name_input")
+                            )
+
+                            Spacer(Modifier.height(12.dp))
+
+                            NeuInputField(
+                                label = "Email",
+                                value = registerEmail,
+                                onValueChange = {
+                                    registerEmail = it
+                                    clearErrorOnEdit()
+                                },
+                                placeholder = "nama@email.com",
+                                leadingIcon = Icons.Default.Email,
+                                enabled = !isLoading,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Email,
+                                    capitalization = KeyboardCapitalization.None
+                                ),
+                                modifier = Modifier.testTag("register_email_input")
+                            )
+
+                            Spacer(Modifier.height(12.dp))
+
+                            NeuPasswordInputField(
+                                label = "Password (minimal 6 karakter)",
+                                value = registerPassword,
+                                onValueChange = {
+                                    registerPassword = it
+                                    clearErrorOnEdit()
+                                },
+                                placeholder = "Buat password minimal 6 karakter",
+                                passwordVisible = showRegisterPassword,
+                                onTogglePasswordVisibility = { showRegisterPassword = !showRegisterPassword },
+                                enabled = !isLoading,
+                                modifier = Modifier.testTag("register_password_input")
                             )
 
                             Spacer(Modifier.height(12.dp))
@@ -416,7 +710,7 @@ fun AuthScreen(
                                 value = activationCode,
                                 onValueChange = { raw ->
                                     activationCode = raw.uppercase().replace(" ", "").take(32)
-                                    errorMessage = null
+                                    clearErrorOnEdit()
                                 },
                                 placeholder = "RAFDEV-XXXX-XXXX",
                                 leadingIcon = Icons.Default.Key,
@@ -428,110 +722,21 @@ fun AuthScreen(
                                 modifier = Modifier.testTag("register_activation_code_input")
                             )
 
+                            // Persistent Red Alert Box pinned directly above Submit button
+                            if (!authError.isNullOrBlank()) {
+                                Spacer(Modifier.height(14.dp))
+                                PersistentAuthErrorBanner(
+                                    message = authError,
+                                    onDismiss = { onSetAuthError(null) }
+                                )
+                            }
+
                             Spacer(Modifier.height(18.dp))
 
                             NeuPrimaryActionButton(
-                                text = if (isLoading) (statusStep ?: "Memproses...") else "Aktifkan & Daftar dengan Google",
+                                text = if (isLoading) (statusStep ?: "Memproses...") else "Aktifkan & Daftar Akun",
                                 isLoading = isLoading,
-                                onClick = {
-                                    if (isLoading) return@NeuPrimaryActionButton
-                                    val cleanBiz = businessName.trim()
-                                    val cleanCode = activationAuthRepository.normalizeCode(activationCode)
-
-                                    if (cleanBiz.isBlank()) {
-                                        errorMessage = "Silakan isi Nama Usaha / Pemilik terlebih dahulu."
-                                        return@NeuPrimaryActionButton
-                                    }
-                                    if (cleanCode.length < 4) {
-                                        errorMessage = "Masukkan Kode Aktivasi Pembelian yang valid (contoh: RAFDEV-XXXX-XXXX)."
-                                        return@NeuPrimaryActionButton
-                                    }
-
-                                    scope.launch {
-                                        errorMessage = null
-                                        isLoading = true
-                                        statusStep = "Memeriksa kode aktivasi..."
-
-                                        // Step 1: Verify status == "available" in Firestore `activation_codes`
-                                        when (val codeCheck = activationAuthRepository.checkActivationCodeAvailable(cleanCode)) {
-                                            is CodeAvailabilityResult.InvalidOrUsed -> {
-                                                errorMessage = codeCheck.message
-                                                isLoading = false
-                                                statusStep = null
-                                                return@launch
-                                            }
-                                            is CodeAvailabilityResult.NetworkError -> {
-                                                errorMessage = codeCheck.message
-                                                isLoading = false
-                                                statusStep = null
-                                                return@launch
-                                            }
-                                            is CodeAvailabilityResult.Available -> {
-                                                // Step 2: Authenticate with Google via CredentialManager
-                                                statusStep = "Memilih akun Google..."
-                                                when (val signIn = GoogleAuthHelper.signInWithGoogle(context)) {
-                                                    is GoogleSignInOutcome.Cancelled -> {
-                                                        isLoading = false
-                                                        statusStep = null
-                                                    }
-                                                    is GoogleSignInOutcome.Error -> {
-                                                        errorMessage = signIn.message
-                                                        isLoading = false
-                                                        statusStep = null
-                                                    }
-                                                    is GoogleSignInOutcome.Success -> {
-                                                        val fbUser = Firebase.auth.currentUser
-                                                        if (fbUser == null) {
-                                                            errorMessage = "Gagal membaca sesi akun Google."
-                                                            isLoading = false
-                                                            statusStep = null
-                                                            return@launch
-                                                        }
-
-                                                        // Step 3: Atomically create users/{uid} & mark activation_codes/{code} -> "used"
-                                                        statusStep = "Mengaktifkan lisensi & mengunci perangkat..."
-                                                        val regResult = activationAuthRepository.completeRegistrationWithCode(
-                                                            uid = fbUser.uid,
-                                                            email = fbUser.email.orEmpty(),
-                                                            businessName = cleanBiz,
-                                                            rawCode = codeCheck.normalizedCode,
-                                                            deviceId = currentDeviceId
-                                                        )
-
-                                                        regResult.fold(
-                                                            onSuccess = { profile ->
-                                                                licenseStorage.saveOfflineSession(
-                                                                    uid = profile.userId,
-                                                                    email = profile.email,
-                                                                    businessName = profile.businessName,
-                                                                    licenseCode = profile.licenseCode,
-                                                                    deviceId = currentDeviceId,
-                                                                    active = true
-                                                                )
-                                                                isLoading = false
-                                                                statusStep = null
-                                                                Toast.makeText(
-                                                                    context,
-                                                                    "Aktivasi berhasil! Selamat datang di Lapak Kita.",
-                                                                    Toast.LENGTH_SHORT
-                                                                ).show()
-                                                                onAuthenticated(profile)
-                                                            },
-                                                            onFailure = { err ->
-                                                                GoogleAuthHelper.signOut(context)
-                                                                licenseStorage.clearSession()
-                                                                errorMessage = err.message
-                                                                    ?: "Kode aktivasi tidak valid atau sudah pernah digunakan."
-                                                                isLoading = false
-                                                                statusStep = null
-                                                            }
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
+                                onClick = { submitRegister() },
                                 modifier = Modifier.testTag("register_activate_button")
                             )
 
@@ -573,40 +778,11 @@ fun AuthScreen(
                                 }
                             }
                         }
-
-                        // Error Display Box
-                        if (!errorMessage.isNullOrBlank()) {
-                            Spacer(Modifier.height(14.dp))
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(lapakColors.dangerBg)
-                                    .padding(12.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.Top) {
-                                    Icon(
-                                        imageVector = Icons.Default.ErrorOutline,
-                                        contentDescription = null,
-                                        tint = lapakColors.dangerText,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        text = errorMessage!!,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = lapakColors.dangerText
-                                    )
-                                }
-                            }
-                        }
                     }
                 }
 
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(16.dp))
 
-                // Subtle security & offline note
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
@@ -639,6 +815,62 @@ fun AuthScreen(
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Persistent red alert banner that stays visible until user edits an input field or taps `×`.
+ */
+@Composable
+private fun PersistentAuthErrorBanner(
+    message: String,
+    onDismiss: () -> Unit
+) {
+    val lapakColors = LocalLapakColors.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(lapakColors.dangerBg)
+            .padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 6.dp)
+            .testTag("auth_error_banner")
+    ) {
+        Row(
+            verticalAlignment = Alignment.Top,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                imageVector = Icons.Default.ErrorOutline,
+                contentDescription = "Peringatan",
+                tint = lapakColors.dangerText,
+                modifier = Modifier
+                    .padding(top = 2.dp)
+                    .size(19.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                color = lapakColors.dangerText,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(top = 1.dp)
+            )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .size(32.dp)
+                    .testTag("auth_error_dismiss_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Tutup pesan error",
+                    tint = lapakColors.dangerText,
+                    modifier = Modifier.size(17.dp)
                 )
             }
         }
@@ -689,7 +921,7 @@ private fun NeuInputField(
     value: String,
     onValueChange: (String) -> Unit,
     placeholder: String,
-    leadingIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    leadingIcon: ImageVector,
     modifier: Modifier = Modifier,
     isMonospace: Boolean = false,
     readOnly: Boolean = false,
@@ -749,6 +981,88 @@ private fun NeuInputField(
                             letterSpacing = if (isMonospace) 1.sp else 0.sp
                         ),
                         modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NeuPasswordInputField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    passwordVisible: Boolean,
+    onTogglePasswordVisibility: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 52.dp)
+                .neuInset(cornerRadius = 14.dp, shadowOffset = 3.dp, blurRadius = 6.dp)
+                .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(19.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Box(modifier = Modifier.weight(1f)) {
+                    if (value.isEmpty()) {
+                        Text(
+                            text = placeholder,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                    BasicTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        enabled = enabled,
+                        singleLine = true,
+                        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            capitalization = KeyboardCapitalization.None
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        textStyle = TextStyle(
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                IconButton(
+                    onClick = onTogglePasswordVisibility,
+                    enabled = enabled,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = if (passwordVisible) "Sembunyikan password" else "Tampilkan password",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }

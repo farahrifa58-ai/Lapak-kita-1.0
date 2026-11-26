@@ -1403,10 +1403,8 @@ fun SettingsScreen(
                         }
                         OutlinedButton(
                             onClick = {
-                                scope.launch {
-                                    GoogleAuthHelper.signOut(context)
-                                    onSignedOut()
-                                }
+                                Firebase.auth.signOut()
+                                onSignedOut()
                             },
                             shape = RoundedCornerShape(10.dp),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),

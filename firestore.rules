@@ -292,7 +292,7 @@ service cloud.firestore {
       allow update: if isLicenseDeveloper() ||
                        (isSignedIn() &&
                         isValidActivationCodeId(codeId) &&
-                        existing().status == 'available' &&
+                        existing().status in ['available', 'AVAILABLE', 'Available'] &&
                         incoming().status == 'used' &&
                         incoming().usedByUid == request.auth.uid &&
                         incoming().usedByEmail is string &&
