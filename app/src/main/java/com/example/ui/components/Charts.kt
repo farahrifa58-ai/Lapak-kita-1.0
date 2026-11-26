@@ -33,12 +33,11 @@ fun RevenueProfitBarChart(
     val lapakColors = LocalLapakColors.current
     val maxVal = (metrics.maxOfOrNull { maxOf(it.revenue, it.adminProfit) } ?: 0.0).coerceAtLeast(10000.0)
 
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, lapakColors.cardBorder),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    NeuCard(
+        cornerRadius = 16.dp,
+        shadowOffset = 5.dp,
+        blurRadius = 10.dp,
+        modifier = modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(

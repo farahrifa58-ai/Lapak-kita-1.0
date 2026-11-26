@@ -6,9 +6,19 @@ import android.provider.Settings
 import java.security.MessageDigest
 import java.util.UUID
 
+data class CachedUserSession(
+    val uid: String,
+    val email: String,
+    val businessName: String,
+    val licenseCode: String,
+    val registeredDeviceId: String,
+    val active: Boolean,
+    val lastSyncedAtMillis: Long
+)
+
 /**
- * Manages permanent local license activation state and stable device identity
- * without requiring runtime permissions.
+ * Manages stable device identity and offline-first cached activation/session state
+ * so licensed users can continue running Lapak Kita smoothly offline.
  */
 class LicenseStorage(context: Context) {
 
@@ -34,67 +44,95 @@ class LicenseStorage(context: Context) {
         return generated
     }
 
-    fun isLicenseActive(): Boolean {
-        val code = prefs.getString(KEY_LICENSE_CODE, null)?.trim()?.uppercase() ?: return false
-        val boundDeviceId = prefs.getString(KEY_DEVICE_ID, null)?.trim() ?: return false
-        val savedSeal = prefs.getString(KEY_INTEGRITY_SEAL, null) ?: return false
-        if (code.isBlank() || boundDeviceId.isBlank()) return false
+    fun saveOfflineSession(
+        uid: String,
+        email: String,
+        businessName: String,
+        licenseCode: String,
+        deviceId: String = getDeviceId(),
+        active: Boolean = true,
+        syncedAtMillis: Long = System.currentTimeMillis()
+    ) {
+        val normalizedCode = licenseCode.trim().uppercase()
+        val seal = computeSessionSeal(uid, normalizedCode, deviceId)
+        prefs.edit()
+            .putString(KEY_SESSION_UID, uid.trim())
+            .putString(KEY_SESSION_EMAIL, email.trim())
+            .putString(KEY_SESSION_BUSINESS_NAME, businessName.trim())
+            .putString(KEY_LICENSE_CODE, normalizedCode)
+            .putString(KEY_DEVICE_ID, deviceId.trim())
+            .putBoolean(KEY_SESSION_ACTIVE, active)
+            .putString(KEY_INTEGRITY_SEAL, seal)
+            .putLong(KEY_ACTIVATED_AT, syncedAtMillis)
+            .apply()
+    }
 
-        val currentDeviceId = getDeviceId()
-        if (boundDeviceId != currentDeviceId) return false
+    fun getOfflineSession(): CachedUserSession? {
+        val uid = prefs.getString(KEY_SESSION_UID, null)?.trim().orEmpty()
+        val email = prefs.getString(KEY_SESSION_EMAIL, null)?.trim().orEmpty()
+        val businessName = prefs.getString(KEY_SESSION_BUSINESS_NAME, null)?.trim().orEmpty()
+        val code = prefs.getString(KEY_LICENSE_CODE, null)?.trim()?.uppercase().orEmpty()
+        val boundDeviceId = prefs.getString(KEY_DEVICE_ID, null)?.trim().orEmpty()
+        val active = prefs.getBoolean(KEY_SESSION_ACTIVE, false)
+        val savedSeal = prefs.getString(KEY_INTEGRITY_SEAL, null).orEmpty()
+        val syncedAt = prefs.getLong(KEY_ACTIVATED_AT, 0L)
 
-        val expectedSeal = computeLicenseSeal(code, boundDeviceId)
-        return savedSeal == expectedSeal
+        if (uid.isBlank() || code.isBlank() || boundDeviceId.isBlank() || !active) return null
+        if (boundDeviceId != getDeviceId()) return null
+
+        val expectedSeal = computeSessionSeal(uid, code, boundDeviceId)
+        if (savedSeal != expectedSeal) return null
+
+        return CachedUserSession(
+            uid = uid,
+            email = email,
+            businessName = businessName,
+            licenseCode = code,
+            registeredDeviceId = boundDeviceId,
+            active = active,
+            lastSyncedAtMillis = syncedAt
+        )
+    }
+
+    fun isLocallyLicensedFor(uid: String): Boolean {
+        val session = getOfflineSession() ?: return false
+        return session.uid == uid && session.active && session.registeredDeviceId == getDeviceId()
     }
 
     fun getActivatedLicenseCode(): String? {
-        if (!isLicenseActive()) return null
-        return prefs.getString(KEY_LICENSE_CODE, null)?.trim()?.uppercase()
+        return getOfflineSession()?.licenseCode
     }
 
-    fun getActivatedAtMillis(): Long {
-        return prefs.getLong(KEY_ACTIVATED_AT, 0L)
-    }
-
-    fun savePermanentActivation(
-        code: String,
-        deviceId: String = getDeviceId(),
-        activatedAtMillis: Long = System.currentTimeMillis()
-    ) {
-        val normalizedCode = code.trim().uppercase()
-        val seal = computeLicenseSeal(normalizedCode, deviceId)
+    fun clearSession() {
         prefs.edit()
-            .putString(KEY_LICENSE_CODE, normalizedCode)
-            .putString(KEY_DEVICE_ID, deviceId)
-            .putString(KEY_INTEGRITY_SEAL, seal)
-            .putLong(KEY_ACTIVATED_AT, activatedAtMillis)
+            .remove(KEY_SESSION_UID)
+            .remove(KEY_SESSION_EMAIL)
+            .remove(KEY_SESSION_BUSINESS_NAME)
+            .remove(KEY_LICENSE_CODE)
+            .remove(KEY_DEVICE_ID)
+            .remove(KEY_SESSION_ACTIVE)
+            .remove(KEY_INTEGRITY_SEAL)
+            .remove(KEY_ACTIVATED_AT)
             .apply()
     }
 
     companion object {
         private const val PREFS_NAME = "lapak_kita_license_prefs"
+        private const val KEY_SESSION_UID = "session_uid"
+        private const val KEY_SESSION_EMAIL = "session_email"
+        private const val KEY_SESSION_BUSINESS_NAME = "session_business_name"
         private const val KEY_LICENSE_CODE = "active_license_code"
         private const val KEY_DEVICE_ID = "bound_device_id"
+        private const val KEY_SESSION_ACTIVE = "session_active"
         private const val KEY_INTEGRITY_SEAL = "license_integrity_seal"
         private const val KEY_ACTIVATED_AT = "license_activated_at"
         private const val KEY_FALLBACK_DEVICE_ID = "fallback_device_id"
 
-        // SHA-256 digest of salted Admin Generator PIN (UI gate; real write auth enforced in Firestore rules)
-        private const val ADMIN_PIN_SALT = "lapakkita-dev-pin-v1:"
-        private const val ADMIN_PIN_HASH =
-            "c93e53db6a800ff84a3e143df6394ca8d11275f969e14f568c58b28625e9a217"
-
         const val DEVELOPER_EMAIL = "rendykurniawan0311@gmail.com"
         const val LICENSE_APP_NAME = "Lapak Kita"
-        const val LICENSE_PRODUCT_KEY = "lapak_kita"
 
-        fun verifyAdminPin(inputPin: String): Boolean {
-            val digest = sha256Hex(ADMIN_PIN_SALT + inputPin.trim())
-            return digest.equals(ADMIN_PIN_HASH, ignoreCase = true)
-        }
-
-        private fun computeLicenseSeal(code: String, deviceId: String): String {
-            return sha256Hex("lapak-kita-license-seal-v1:$code:$deviceId")
+        private fun computeSessionSeal(uid: String, code: String, deviceId: String): String {
+            return sha256Hex("lapak-kita-session-v2:$uid:$code:$deviceId")
         }
 
         private fun sha256Hex(value: String): String {

@@ -9,6 +9,7 @@ import com.example.data.model.TransactionItem
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
+import com.google.firebase.firestore.CollectionReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -77,17 +78,29 @@ data class CloudFinancialBundle(
     val settlements: List<CloudSettlementRecord>
 )
 
+/**
+ * Syncs Lapak Kita financial ledger directly under user-scoped subcollections:
+ * - `users/{uid}/transactions`
+ * - `users/{uid}/expenses`
+ * - `users/{uid}/settlements`
+ * Works offline-first via Firestore persistent local cache + Room local DB.
+ */
 class FinancialSyncRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth
 ) {
-    private val transactionsCollection = db.collection("lapak_transactions")
-    private val expensesCollection = db.collection("lapak_expenses")
-    private val settlementsCollection = db.collection("lapak_settlements")
+    private fun transactionsCollection(uid: String): CollectionReference =
+        db.collection("users").document(uid).collection("transactions")
+
+    private fun expensesCollection(uid: String): CollectionReference =
+        db.collection("users").document(uid).collection("expenses")
+
+    private fun settlementsCollection(uid: String): CollectionReference =
+        db.collection("users").document(uid).collection("settlements")
 
     private fun requireUserId(): String =
         auth.currentUser?.uid
-            ?: throw IllegalStateException("Admin harus masuk dengan akun Google terlebih dahulu.")
+            ?: throw IllegalStateException("Admin harus masuk terlebih dahulu.")
 
     private fun sanitizeDocId(raw: String, prefix: String): String {
         val clean = raw.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(100)
@@ -114,8 +127,8 @@ class FinancialSyncRepository(
         }
 
         val docId = buildTransactionDocId(transaction.transactionNumber)
-        val path = "lapak_transactions/$docId"
-        val docRef = transactionsCollection.document(docId)
+        val path = "users/$uid/transactions/$docId"
+        val docRef = transactionsCollection(uid).document(docId)
 
         val itemMaps = items.take(100).map { it ->
             mapOf(
@@ -154,10 +167,6 @@ class FinancialSyncRepository(
                 )
                 docRef.set(createPayload).await()
             } else {
-                val existingOwner = existing.getString("ownerUid")
-                if (existingOwner != null && existingOwner != uid) {
-                    return Result.failure(IllegalStateException("Transaksi milik akun lain"))
-                }
                 val updatePayload = mapOf(
                     "cancelled" to transaction.isCancelled,
                     "cancellationReason" to (transaction.cancellationReason ?: "").trim().take(200),
@@ -196,8 +205,8 @@ class FinancialSyncRepository(
         }
 
         val docId = buildExpenseDocId(expense)
-        val path = "lapak_expenses/$docId"
-        val docRef = expensesCollection.document(docId)
+        val path = "users/$uid/expenses/$docId"
+        val docRef = expensesCollection(uid).document(docId)
 
         return try {
             val existing = docRef.get().await()
@@ -214,10 +223,6 @@ class FinancialSyncRepository(
                 )
                 docRef.set(createPayload).await()
             } else {
-                val existingOwner = existing.getString("ownerUid")
-                if (existingOwner != null && existingOwner != uid) {
-                    return Result.failure(IllegalStateException("Catatan biaya milik akun lain"))
-                }
                 docRef.update(
                     mapOf(
                         "title" to expense.title.trim().ifEmpty { "Biaya Operasional" }.take(120),
@@ -244,11 +249,11 @@ class FinancialSyncRepository(
     }
 
     suspend fun deleteExpenseFromFirestore(expense: OperatingExpense): Result<Unit> {
-        if (auth.currentUser == null) return Result.success(Unit)
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
         val docId = buildExpenseDocId(expense)
-        val path = "lapak_expenses/$docId"
+        val path = "users/$uid/expenses/$docId"
         return try {
-            expensesCollection.document(docId).delete().await()
+            expensesCollection(uid).document(docId).delete().await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -276,8 +281,8 @@ class FinancialSyncRepository(
         }
 
         val docId = buildSettlementDocId(payment)
-        val path = "lapak_settlements/$docId"
-        val docRef = settlementsCollection.document(docId)
+        val path = "users/$uid/settlements/$docId"
+        val docRef = settlementsCollection(uid).document(docId)
 
         return try {
             val existing = docRef.get().await()
@@ -298,10 +303,6 @@ class FinancialSyncRepository(
                 )
                 docRef.set(createPayload).await()
             } else {
-                val existingOwner = existing.getString("ownerUid")
-                if (existingOwner != null && existingOwner != uid) {
-                    return Result.failure(IllegalStateException("Setoran milik akun lain"))
-                }
                 docRef.update(
                     mapOf(
                         "sellerName" to (seller?.name?.trim()?.ifEmpty { "Penyetor" } ?: "Penyetor").take(100),
@@ -333,9 +334,9 @@ class FinancialSyncRepository(
     suspend fun fetchAllCloudFinancialData(ownerUid: String): Result<CloudFinancialBundle> {
         if (ownerUid.isBlank()) return Result.failure(IllegalStateException("UID tidak valid"))
         return try {
-            val trxSnap = transactionsCollection.whereEqualTo("ownerUid", ownerUid).get().await()
-            val expSnap = expensesCollection.whereEqualTo("ownerUid", ownerUid).get().await()
-            val setSnap = settlementsCollection.whereEqualTo("ownerUid", ownerUid).get().await()
+            val trxSnap = transactionsCollection(ownerUid).get().await()
+            val expSnap = expensesCollection(ownerUid).get().await()
+            val setSnap = settlementsCollection(ownerUid).get().await()
 
             val transactions = trxSnap.documents.mapNotNull { parseTransaction(it) }
                 .sortedBy { it.timestampMillis }
@@ -349,7 +350,7 @@ class FinancialSyncRepository(
             throw e
         } catch (e: FirebaseFirestoreException) {
             try {
-                handleFirestoreError(e, OperationType.LIST, "lapak_transactions")
+                handleFirestoreError(e, OperationType.LIST, "users/$ownerUid/transactions")
             } catch (wrapped: IllegalStateException) {
                 Result.failure(wrapped)
             }
@@ -359,9 +360,8 @@ class FinancialSyncRepository(
     }
 
     fun observeTransactionsChronological(ownerUid: String): Flow<List<CloudTransactionRecord>> {
-        val path = "lapak_transactions"
-        return transactionsCollection
-            .whereEqualTo("ownerUid", ownerUid)
+        val path = "users/$ownerUid/transactions"
+        return transactionsCollection(ownerUid)
             .snapshots()
             .map { snapshot ->
                 snapshot.documents.mapNotNull { parseTransaction(it) }

@@ -44,11 +44,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.text.font.FontFamily
 import com.example.R
 import com.example.config.LicenseStorage
-import com.example.data.firebase.LicenseRepository
 import com.example.data.model.*
 import com.example.i18n.AppStrings
-import com.example.ui.auth.AdminLicenseGeneratorDialog
-import com.example.ui.auth.AdminPinPromptDialog
 import com.example.ui.auth.GoogleAuthHelper
 import com.example.ui.components.*
 import com.example.ui.theme.LocalLapakColors
@@ -65,8 +62,8 @@ import java.util.*
 @Composable
 fun SettingsScreen(
     viewModel: LapakViewModel,
-    licenseRepository: LicenseRepository? = null,
     activeLicenseCode: String? = null,
+    onSignedOut: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -76,10 +73,6 @@ fun SettingsScreen(
     val registeredLicenseCode = remember(activeLicenseCode) {
         activeLicenseCode ?: LicenseStorage(context).getActivatedLicenseCode()
     }
-    var aboutLogoTapCount by remember { mutableIntStateOf(0) }
-    var aboutLastTapMillis by remember { mutableLongStateOf(0L) }
-    var showAdminPinDialog by remember { mutableStateOf(false) }
-    var showAdminLicenseGenerator by remember { mutableStateOf(false) }
 
     val lang by viewModel.currentLanguage.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
@@ -1382,14 +1375,14 @@ fun SettingsScreen(
             }
 
             // =========================================================================
-            // COMPACT FOOTER CARDS: AKUN ADMIN GOOGLE & TENTANG APLIKASI
+            // COMPACT FOOTER CARDS: AKUN ADMIN GOOGLE & TENTANG APLIKASI (NEUMORPHIC)
             // =========================================================================
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, lapakColors.cardBorder),
-                    shape = RoundedCornerShape(16.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                NeuCard(
+                    cornerRadius = 16.dp,
+                    shadowOffset = 5.dp,
+                    blurRadius = 10.dp,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
                         modifier = Modifier
@@ -1412,6 +1405,7 @@ fun SettingsScreen(
                             onClick = {
                                 scope.launch {
                                     GoogleAuthHelper.signOut(context)
+                                    onSignedOut()
                                 }
                             },
                             shape = RoundedCornerShape(10.dp),
@@ -1427,14 +1421,12 @@ fun SettingsScreen(
             }
 
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, lapakColors.cardBorder),
-                    shape = RoundedCornerShape(16.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { showAboutDialog = true }
+                NeuCard(
+                    cornerRadius = 16.dp,
+                    shadowOffset = 5.dp,
+                    blurRadius = 10.dp,
+                    onClick = { showAboutDialog = true },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
                         modifier = Modifier
@@ -1444,11 +1436,9 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
-                                contentAlignment = Alignment.Center
+                            NeuIconBadge(
+                                accentColor = MaterialTheme.colorScheme.primary,
+                                size = 38.dp
                             ) {
                                 Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(19.dp))
                             }
@@ -1475,10 +1465,10 @@ fun SettingsScreen(
             // STATUS LISENSI PERMANEN (FOOTER)
             // =========================================================================
             item {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = lapakColors.omzetCardBg,
-                    border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
+                NeuCard(
+                    cornerRadius = 16.dp,
+                    shadowOffset = 5.dp,
+                    blurRadius = 10.dp,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("settings_license_status_card")
@@ -1486,7 +1476,7 @@ fun SettingsScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                            .padding(horizontal = 14.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -1494,13 +1484,18 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.VerifiedUser,
-                                contentDescription = "Lisensi Aktif",
-                                tint = lapakColors.omzetCardAccent,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(Modifier.width(10.dp))
+                            NeuIconBadge(
+                                accentColor = lapakColors.omzetCardAccent,
+                                size = 36.dp
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = "Lisensi Aktif",
+                                    tint = lapakColors.omzetCardAccent,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
                             Column {
                                 Text(
                                     text = "Status Lisensi: Aktif Permanen",
@@ -1657,46 +1652,14 @@ fun SettingsScreen(
     }
 
     if (showAboutDialog) {
-        fun handleAboutSecretTap() {
-            val now = System.currentTimeMillis()
-            if (now - aboutLastTapMillis > 2500L) {
-                aboutLogoTapCount = 1
-            } else {
-                aboutLogoTapCount += 1
-            }
-            aboutLastTapMillis = now
-
-            if (aboutLogoTapCount >= 7) {
-                aboutLogoTapCount = 0
-                showAboutDialog = false
-                showAdminPinDialog = true
-            } else if (aboutLogoTapCount >= 5) {
-                val remaining = 7 - aboutLogoTapCount
-                Toast.makeText(
-                    context,
-                    "Ketuk ${remaining}x lagi untuk Panel Admin Lisensi",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        }
-
         AlertDialog(
-            onDismissRequest = {
-                aboutLogoTapCount = 0
-                showAboutDialog = false
-            },
+            onDismissRequest = { showAboutDialog = false },
             title = {
                 Text(
                     text = "Lapak Kita",
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { handleAboutSecretTap() }
-                        )
-                        .testTag("about_lapak_kita_title")
+                    modifier = Modifier.testTag("about_lapak_kita_title")
                 )
             },
             text = {
@@ -1705,17 +1668,11 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Image(
-                        painter = painterResource(id = R.drawable.lapak_banner_1794055340379),
-                        contentDescription = "Lapak Banner",
+                        painter = painterResource(id = R.drawable.ic_lapak_logo),
+                        contentDescription = "Logo Lapak Kita",
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(130.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { handleAboutSecretTap() }
-                            ),
+                            .size(110.dp)
+                            .clip(RoundedCornerShape(22.dp)),
                         contentScale = ContentScale.Crop
                     )
                     Spacer(Modifier.height(12.dp))
@@ -1726,7 +1683,7 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        text = "Developer: Rafline Dev",
+                        text = "By Rafline Dev",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold
@@ -1744,32 +1701,12 @@ fun SettingsScreen(
             },
             confirmButton = {
                 Button(
-                    onClick = {
-                        aboutLogoTapCount = 0
-                        showAboutDialog = false
-                    },
+                    onClick = { showAboutDialog = false },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
                     Text("Tutup")
                 }
             }
-        )
-    }
-
-    if (showAdminPinDialog) {
-        AdminPinPromptDialog(
-            onVerified = {
-                showAdminPinDialog = false
-                showAdminLicenseGenerator = true
-            },
-            onDismiss = { showAdminPinDialog = false }
-        )
-    }
-
-    if (showAdminLicenseGenerator && licenseRepository != null) {
-        AdminLicenseGeneratorDialog(
-            licenseRepository = licenseRepository,
-            onDismiss = { showAdminLicenseGenerator = false }
         )
     }
 }
@@ -1790,14 +1727,10 @@ private fun SettingsAccordionCard(
         label = "AccordionChevronRotation"
     )
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (expanded) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f) else lapakColors.cardBorder
-        ),
-        shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    NeuCard(
+        cornerRadius = 16.dp,
+        shadowOffset = 5.dp,
+        blurRadius = 10.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -1809,20 +1742,14 @@ private fun SettingsAccordionCard(
                     .testTag(testTag),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(11.dp))
-                        .background(
-                            if (expanded) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.primaryContainer
-                        ),
-                    contentAlignment = Alignment.Center
+                NeuIconBadge(
+                    accentColor = MaterialTheme.colorScheme.primary,
+                    size = 40.dp
                 ) {
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
-                        tint = if (expanded) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+                        tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(20.dp)
                     )
                 }

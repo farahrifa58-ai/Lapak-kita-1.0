@@ -12,7 +12,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -21,14 +20,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.HourglassDisabled
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -49,14 +48,22 @@ import com.example.config.AppConfig
 import com.example.config.LicenseStorage
 import com.example.config.TrialManager
 import com.example.data.database.LapakDatabase
+import com.example.data.firebase.ActivationAuthRepository
+import com.example.data.firebase.DeviceAutoRestoreHint
 import com.example.data.firebase.FinancialSyncRepository
-import com.example.data.firebase.LicenseRepository
+import com.example.data.firebase.LoginDeviceCheckResult
 import com.example.data.firebase.VendorSyncRepository
 import com.example.data.model.ThemeMode
 import com.example.data.repository.LapakRepository
 import com.example.i18n.AppStrings
+import com.example.ui.auth.AuthGateTab
 import com.example.ui.auth.AuthScreen
-import com.example.ui.auth.LicenseActivationScreen
+import com.example.ui.auth.GoogleAuthHelper
+import com.example.ui.auth.GoogleSignInOutcome
+import com.example.ui.components.LucideIcons
+import com.example.ui.components.NeuCard
+import com.example.ui.components.neuExtruded
+import com.example.ui.components.neuInset
 import com.example.ui.screens.*
 import com.example.ui.theme.LapakKitaTheme
 import com.example.ui.theme.LocalLapakColors
@@ -67,10 +74,25 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
+import com.google.firebase.firestore.PersistentCacheSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+
+private sealed class AccessGateState {
+    data object Checking : AccessGateState()
+    data class RequireAuth(
+        val initialTab: AuthGateTab = AuthGateTab.LOGIN,
+        val errorMessage: String? = null,
+        val autoRestoreHint: DeviceAutoRestoreHint? = null
+    ) : AccessGateState()
+    data class Granted(
+        val uid: String,
+        val licenseCode: String
+    ) : AccessGateState()
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -83,11 +105,17 @@ class MainActivity : ComponentActivity() {
         val appContext = applicationContext
         val database = LapakDatabase.getDatabase(appContext, appScope)
         val repository = LapakRepository(database.lapakDao())
-        val firestoreDb = FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id))
+        val firestoreDb = FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id)).apply {
+            runCatching {
+                firestoreSettings = FirebaseFirestoreSettings.Builder()
+                    .setLocalCacheSettings(PersistentCacheSettings.newBuilder().build())
+                    .build()
+            }
+        }
         val vendorSyncRepository = VendorSyncRepository(firestoreDb)
         val financialSyncRepository = FinancialSyncRepository(firestoreDb)
+        val activationAuthRepository = ActivationAuthRepository(firestoreDb)
         val licenseStorage = LicenseStorage(appContext)
-        val licenseRepository = LicenseRepository(firestoreDb)
 
         setContent {
             val context = LocalContext.current
@@ -96,8 +124,6 @@ class MainActivity : ComponentActivity() {
             var showSplash by remember { mutableStateOf(true) }
             val trialManager = remember { TrialManager(context) }
             var isTrialExpired by remember { mutableStateOf(trialManager.isExpired()) }
-            var isLicensed by remember { mutableStateOf(licenseStorage.isLicenseActive()) }
-            var activeLicenseCode by remember { mutableStateOf(licenseStorage.getActivatedLicenseCode()) }
 
             if (AppConfig.IS_TRIAL) {
                 LaunchedEffect(Unit) {
@@ -111,6 +137,7 @@ class MainActivity : ComponentActivity() {
             // Observe Firebase Authentication state reactively
             val auth = remember { Firebase.auth }
             var currentUser by remember { mutableStateOf<FirebaseUser?>(auth.currentUser) }
+            var gateState by remember { mutableStateOf<AccessGateState>(AccessGateState.Checking) }
 
             DisposableEffect(auth) {
                 val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
@@ -122,8 +149,152 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Auto-Restore & Single Device Lock verification (Offline-First!)
+            LaunchedEffect(currentUser?.uid) {
+                val deviceId = licenseStorage.getDeviceId()
+                val fbUser = currentUser
+                val offlineSession = licenseStorage.getOfflineSession()
+
+                if (fbUser != null) {
+                    // 1. Offline-first instant entry if cached local session matches this user & device
+                    if (offlineSession != null && offlineSession.uid == fbUser.uid) {
+                        gateState = AccessGateState.Granted(
+                            uid = fbUser.uid,
+                            licenseCode = offlineSession.licenseCode
+                        )
+                        // Background online Single Device Lock check (does NOT block offline use)
+                        when (
+                            val onlineCheck = activationAuthRepository.verifySingleDeviceOnLogin(
+                                uid = fbUser.uid,
+                                email = fbUser.email.orEmpty(),
+                                currentDeviceId = deviceId
+                            )
+                        ) {
+                            is LoginDeviceCheckResult.Allowed -> {
+                                licenseStorage.saveOfflineSession(
+                                    uid = onlineCheck.profile.userId,
+                                    email = onlineCheck.profile.email,
+                                    businessName = onlineCheck.profile.businessName,
+                                    licenseCode = onlineCheck.profile.licenseCode,
+                                    deviceId = deviceId,
+                                    active = true
+                                )
+                                gateState = AccessGateState.Granted(
+                                    uid = onlineCheck.profile.userId,
+                                    licenseCode = onlineCheck.profile.licenseCode
+                                )
+                            }
+                            is LoginDeviceCheckResult.BlockedOtherDevice -> {
+                                GoogleAuthHelper.signOut(context)
+                                licenseStorage.clearSession()
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.LOGIN,
+                                    errorMessage = onlineCheck.message
+                                )
+                            }
+                            is LoginDeviceCheckResult.InactiveAccount -> {
+                                GoogleAuthHelper.signOut(context)
+                                licenseStorage.clearSession()
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.LOGIN,
+                                    errorMessage = onlineCheck.message
+                                )
+                            }
+                            is LoginDeviceCheckResult.NotRegistered -> {
+                                GoogleAuthHelper.signOut(context)
+                                licenseStorage.clearSession()
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.REGISTER,
+                                    errorMessage = "Akun belum terdaftar dengan Kode Aktivasi."
+                                )
+                            }
+                            is LoginDeviceCheckResult.OfflineFallback -> Unit // Stay gracefully in offline mode!
+                        }
+                    } else {
+                        // Firebase Auth session exists (e.g., reinstalled or freshly signed in), verify users/{uid}
+                        gateState = AccessGateState.Checking
+                        when (
+                            val onlineCheck = activationAuthRepository.verifySingleDeviceOnLogin(
+                                uid = fbUser.uid,
+                                email = fbUser.email.orEmpty(),
+                                currentDeviceId = deviceId
+                            )
+                        ) {
+                            is LoginDeviceCheckResult.Allowed -> {
+                                licenseStorage.saveOfflineSession(
+                                    uid = onlineCheck.profile.userId,
+                                    email = onlineCheck.profile.email,
+                                    businessName = onlineCheck.profile.businessName,
+                                    licenseCode = onlineCheck.profile.licenseCode,
+                                    deviceId = deviceId,
+                                    active = true
+                                )
+                                gateState = AccessGateState.Granted(
+                                    uid = onlineCheck.profile.userId,
+                                    licenseCode = onlineCheck.profile.licenseCode
+                                )
+                            }
+                            is LoginDeviceCheckResult.BlockedOtherDevice -> {
+                                GoogleAuthHelper.signOut(context)
+                                licenseStorage.clearSession()
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.LOGIN,
+                                    errorMessage = onlineCheck.message
+                                )
+                            }
+                            is LoginDeviceCheckResult.InactiveAccount -> {
+                                GoogleAuthHelper.signOut(context)
+                                licenseStorage.clearSession()
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.LOGIN,
+                                    errorMessage = onlineCheck.message
+                                )
+                            }
+                            is LoginDeviceCheckResult.NotRegistered -> {
+                                GoogleAuthHelper.signOut(context)
+                                licenseStorage.clearSession()
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.REGISTER,
+                                    errorMessage = "Akun Google belum terdaftar. Masukkan Kode Aktivasi Pembelian."
+                                )
+                            }
+                            is LoginDeviceCheckResult.OfflineFallback -> {
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.LOGIN,
+                                    errorMessage = "Perlu koneksi internet untuk verifikasi lisensi pertama kali."
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // No active Firebase Auth session yet -> check device_registry for same-HP Auto-Restore!
+                    gateState = AccessGateState.Checking
+                    val hint = activationAuthRepository.lookupDeviceRegistration(deviceId)
+                    if (hint != null) {
+                        // Device was previously activated on this exact phone! Try silent Google restore first.
+                        when (GoogleAuthHelper.attemptAutoSignIn(context)) {
+                            is GoogleSignInOutcome.Success -> {
+                                // AuthStateListener will update currentUser and trigger the branch above!
+                                return@LaunchedEffect
+                            }
+                            else -> {
+                                gateState = AccessGateState.RequireAuth(
+                                    initialTab = AuthGateTab.LOGIN,
+                                    autoRestoreHint = hint
+                                )
+                            }
+                        }
+                    } else {
+                        gateState = AccessGateState.RequireAuth(
+                            initialTab = AuthGateTab.LOGIN,
+                            autoRestoreHint = null
+                        )
+                    }
+                }
+            }
+
             if (showSplash) {
-                LapakKitaTheme(darkTheme = systemDark) {
+                LapakKitaTheme(darkTheme = false, darkHeader = false) {
                     SplashScreen(onTimeout = { showSplash = false })
                 }
             } else if (AppConfig.IS_TRIAL && isTrialExpired) {
@@ -132,44 +303,75 @@ class MainActivity : ComponentActivity() {
                         onClose = { (context as? Activity)?.finish() }
                     )
                 }
-            } else if (!isLicensed) {
-                LapakKitaTheme(darkTheme = systemDark) {
-                    LicenseActivationScreen(
-                        licenseRepository = licenseRepository,
-                        licenseStorage = licenseStorage,
-                        onActivated = { code ->
-                            activeLicenseCode = code
-                            isLicensed = true
-                        }
-                    )
-                }
-            } else if (currentUser == null) {
-                LapakKitaTheme(darkTheme = systemDark) {
-                    AuthScreen()
-                }
             } else {
-                val uid = currentUser!!.uid
-                key(uid) {
-                    val viewModel: LapakViewModel = viewModel(
-                        key = uid,
-                        factory = viewModelFactory {
-                            initializer {
-                                LapakViewModel(
-                                    repository = repository,
-                                    vendorSyncRepository = vendorSyncRepository,
-                                    financialSyncRepository = financialSyncRepository,
-                                    currentUserId = uid
-                                )
+                when (val state = gateState) {
+                    is AccessGateState.Checking -> {
+                        LapakKitaTheme(darkTheme = systemDark) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(MaterialTheme.colorScheme.background),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        strokeWidth = 3.dp
+                                    )
+                                    Spacer(Modifier.height(14.dp))
+                                    Text(
+                                        text = "Memeriksa sesi & lisensi perangkat...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
-                    )
+                    }
+                    is AccessGateState.RequireAuth -> {
+                        LapakKitaTheme(darkTheme = systemDark, darkHeader = false) {
+                            AuthScreen(
+                                activationAuthRepository = activationAuthRepository,
+                                licenseStorage = licenseStorage,
+                                initialTab = state.initialTab,
+                                initialErrorMessage = state.errorMessage,
+                                autoRestoreHint = state.autoRestoreHint,
+                                onAuthenticated = { profile ->
+                                    gateState = AccessGateState.Granted(
+                                        uid = profile.userId,
+                                        licenseCode = profile.licenseCode
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    is AccessGateState.Granted -> {
+                        key(state.uid) {
+                            val viewModel: LapakViewModel = viewModel(
+                                key = state.uid,
+                                factory = viewModelFactory {
+                                    initializer {
+                                        LapakViewModel(
+                                            repository = repository,
+                                            vendorSyncRepository = vendorSyncRepository,
+                                            financialSyncRepository = financialSyncRepository,
+                                            currentUserId = state.uid
+                                        )
+                                    }
+                                }
+                            )
 
-                    AuthenticatedAppShell(
-                        viewModel = viewModel,
-                        systemDark = systemDark,
-                        licenseRepository = licenseRepository,
-                        activeLicenseCode = activeLicenseCode
-                    )
+                            AuthenticatedAppShell(
+                                viewModel = viewModel,
+                                systemDark = systemDark,
+                                activeLicenseCode = state.licenseCode,
+                                onSignedOut = {
+                                    licenseStorage.clearSession()
+                                    gateState = AccessGateState.RequireAuth(initialTab = AuthGateTab.LOGIN)
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -180,8 +382,8 @@ class MainActivity : ComponentActivity() {
 private fun AuthenticatedAppShell(
     viewModel: LapakViewModel,
     systemDark: Boolean,
-    licenseRepository: LicenseRepository,
-    activeLicenseCode: String?
+    activeLicenseCode: String?,
+    onSignedOut: () -> Unit
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
     val currentScreen by viewModel.currentScreen.collectAsState()
@@ -267,19 +469,19 @@ private fun AuthenticatedAppShell(
                         AppScreen.FINANCIAL_REPORT -> FinancialReportScreen(viewModel = viewModel)
                         AppScreen.SETTINGS -> SettingsScreen(
                             viewModel = viewModel,
-                            licenseRepository = licenseRepository,
-                            activeLicenseCode = activeLicenseCode
+                            activeLicenseCode = activeLicenseCode,
+                            onSignedOut = onSignedOut
                         )
                         AppScreen.ABOUT -> SettingsScreen(
                             viewModel = viewModel,
-                            licenseRepository = licenseRepository,
-                            activeLicenseCode = activeLicenseCode
+                            activeLicenseCode = activeLicenseCode,
+                            onSignedOut = onSignedOut
                         )
                     }
                 }
             }
 
-            // Real-time Web Penyetor Update Notification Banner
+            // Real-time Web Penyetor Update Notification Banner (Neumorphic)
             AnimatedVisibility(
                 visible = !webSyncNotification.isNullOrBlank(),
                 enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
@@ -290,11 +492,10 @@ private fun AuthenticatedAppShell(
                     .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
                 val lapakColors = LocalLapakColors.current
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
-                    shadowElevation = 6.dp,
+                NeuCard(
+                    cornerRadius = 18.dp,
+                    shadowOffset = 5.dp,
+                    blurRadius = 12.dp,
                     modifier = Modifier
                         .fillMaxWidth()
                         .widthIn(max = 520.dp)
@@ -361,28 +562,32 @@ private fun LapakModernBottomBar(
 ) {
     val lapakColors = LocalLapakColors.current
 
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp,
-        shadowElevation = 8.dp,
-        modifier = Modifier.fillMaxWidth()
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(lapakColors.neuSurface)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            HorizontalDivider(thickness = 1.dp, color = lapakColors.cardBorder)
+            // Subtle light bevel line on top of Neumorphic bottom bar
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(lapakColors.neuShadowLight.copy(alpha = 0.7f))
+            )
 
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 BottomNavItem(
                     label = AppStrings.get("nav_dashboard", lang),
                     selected = currentScreen == AppScreen.DASHBOARD,
-                    selectedIcon = Icons.Filled.Dashboard,
-                    unselectedIcon = Icons.Outlined.Dashboard,
+                    icon = LucideIcons.LayoutGrid,
                     testTag = "nav_dashboard",
                     onClick = { onSelectScreen(AppScreen.DASHBOARD) },
                     modifier = Modifier.weight(1f)
@@ -391,27 +596,25 @@ private fun LapakModernBottomBar(
                 BottomNavItem(
                     label = AppStrings.get("nav_sales", lang),
                     selected = currentScreen == AppScreen.SALES,
-                    selectedIcon = Icons.Filled.Storefront,
-                    unselectedIcon = Icons.Outlined.Storefront,
+                    icon = LucideIcons.Store,
                     testTag = "nav_sales",
                     onClick = { onSelectScreen(AppScreen.SALES) },
                     modifier = Modifier.weight(1f)
                 )
 
-                // Prominent Center Kasir Button
+                // Raised Neumorphic Floating Pill Center Kasir Button
                 CenterCashierNavButton(
                     label = AppStrings.get("nav_cashier", lang),
                     selected = currentScreen == AppScreen.CASHIER,
                     cartItemCount = cartItemCount,
                     onClick = { onSelectScreen(AppScreen.CASHIER) },
-                    modifier = Modifier.weight(1.15f)
+                    modifier = Modifier.weight(1.18f)
                 )
 
                 BottomNavItem(
                     label = AppStrings.get("nav_history", lang),
                     selected = currentScreen == AppScreen.HISTORY,
-                    selectedIcon = Icons.Filled.ReceiptLong,
-                    unselectedIcon = Icons.Outlined.ReceiptLong,
+                    icon = LucideIcons.ReceiptText,
                     testTag = "nav_history",
                     onClick = { onSelectScreen(AppScreen.HISTORY) },
                     modifier = Modifier.weight(1f)
@@ -420,8 +623,7 @@ private fun LapakModernBottomBar(
                 BottomNavItem(
                     label = AppStrings.get("nav_sellers", lang),
                     selected = currentScreen == AppScreen.SELLERS,
-                    selectedIcon = Icons.Filled.People,
-                    unselectedIcon = Icons.Outlined.People,
+                    icon = LucideIcons.UsersRound,
                     testTag = "nav_sellers",
                     onClick = { onSelectScreen(AppScreen.SELLERS) },
                     modifier = Modifier.weight(1f)
@@ -435,8 +637,7 @@ private fun LapakModernBottomBar(
 private fun BottomNavItem(
     label: String,
     selected: Boolean,
-    selectedIcon: ImageVector,
-    unselectedIcon: ImageVector,
+    icon: ImageVector,
     testTag: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -452,29 +653,36 @@ private fun BottomNavItem(
                 role = Role.Tab,
                 onClick = onClick
             )
-            .padding(vertical = 4.dp, horizontal = 2.dp)
+            .padding(vertical = 3.dp, horizontal = 2.dp)
             .testTag(testTag),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .background(
-                    if (selected) MaterialTheme.colorScheme.primaryContainer
-                    else Color.Transparent
+                .then(
+                    if (selected) {
+                        Modifier.neuInset(
+                            cornerRadius = 12.dp,
+                            shadowOffset = 2.dp,
+                            blurRadius = 5.dp
+                        )
+                    } else {
+                        Modifier
+                    }
                 )
-                .padding(horizontal = 12.dp, vertical = 4.dp),
+                .clip(RoundedCornerShape(12.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = if (selected) selectedIcon else unselectedIcon,
+                imageVector = icon,
                 contentDescription = label,
                 tint = if (selected) activeColor else inactiveColor,
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier.size(21.dp)
             )
         }
-        Spacer(Modifier.height(2.dp))
+        Spacer(Modifier.height(3.dp))
         Text(
             text = label,
             fontSize = 11.sp,
@@ -526,35 +734,30 @@ private fun CenterCashierNavButton(
                 }
             }
         ) {
-            Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = if (selected) primaryColor else primaryColor.copy(alpha = 0.90f),
-                shadowElevation = if (selected) 8.dp else 4.dp,
-                border = if (selected) {
-                    BorderStroke(2.dp, MaterialTheme.colorScheme.primaryContainer)
-                } else {
-                    null
-                },
+            // Raised Neumorphic Floating Pill
+            Box(
                 modifier = Modifier
                     .height(44.dp)
-                    .widthIn(min = 62.dp)
-                    .shadow(if (selected) 6.dp else 2.dp, RoundedCornerShape(18.dp))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.PointOfSale,
-                        contentDescription = label,
-                        tint = onPrimaryColor,
-                        modifier = Modifier.size(22.dp)
+                    .widthIn(min = 66.dp)
+                    .neuExtruded(
+                        cornerRadius = 22.dp,
+                        shadowOffset = if (selected) 5.dp else 4.dp,
+                        blurRadius = if (selected) 10.dp else 8.dp,
+                        surfaceColor = primaryColor
                     )
-                }
+                    .clip(RoundedCornerShape(22.dp))
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = LucideIcons.Calculator,
+                    contentDescription = label,
+                    tint = onPrimaryColor,
+                    modifier = Modifier.size(22.dp)
+                )
             }
         }
-        Spacer(Modifier.height(2.dp))
+        Spacer(Modifier.height(3.dp))
         Text(
             text = label,
             fontSize = 11.sp,
@@ -569,7 +772,6 @@ private fun CenterCashierNavButton(
 private fun TrialExpiredScreen(
     onClose: () -> Unit
 ) {
-    val lapakColors = LocalLapakColors.current
     Surface(
         modifier = Modifier
             .fillMaxSize()
@@ -582,11 +784,10 @@ private fun TrialExpiredScreen(
                 .padding(24.dp),
             contentAlignment = Alignment.Center
         ) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(22.dp),
-                border = BorderStroke(1.dp, lapakColors.cardBorder),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+            NeuCard(
+                cornerRadius = 22.dp,
+                shadowOffset = 6.dp,
+                blurRadius = 14.dp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .widthIn(max = 440.dp)
@@ -629,7 +830,7 @@ private fun TrialExpiredScreen(
                             containerColor = MaterialTheme.colorScheme.primary,
                             contentColor = MaterialTheme.colorScheme.onPrimary
                         ),
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp)

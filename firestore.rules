@@ -28,6 +28,31 @@ service cloud.firestore {
       return code is string && code.matches('^LPK-[A-Z0-9]{6}$');
     }
 
+    function isValidActivationCodeId(code) {
+      return code is string &&
+             code.size() >= 4 &&
+             code.size() <= 48 &&
+             code.matches('^[A-Z0-9][A-Z0-9_\\-]{3,47}$');
+    }
+
+    function isValidDeviceId(deviceId) {
+      return deviceId is string &&
+             deviceId.size() >= 6 &&
+             deviceId.size() <= 128 &&
+             deviceId.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isLicenseDeveloper() {
+      return isSignedIn() &&
+             'email_verified' in request.auth.token &&
+             request.auth.token.email_verified == true &&
+             'email' in request.auth.token &&
+             request.auth.token.email in [
+               'rendykurniawan0311@gmail.com',
+               'farahrifa58@gmail.com'
+             ];
+    }
+
     function isValidLapakVendor(data) {
       return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
              isValidVendorCode(data.vendorCode) &&
@@ -66,6 +91,24 @@ service cloud.firestore {
              data.stockAdditions is list && data.stockAdditions.size() <= 50 &&
              (data.stockAdditions.size() == 0 || data.stockAdditions[0] is map) &&
              data.note is string && data.note.size() <= 200;
+    }
+
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+             data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 120 &&
+             isValidActivationCodeId(data.licenseCode) &&
+             data.registeredDeviceId is string &&
+             (data.registeredDeviceId == '' || isValidDeviceId(data.registeredDeviceId)) &&
+             data.active is bool;
+    }
+
+    function isValidDeviceRegistration(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             data.emailHint is string && data.emailHint.size() >= 3 && data.emailHint.size() <= 160 &&
+             data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 120 &&
+             isValidActivationCodeId(data.licenseCode) &&
+             data.active is bool;
     }
 
     function isValidLapakTransaction(data) {
@@ -107,34 +150,7 @@ service cloud.firestore {
              data.status is string && data.status in ['LUNAS', 'SEBAGIAN', 'BELUM_DIBAYAR'];
     }
 
-    function isLicenseDeveloper() {
-      return isSignedIn() &&
-             request.auth.token.email_verified == true &&
-             request.auth.token.email in [
-               'rendykurniawan0311@gmail.com',
-               'farahrifa58@gmail.com'
-             ];
-    }
-
-    function isValidLicenseCode(code) {
-      return code is string &&
-             code.size() >= 6 &&
-             code.size() <= 32 &&
-             code.matches('^[A-Z0-9][A-Z0-9\\-]{5,31}$');
-    }
-
-    function isValidLicenseDoc(data) {
-      return isValidLicenseCode(data.code) &&
-             data.appName is string && data.appName.size() >= 1 && data.appName.size() <= 60 &&
-             (!('productKey' in data) || (data.productKey is string && data.productKey.size() <= 40)) &&
-             (!('buyerNote' in data) || (data.buyerNote is string && data.buyerNote.size() <= 120)) &&
-             data.isUsed is bool &&
-             (!('usedByDeviceId' in data) || (data.usedByDeviceId is string && data.usedByDeviceId.size() <= 128)) &&
-             (!('usedAt' in data) || (data.usedAt is timestamp && data.usedAt <= request.time)) &&
-             (!('createdByUid' in data) || (data.createdByUid is string && data.createdByUid.size() <= 128));
-    }
-
-    // --- 1. LAPAK VENDORS (Public by exact vendorCode for read-only view; Owner Admin full control) ---
+    // --- 1. LAPAK VENDORS (Public by exact vendorCode for Web Penyetor; Owner Admin full control) ---
     match /lapak_vendors/{vendorCode} {
       allow get: if isValidVendorCode(vendorCode);
       allow list: if isSignedIn() && existing().ownerUid == request.auth.uid;
@@ -214,7 +230,7 @@ service cloud.firestore {
       }
     }
 
-    // --- 3. VENDOR WEB SUBMISSIONS ---
+    // --- 3. VENDOR WEB SUBMISSIONS (Portal Web Penyetor) ---
     match /lapak_vendor_submissions/{submissionId} {
       allow get: if isSignedIn() &&
                     isValidId(submissionId) &&
@@ -261,180 +277,235 @@ service cloud.firestore {
                        existing().ownerUid == request.auth.uid;
     }
 
-    // --- 4. LAPAK TRANSACTIONS (Admin-only financial ledger records) ---
-    match /lapak_transactions/{transactionDocId} {
-      allow get: if isSignedIn() &&
-                    isValidId(transactionDocId) &&
-                    (resource == null || existing().ownerUid == request.auth.uid);
+    // --- 4. ACTIVATION CODES (100% Synced with License Admin) ---
+    match /activation_codes/{codeId} {
+      // Exact-ID lookup for registration validation (no wildcard list by buyers/public)
+      allow get: if isValidActivationCodeId(codeId);
 
-      allow list: if isSignedIn() &&
-                     existing().ownerUid == request.auth.uid;
+      // Only Developer Admin (License Admin) can list, create, or delete activation codes
+      allow list: if isLicenseDeveloper();
+      allow create: if isLicenseDeveloper() && isValidActivationCodeId(codeId);
+      allow delete: if isLicenseDeveloper() && isValidActivationCodeId(codeId);
 
-      allow create: if isSignedIn() &&
-                       isValidId(transactionDocId) &&
-                       incoming().ownerUid == request.auth.uid &&
-                       incoming().keys().hasAll([
-                         'ownerUid', 'transactionNumber', 'timestampMillis', 'totalAmount',
-                         'totalItemsCount', 'cashReceived', 'changeGiven', 'paymentMethod',
-                         'totalAdminProfit', 'totalSellerShare', 'cancelled', 'cancellationReason',
-                         'items', 'createdAt', 'updatedAt'
-                       ]) &&
-                       incoming().keys().hasOnly([
-                         'ownerUid', 'transactionNumber', 'timestampMillis', 'totalAmount',
-                         'totalItemsCount', 'cashReceived', 'changeGiven', 'paymentMethod',
-                         'totalAdminProfit', 'totalSellerShare', 'cancelled', 'cancellationReason',
-                         'items', 'createdAt', 'updatedAt'
-                       ]) &&
-                       isValidLapakTransaction(incoming()) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
-
-      allow update: if isSignedIn() &&
-                       isValidId(transactionDocId) &&
-                       existing().ownerUid == request.auth.uid &&
-                       isValidLapakTransaction(incoming()) &&
-                       incoming().ownerUid == existing().ownerUid &&
-                       incoming().transactionNumber == existing().transactionNumber &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'cancelled', 'cancellationReason', 'totalAmount', 'totalItemsCount',
-                         'cashReceived', 'changeGiven', 'paymentMethod',
-                         'totalAdminProfit', 'totalSellerShare', 'items', 'updatedAt'
-                       ]);
-
-      allow delete: if isSignedIn() &&
-                       isValidId(transactionDocId) &&
-                       existing().ownerUid == request.auth.uid;
+      // Atomic one-time claim: transitions status 'available' -> 'used' by signed-in user.
+      // Preserves any additional fields added by the separate License Admin app.
+      allow update: if isLicenseDeveloper() ||
+                       (isSignedIn() &&
+                        isValidActivationCodeId(codeId) &&
+                        existing().status == 'available' &&
+                        incoming().status == 'used' &&
+                        incoming().usedByUid == request.auth.uid &&
+                        incoming().usedByEmail is string &&
+                        incoming().usedByEmail.size() >= 3 &&
+                        incoming().usedByEmail.size() <= 160 &&
+                        incoming().usedByBusinessName is string &&
+                        incoming().usedByBusinessName.size() >= 1 &&
+                        incoming().usedByBusinessName.size() <= 120 &&
+                        isValidDeviceId(incoming().registeredDeviceId) &&
+                        incoming().usedAt is timestamp && incoming().usedAt <= request.time &&
+                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                        incoming().diff(existing()).affectedKeys().hasOnly([
+                          'status', 'usedByUid', 'usedByEmail', 'usedByBusinessName',
+                          'registeredDeviceId', 'usedAt', 'updatedAt'
+                        ]));
     }
 
-    // --- 5. LAPAK EXPENSES (Admin-only operating expense records) ---
-    match /lapak_expenses/{expenseDocId} {
-      allow get: if isSignedIn() &&
-                    isValidId(expenseDocId) &&
-                    (resource == null || existing().ownerUid == request.auth.uid);
-
-      allow list: if isSignedIn() &&
-                     existing().ownerUid == request.auth.uid;
-
-      allow create: if isSignedIn() &&
-                       isValidId(expenseDocId) &&
-                       incoming().ownerUid == request.auth.uid &&
-                       incoming().keys().hasAll([
-                         'ownerUid', 'localExpenseId', 'title', 'amount',
-                         'expenseDateMillis', 'notes', 'createdAt', 'updatedAt'
-                       ]) &&
-                       incoming().keys().hasOnly([
-                         'ownerUid', 'localExpenseId', 'title', 'amount',
-                         'expenseDateMillis', 'notes', 'createdAt', 'updatedAt'
-                       ]) &&
-                       isValidLapakExpense(incoming()) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
-
-      allow update: if isSignedIn() &&
-                       isValidId(expenseDocId) &&
-                       existing().ownerUid == request.auth.uid &&
-                       isValidLapakExpense(incoming()) &&
-                       incoming().ownerUid == existing().ownerUid &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'title', 'amount', 'expenseDateMillis', 'notes', 'updatedAt'
-                       ]);
-
-      allow delete: if isSignedIn() &&
-                       isValidId(expenseDocId) &&
-                       existing().ownerUid == request.auth.uid;
-    }
-
-    // --- 6. LAPAK SETTLEMENTS (Admin-only consignor payout settlement records) ---
-    match /lapak_settlements/{settlementDocId} {
-      allow get: if isSignedIn() &&
-                    isValidId(settlementDocId) &&
-                    (resource == null || existing().ownerUid == request.auth.uid);
-
-      allow list: if isSignedIn() &&
-                     existing().ownerUid == request.auth.uid;
-
-      allow create: if isSignedIn() &&
-                       isValidId(settlementDocId) &&
-                       incoming().ownerUid == request.auth.uid &&
-                       incoming().keys().hasAll([
-                         'ownerUid', 'localPaymentId', 'localSellerId', 'sellerName',
-                         'vendorCode', 'amount', 'paymentDateMillis', 'paymentMethod',
-                         'notes', 'status', 'createdAt', 'updatedAt'
-                       ]) &&
-                       incoming().keys().hasOnly([
-                         'ownerUid', 'localPaymentId', 'localSellerId', 'sellerName',
-                         'vendorCode', 'amount', 'paymentDateMillis', 'paymentMethod',
-                         'notes', 'status', 'createdAt', 'updatedAt'
-                       ]) &&
-                       isValidLapakSettlement(incoming()) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
-
-      allow update: if isSignedIn() &&
-                       isValidId(settlementDocId) &&
-                       existing().ownerUid == request.auth.uid &&
-                       isValidLapakSettlement(incoming()) &&
-                       incoming().ownerUid == existing().ownerUid &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'sellerName', 'vendorCode', 'amount', 'paymentDateMillis',
-                         'paymentMethod', 'notes', 'status', 'updatedAt'
-                       ]);
-
-      allow delete: if isSignedIn() &&
-                       isValidId(settlementDocId) &&
-                       existing().ownerUid == request.auth.uid;
-    }
-
-    // --- 7. LICENSE CODES (1 Code = 1 Device activation; Developer-only generation & listing) ---
-    match /license_codes/{licenseCode} {
-      // Exact-ID lookup for license activation (no wildcard listing by buyers/public)
-      allow get: if isValidLicenseCode(licenseCode);
-
-      // Only verified Developer Admin can list all generated license codes
+    // --- 5. USERS & USER-SCOPED FINANCIAL SUBCOLLECTIONS ---
+    match /users/{userId} {
+      allow get: if (isSignedIn() && request.auth.uid == userId) || isLicenseDeveloper();
       allow list: if isLicenseDeveloper();
 
-      // Only verified Developer Admin can create new unused license codes
-      allow create: if isLicenseDeveloper() &&
-                       isValidLicenseCode(licenseCode) &&
-                       incoming().code == licenseCode &&
-                       incoming().createdByUid == request.auth.uid &&
-                       incoming().isUsed == false &&
-                       incoming().usedByDeviceId == '' &&
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().active == true &&
                        incoming().keys().hasAll([
-                         'code', 'appName', 'productKey', 'buyerNote',
-                         'isUsed', 'usedByDeviceId', 'createdByUid', 'createdAt', 'updatedAt'
+                         'userId', 'email', 'businessName', 'licenseCode',
+                         'registeredDeviceId', 'active', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'code', 'appName', 'productKey', 'buyerNote',
-                         'isUsed', 'usedByDeviceId', 'createdByUid', 'createdAt', 'updatedAt'
+                         'userId', 'email', 'businessName', 'licenseCode',
+                         'registeredDeviceId', 'active', 'createdAt', 'updatedAt'
                        ]) &&
-                       isValidLicenseDoc(incoming()) &&
+                       isValidUserProfile(incoming()) &&
+                       isValidDeviceId(incoming().registeredDeviceId) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
 
-      // One-time atomic activation claim: transitions isUsed false -> true and binds deviceId.
-      // Terminal state lock prevents overwriting an already-used code from another device.
-      allow update: if isValidLicenseCode(licenseCode) &&
-                       existing().isUsed == false &&
-                       incoming().isUsed == true &&
-                       incoming().usedByDeviceId is string &&
-                       incoming().usedByDeviceId.size() >= 6 &&
-                       incoming().usedByDeviceId.size() <= 128 &&
-                       incoming().usedAt is timestamp && incoming().usedAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().appName is string && incoming().appName.size() >= 1 && incoming().appName.size() <= 60 &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'isUsed', 'usedByDeviceId', 'usedAt', 'appName', 'updatedAt'
-                       ]);
+      // Single Device Lock enforced server-side: user can bind registeredDeviceId only if empty (admin reset)
+      allow update: if isLicenseDeveloper() ||
+                       (isSignedIn() &&
+                        request.auth.uid == userId &&
+                        isValidUserProfile(incoming()) &&
+                        incoming().userId == existing().userId &&
+                        incoming().licenseCode == existing().licenseCode &&
+                        incoming().active == existing().active &&
+                        incoming().createdAt == existing().createdAt &&
+                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                        incoming().diff(existing()).affectedKeys().hasOnly([
+                          'businessName', 'email', 'registeredDeviceId', 'updatedAt'
+                        ]) &&
+                        (existing().registeredDeviceId == '' ||
+                         incoming().registeredDeviceId == existing().registeredDeviceId));
 
-      // Only verified Developer Admin can delete license codes
-      allow delete: if isLicenseDeveloper() && isValidLicenseCode(licenseCode);
+      allow delete: if isLicenseDeveloper();
+
+      // 5a. User Transactions Subcollection
+      match /transactions/{transactionDocId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(transactionDocId) &&
+                         incoming().ownerUid == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'ownerUid', 'transactionNumber', 'timestampMillis', 'totalAmount',
+                           'totalItemsCount', 'cashReceived', 'changeGiven', 'paymentMethod',
+                           'totalAdminProfit', 'totalSellerShare', 'cancelled', 'cancellationReason',
+                           'items', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'ownerUid', 'transactionNumber', 'timestampMillis', 'totalAmount',
+                           'totalItemsCount', 'cashReceived', 'changeGiven', 'paymentMethod',
+                           'totalAdminProfit', 'totalSellerShare', 'cancelled', 'cancellationReason',
+                           'items', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidLapakTransaction(incoming()) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+        allow update: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(transactionDocId) &&
+                         existing().ownerUid == request.auth.uid &&
+                         isValidLapakTransaction(incoming()) &&
+                         incoming().ownerUid == existing().ownerUid &&
+                         incoming().transactionNumber == existing().transactionNumber &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'cancelled', 'cancellationReason', 'totalAmount', 'totalItemsCount',
+                           'cashReceived', 'changeGiven', 'paymentMethod',
+                           'totalAdminProfit', 'totalSellerShare', 'items', 'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(transactionDocId);
+      }
+
+      // 5b. User Operating Expenses Subcollection
+      match /expenses/{expenseDocId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(expenseDocId) &&
+                         incoming().ownerUid == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'ownerUid', 'localExpenseId', 'title', 'amount',
+                           'expenseDateMillis', 'notes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'ownerUid', 'localExpenseId', 'title', 'amount',
+                           'expenseDateMillis', 'notes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidLapakExpense(incoming()) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+        allow update: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(expenseDocId) &&
+                         existing().ownerUid == request.auth.uid &&
+                         isValidLapakExpense(incoming()) &&
+                         incoming().ownerUid == existing().ownerUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'amount', 'expenseDateMillis', 'notes', 'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(expenseDocId);
+      }
+
+      // 5c. User Seller Settlements Subcollection
+      match /settlements/{settlementDocId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(settlementDocId) &&
+                         incoming().ownerUid == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'ownerUid', 'localPaymentId', 'localSellerId', 'sellerName',
+                           'vendorCode', 'amount', 'paymentDateMillis', 'paymentMethod',
+                           'notes', 'status', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'ownerUid', 'localPaymentId', 'localSellerId', 'sellerName',
+                           'vendorCode', 'amount', 'paymentDateMillis', 'paymentMethod',
+                           'notes', 'status', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidLapakSettlement(incoming()) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+        allow update: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(settlementDocId) &&
+                         existing().ownerUid == request.auth.uid &&
+                         isValidLapakSettlement(incoming()) &&
+                         incoming().ownerUid == existing().ownerUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'sellerName', 'vendorCode', 'amount', 'paymentDateMillis',
+                           'paymentMethod', 'notes', 'status', 'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(settlementDocId);
+      }
+    }
+
+    // --- 6. DEVICE REGISTRY (Exact-ID lookup for same-device auto-restore after reinstall) ---
+    match /device_registry/{deviceId} {
+      allow get: if isValidDeviceId(deviceId);
+      allow list: if isLicenseDeveloper();
+
+      allow create: if isSignedIn() &&
+                       isValidDeviceId(deviceId) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'ownerUid', 'emailHint', 'businessName', 'licenseCode',
+                         'active', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'ownerUid', 'emailHint', 'businessName', 'licenseCode',
+                         'active', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidDeviceRegistration(incoming()) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+      allow update: if isLicenseDeveloper() ||
+                       (isSignedIn() &&
+                        isValidDeviceId(deviceId) &&
+                        existing().ownerUid == request.auth.uid &&
+                        isValidDeviceRegistration(incoming()) &&
+                        incoming().ownerUid == existing().ownerUid &&
+                        incoming().createdAt == existing().createdAt &&
+                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                        incoming().diff(existing()).affectedKeys().hasOnly([
+                          'emailHint', 'businessName', 'licenseCode', 'active', 'updatedAt'
+                        ]));
+
+      allow delete: if isLicenseDeveloper() ||
+                       (isSignedIn() && isValidDeviceId(deviceId) && existing().ownerUid == request.auth.uid);
     }
   }
 }

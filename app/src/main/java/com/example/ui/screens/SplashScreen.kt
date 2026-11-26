@@ -3,9 +3,7 @@ package com.example.ui.screens
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -13,50 +11,51 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
-import com.example.ui.theme.LocalLapakColors
+import com.example.ui.components.neuExtruded
 import kotlinx.coroutines.delay
 
 @Composable
 fun SplashScreen(
     onTimeout: () -> Unit
 ) {
-    val lapakColors = LocalLapakColors.current
-
     LaunchedEffect(Unit) {
-        delay(1200)
+        delay(1300)
         onTimeout()
     }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val infiniteTransition = rememberInfiniteTransition(label = "splash_pulse")
     val scale by infiniteTransition.animateFloat(
-        initialValue = 0.97f,
-        targetValue = 1.03f,
+        initialValue = 0.98f,
+        targetValue = 1.025f,
         animationSpec = infiniteRepeatable(
             animation = tween(1100, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "scale"
+        label = "logo_scale"
+    )
+
+    // Soft gray blended with crisp white gradient
+    val splashGradient = Brush.verticalGradient(
+        colors = listOf(
+            Color(0xFFDFE4E3),
+            Color(0xFFF2F4F3),
+            Color(0xFFFFFFFF),
+            Color(0xFFE9EDEC)
+        )
     )
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f),
-                        MaterialTheme.colorScheme.background,
-                        MaterialTheme.colorScheme.background
-                    )
-                )
-            )
+            .background(splashGradient)
             .windowInsetsPadding(WindowInsets.systemBars),
         contentAlignment = Alignment.Center
     ) {
@@ -64,79 +63,49 @@ fun SplashScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
             modifier = Modifier
-                .padding(24.dp)
+                .padding(horizontal = 32.dp)
                 .scale(scale)
         ) {
+            // Centered new Lapak Kita logo inside a raised Soft UI frame
             Box(
                 modifier = Modifier
-                    .size(124.dp)
-                    .shadow(10.dp, CircleShape)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(2.5.dp, MaterialTheme.colorScheme.primary, CircleShape),
+                    .size(164.dp)
+                    .neuExtruded(
+                        cornerRadius = 32.dp,
+                        shadowOffset = 8.dp,
+                        blurRadius = 16.dp,
+                        surfaceColor = Color(0xFF194220),
+                        lightShadowColor = Color(0xFFFFFFFF),
+                        darkShadowColor = Color(0xFFC5CECB)
+                    )
+                    .clip(RoundedCornerShape(32.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 Image(
                     painter = painterResource(id = R.drawable.ic_lapak_logo),
                     contentDescription = "Logo Lapak Kita",
-                    modifier = Modifier
-                        .size(110.dp)
-                        .clip(CircleShape)
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
                 )
             }
 
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(26.dp))
 
             Text(
-                text = "Lapak Kita",
-                fontSize = 30.sp,
-                fontWeight = FontWeight.ExtraBold,
-                color = MaterialTheme.colorScheme.onBackground,
-                letterSpacing = 0.5.sp
+                text = "By Rafline Dev",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF2D3A35),
+                letterSpacing = 0.8.sp
             )
 
-            Spacer(Modifier.height(4.dp))
-
-            Text(
-                text = "Manajemen Lapak Titipan & Web Penyetor",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(Modifier.height(14.dp))
-
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = lapakColors.omzetCardBg,
-                border = androidx.compose.foundation.BorderStroke(1.dp, lapakColors.omzetCardBorder)
-            ) {
-                Text(
-                    text = "by Rafline Dev",
-                    color = MaterialTheme.colorScheme.primary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.4.sp,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-                )
-            }
-
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(28.dp))
 
             CircularProgressIndicator(
-                modifier = Modifier.size(26.dp),
-                color = MaterialTheme.colorScheme.primary,
-                strokeWidth = 3.dp
+                modifier = Modifier.size(24.dp),
+                color = Color(0xFF194220),
+                strokeWidth = 2.6.dp
             )
         }
-
-        Text(
-            text = "Versi 2.0 • Soft Emerald & Cloud Sync",
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 24.dp)
-        )
     }
 }

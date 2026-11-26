@@ -1,14 +1,12 @@
 package com.example.ui.screens
 
 import android.widget.Toast
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -16,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -107,10 +106,10 @@ fun DashboardScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            contentPadding = PaddingValues(top = 14.dp, bottom = 26.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Timeframe Filter Chips
+            // Timeframe Filter Chips (Tactile Neumorphic Extruded / Inset)
             item {
                 TimeframeSelector(
                     current = currentTimeframe,
@@ -122,10 +121,10 @@ fun DashboardScreen(
             if (com.example.config.AppConfig.IS_TRIAL) {
                 item {
                     val trialManager = remember { com.example.config.TrialManager(context) }
-                    Surface(
-                        color = lapakColors.warningBg,
-                        border = BorderStroke(1.dp, lapakColors.warningBorder),
-                        shape = RoundedCornerShape(12.dp),
+                    NeuCard(
+                        cornerRadius = 14.dp,
+                        shadowOffset = 4.dp,
+                        blurRadius = 8.dp,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -145,70 +144,61 @@ fun DashboardScreen(
                 }
             }
 
-            // 4 Soft Pastel Financial Summary Cards
+            // 4 Monochromatic Soft UI / Neumorphism Financial Summary Cards
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         MetricCard(
                             title = AppStrings.get("dash_total_omzet", lang),
                             value = LapakViewModel.formatRupiah(summary.totalOmzet),
                             subtitle = "${summary.totalItemsSold} ${AppStrings.get("dash_items_sold", lang)}",
-                            icon = Icons.Default.Payments,
-                            containerColor = lapakColors.omzetCardBg,
-                            borderColor = lapakColors.omzetCardBorder,
-                            contentColor = lapakColors.omzetCardAccent,
+                            icon = LucideIcons.Wallet,
+                            accentColor = lapakColors.omzetCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                         MetricCard(
                             title = AppStrings.get("dash_net_profit", lang),
                             value = LapakViewModel.formatRupiah(summary.netAdminProfit),
                             subtitle = "Kotor: ${LapakViewModel.formatRupiah(summary.grossAdminProfit)}",
-                            icon = Icons.Default.TrendingUp,
-                            containerColor = lapakColors.profitCardBg,
-                            borderColor = lapakColors.profitCardBorder,
-                            contentColor = lapakColors.profitCardAccent,
+                            icon = LucideIcons.TrendingUp,
+                            accentColor = lapakColors.profitCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                     }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         MetricCard(
                             title = AppStrings.get("dash_seller_rights", lang),
                             value = LapakViewModel.formatRupiah(summary.totalSellerShare),
                             subtitle = "Hak barang terjual",
-                            icon = Icons.Default.Storefront,
-                            containerColor = lapakColors.payoutCardBg,
-                            borderColor = lapakColors.payoutCardBorder,
-                            contentColor = lapakColors.payoutCardAccent,
+                            icon = LucideIcons.HandCoins,
+                            accentColor = lapakColors.payoutCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                         MetricCard(
                             title = AppStrings.get("dash_operating_expenses", lang),
                             value = LapakViewModel.formatRupiah(summary.operatingExpenses),
                             subtitle = "Biaya lapak",
-                            icon = Icons.Default.ReceiptLong,
-                            containerColor = lapakColors.expenseCardBg,
-                            borderColor = lapakColors.expenseCardBorder,
-                            contentColor = lapakColors.expenseCardAccent,
+                            icon = LucideIcons.Receipt,
+                            accentColor = lapakColors.expenseCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                     }
                 }
             }
 
-            // Operational Seller Count Summary Bar
+            // Operational Seller Count Summary Bar (Neumorphic Raised Card)
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, lapakColors.cardBorder),
-                    shape = RoundedCornerShape(16.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                NeuCard(
+                    cornerRadius = 16.dp,
+                    shadowOffset = 5.dp,
+                    blurRadius = 10.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -221,7 +211,7 @@ fun DashboardScreen(
                             label = AppStrings.get("dash_active_sellers", lang),
                             value = "${summary.activeSellersCount}",
                             icon = Icons.Default.CheckCircle,
-                            iconColor = MaterialTheme.colorScheme.primary
+                            iconColor = lapakColors.omzetCardAccent
                         )
                         QuickHealthItem(
                             label = AppStrings.get("dash_leave_sellers", lang),
@@ -239,90 +229,116 @@ fun DashboardScreen(
                 }
             }
 
-            // 2 Quick Action Buttons directly below Seller Count Summary
+            // 2 Tactile Neumorphic Quick Action Buttons (Fixed single PlusCircle icon + "Terima Titipan")
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Button(
-                        onClick = { showQuickDepositDialog = true },
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        ),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                    // Button 1: Terima Titipan (Single PlusCircle icon, soft emerald raised Neumorphic button)
+                    Box(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 50.dp)
-                            .testTag("dashboard_quick_deposit_button")
+                            .heightIn(min = 52.dp)
+                            .neuExtruded(
+                                cornerRadius = 16.dp,
+                                shadowOffset = 5.dp,
+                                blurRadius = 10.dp,
+                                surfaceColor = MaterialTheme.colorScheme.primary
+                            )
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { showQuickDepositDialog = true }
+                            .padding(horizontal = 12.dp, vertical = 12.dp)
+                            .testTag("dashboard_quick_deposit_button"),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.AddBox, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "+ Terima Titipan",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = LucideIcons.PlusCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(19.dp)
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                text = "Terima Titipan",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                maxLines = 1
+                            )
+                        }
                     }
 
-                    FilledTonalButton(
-                        onClick = { showQuickPayoutPicker = true },
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = lapakColors.payoutCardBg,
-                            contentColor = lapakColors.payoutCardAccent
-                        ),
-                        border = BorderStroke(1.dp, lapakColors.payoutCardBorder),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                    // Button 2: Bayar Setoran (Neumorphic extruded card button with soft amber accent)
+                    Box(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 50.dp)
-                            .testTag("dashboard_quick_payout_button")
+                            .heightIn(min = 52.dp)
+                            .neuExtruded(
+                                cornerRadius = 16.dp,
+                                shadowOffset = 5.dp,
+                                blurRadius = 10.dp,
+                                surfaceColor = lapakColors.neuSurface
+                            )
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { showQuickPayoutPicker = true }
+                            .padding(horizontal = 12.dp, vertical = 12.dp)
+                            .testTag("dashboard_quick_payout_button"),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.Payments, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "Bayar Setoran",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = LucideIcons.HandCoins,
+                                contentDescription = null,
+                                tint = lapakColors.payoutCardAccent,
+                                modifier = Modifier.size(19.dp)
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                text = "Bayar Setoran",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = lapakColors.payoutCardAccent,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
             }
 
-            // Financial Report & Export (Excel / PDF) Entry Card
+            // Financial Report & Export (Excel / PDF) Entry Card (Neumorphic)
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
-                    shape = RoundedCornerShape(16.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                NeuCard(
+                    cornerRadius = 16.dp,
+                    shadowOffset = 5.dp,
+                    blurRadius = 10.dp,
+                    onClick = { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) }
                         .testTag("dashboard_financial_report_button")
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 13.dp),
+                            .padding(horizontal = 14.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .background(lapakColors.omzetCardBg, CircleShape),
-                            contentAlignment = Alignment.Center
+                        NeuIconBadge(
+                            accentColor = lapakColors.omzetCardAccent,
+                            size = 42.dp
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Assessment,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
+                                tint = lapakColors.omzetCardAccent,
+                                modifier = Modifier.size(21.dp)
                             )
                         }
                         Spacer(Modifier.width(12.dp))
@@ -350,43 +366,55 @@ fun DashboardScreen(
                 }
             }
 
-            // Unpaid Rights Alert Card
+            // Unpaid Rights Alert Card (Neumorphic extruded card with soft amber accent)
             if (summary.totalUnpaidSellerPayables > 0) {
                 item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = lapakColors.warningBg),
-                        border = BorderStroke(1.dp, lapakColors.warningBorder),
-                        shape = RoundedCornerShape(14.dp),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    NeuCard(
+                        cornerRadius = 16.dp,
+                        shadowOffset = 5.dp,
+                        blurRadius = 10.dp,
+                        onClick = { showQuickPayoutPicker = true },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { showQuickPayoutPicker = true }
+                            .testTag("dashboard_unpaid_alert_card")
                     ) {
                         Row(
-                            modifier = Modifier.padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(lapakColors.payoutCardAccent.copy(alpha = 0.07f))
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                Icons.Default.AccountBalanceWallet,
-                                contentDescription = null,
-                                tint = lapakColors.warningText,
-                                modifier = Modifier.size(22.dp)
-                            )
+                            NeuIconBadge(
+                                accentColor = lapakColors.payoutCardAccent,
+                                size = 40.dp
+                            ) {
+                                Icon(
+                                    imageVector = LucideIcons.HandCoins,
+                                    contentDescription = null,
+                                    tint = lapakColors.payoutCardAccent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = AppStrings.get("dash_unpaid_rights", lang),
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = lapakColors.warningText
+                                    color = lapakColors.payoutCardAccent
                                 )
                                 Text(
                                     text = "Total yang belum dibayarkan: ${LapakViewModel.formatRupiah(summary.totalUnpaidSellerPayables)}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = lapakColors.warningText.copy(alpha = 0.9f)
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
-                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = lapakColors.warningText)
+                            Icon(
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = null,
+                                tint = lapakColors.payoutCardAccent
+                            )
                         }
                     }
                 }
@@ -397,7 +425,7 @@ fun DashboardScreen(
                 RevenueProfitBarChart(metrics = summary.dailyTrend)
             }
 
-            // Best Selling Products
+            // Best Selling Products (Neumorphic cards)
             if (summary.topSellingProducts.isNotEmpty()) {
                 item {
                     Text(
@@ -409,17 +437,16 @@ fun DashboardScreen(
                 }
 
                 items(summary.topSellingProducts) { top ->
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, lapakColors.cardBorder),
-                        shape = RoundedCornerShape(14.dp),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    NeuCard(
+                        cornerRadius = 16.dp,
+                        shadowOffset = 4.dp,
+                        blurRadius = 9.dp,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(12.dp),
+                                .padding(14.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -455,7 +482,7 @@ fun DashboardScreen(
                 }
             }
 
-            // Low Stock Warning List
+            // Low Stock Warning List (Neumorphic cards)
             if (summary.lowStockProducts.isNotEmpty()) {
                 item {
                     Text(
@@ -468,17 +495,16 @@ fun DashboardScreen(
 
                 items(summary.lowStockProducts) { low ->
                     val isZero = low.currentStock == 0
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, if (isZero) lapakColors.cardBorder else lapakColors.warningBorder),
-                        shape = RoundedCornerShape(14.dp),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    NeuCard(
+                        cornerRadius = 16.dp,
+                        shadowOffset = 4.dp,
+                        blurRadius = 9.dp,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(12.dp),
+                                .padding(14.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -499,9 +525,9 @@ fun DashboardScreen(
                                 modifier = Modifier
                                     .background(
                                         if (isZero) lapakColors.stockEmptyBg else lapakColors.stockLowBg,
-                                        RoundedCornerShape(8.dp)
+                                        RoundedCornerShape(10.dp)
                                     )
-                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
                             ) {
                                 Text(
                                     text = if (isZero) "Habis" else "Sisa ${low.currentStock} ${low.product.unit}",
@@ -521,7 +547,7 @@ fun DashboardScreen(
         }
     }
 
-    // Quick Deposit Popup ("+ Terima Titipan")
+    // Quick Deposit Popup ("Terima Titipan")
     if (showQuickDepositDialog) {
         QuickDepositDialog(
             sellers = sellers,
@@ -625,39 +651,38 @@ fun TimeframeSelector(
     )
 
     LazyRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(vertical = 4.dp, horizontal = 2.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         items(items) { (key, label) ->
-            FilterChip(
+            NeuFilterChip(
+                label = label,
                 selected = current == key,
-                onClick = { onSelect(key) },
-                label = { Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                )
+                onClick = { onSelect(key) }
             )
         }
     }
 }
 
+/**
+ * Monochromatic Soft UI / Neumorphism summary card:
+ * Shares the base background surface (#EEF2F0 / #1A2220) with dual soft shadows,
+ * while applying accent colors strictly to the circular raised icon badge and primary numeric value.
+ */
 @Composable
 fun MetricCard(
     title: String,
     value: String,
     subtitle: String,
     icon: ImageVector,
-    containerColor: Color,
-    borderColor: Color,
-    contentColor: Color,
+    accentColor: Color,
     modifier: Modifier = Modifier
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = containerColor),
-        border = BorderStroke(1.dp, borderColor),
-        shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    NeuCard(
+        cornerRadius = 16.dp,
+        shadowOffset = 5.dp,
+        blurRadius = 10.dp,
         modifier = modifier
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -670,34 +695,38 @@ fun MetricCard(
                     text = title,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = contentColor,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                Box(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .background(contentColor.copy(alpha = 0.14f), CircleShape),
-                    contentAlignment = Alignment.Center
+                Spacer(Modifier.width(6.dp))
+                NeuIconBadge(
+                    accentColor = accentColor,
+                    size = 34.dp
                 ) {
-                    Icon(icon, contentDescription = null, tint = contentColor, modifier = Modifier.size(16.dp))
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(10.dp))
             Text(
                 text = value,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.ExtraBold,
-                color = contentColor,
+                color = accentColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(3.dp))
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
-                color = contentColor.copy(alpha = 0.8f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.*
 import com.example.ui.components.HeaderActionIconButton
 import com.example.ui.components.LapakTopHeader
+import com.example.ui.components.LucideIcons
 import com.example.ui.theme.LocalLapakColors
 import com.example.ui.viewmodel.AppScreen
 import com.example.ui.viewmodel.LapakViewModel
@@ -196,56 +197,48 @@ fun FinancialReportScreen(
                 }
             }
 
-            // 3. Four Executive Financial Summary Cards
+            // 3. Four Executive Financial Summary Cards (Soft UI / Neumorphism)
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         MetricCard(
                             title = "Total Omzet Kotor",
                             value = LapakViewModel.formatRupiah(report.totalGrossOmzet),
                             subtitle = "${report.totalItemsSold} item terjual",
-                            icon = Icons.Default.Payments,
-                            containerColor = lapakColors.omzetCardBg,
-                            borderColor = lapakColors.omzetCardBorder,
-                            contentColor = lapakColors.omzetCardAccent,
+                            icon = LucideIcons.Wallet,
+                            accentColor = lapakColors.omzetCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                         MetricCard(
                             title = "Untung Bersih Lapak",
                             value = LapakViewModel.formatRupiah(report.netLapakProfit),
                             subtitle = "Komisi: ${LapakViewModel.formatRupiah(report.totalAdminCommission)}",
-                            icon = Icons.Default.TrendingUp,
-                            containerColor = lapakColors.profitCardBg,
-                            borderColor = lapakColors.profitCardBorder,
-                            contentColor = lapakColors.profitCardAccent,
+                            icon = LucideIcons.TrendingUp,
+                            accentColor = lapakColors.profitCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         MetricCard(
                             title = "Total Hak Penyetor",
                             value = LapakViewModel.formatRupiah(report.totalSellerShare),
                             subtitle = "${report.sellerRecapRows.size} dapur aktif",
-                            icon = Icons.Default.Storefront,
-                            containerColor = lapakColors.payoutCardBg,
-                            borderColor = lapakColors.payoutCardBorder,
-                            contentColor = lapakColors.payoutCardAccent,
+                            icon = LucideIcons.HandCoins,
+                            accentColor = lapakColors.payoutCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                         MetricCard(
                             title = "Biaya Operasional",
                             value = LapakViewModel.formatRupiah(report.totalOperatingExpenses),
                             subtitle = "Pengeluaran lapak",
-                            icon = Icons.Default.ReceiptLong,
-                            containerColor = lapakColors.expenseCardBg,
-                            borderColor = lapakColors.expenseCardBorder,
-                            contentColor = lapakColors.expenseCardAccent,
+                            icon = LucideIcons.Receipt,
+                            accentColor = lapakColors.expenseCardAccent,
                             modifier = Modifier.weight(1f)
                         )
                     }

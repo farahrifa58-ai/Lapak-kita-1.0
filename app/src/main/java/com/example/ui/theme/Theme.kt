@@ -17,14 +17,14 @@ private val DarkColorScheme = darkColorScheme(
     onPrimary = Color(0xFF0A241A),
     primaryContainer = AccentContainerDark,
     onPrimaryContainer = OnAccentContainerDark,
-    secondary = Color(0xFF6AC1CC),
-    onSecondary = Color(0xFF0C2A2E),
-    secondaryContainer = Color(0xFF1A363A),
-    onSecondaryContainer = Color(0xFFC4EEF3),
-    tertiary = Color(0xFFE9B262),
-    onTertiary = Color(0xFF2E1D05),
-    tertiaryContainer = Color(0xFF3A2B16),
-    onTertiaryContainer = Color(0xFFFCE0B3),
+    secondary = Color(0xFF60A5FA),
+    onSecondary = Color(0xFF0B2240),
+    secondaryContainer = Color(0xFF1B2C40),
+    onSecondaryContainer = Color(0xFFCDE2FD),
+    tertiary = Color(0xFFFBBF24),
+    onTertiary = Color(0xFF2E1E04),
+    tertiaryContainer = Color(0xFF362B16),
+    onTertiaryContainer = Color(0xFFFDE6B0),
     background = BackgroundDark,
     onBackground = TextPrimaryDark,
     surface = SurfaceDark,
@@ -32,8 +32,8 @@ private val DarkColorScheme = darkColorScheme(
     surfaceVariant = SurfaceVariantDark,
     onSurfaceVariant = TextSecondaryDark,
     outline = CardBorderDark,
-    outlineVariant = Color(0xFF222E29),
-    error = Color(0xFFF28B82),
+    outlineVariant = Color(0xFF232F2B),
+    error = Color(0xFFF87171),
     onError = Color(0xFF42100E),
     errorContainer = Color(0xFF3C1C1B),
     onErrorContainer = Color(0xFFFAD2CE)
@@ -59,11 +59,11 @@ private val LightColorScheme = lightColorScheme(
     surfaceVariant = SurfaceVariantLight,
     onSurfaceVariant = TextSecondaryLight,
     outline = CardBorderLight,
-    outlineVariant = Color(0xFFEAF0ED),
-    error = Color(0xFFC43E3E),
+    outlineVariant = Color(0xFFDCE4E0),
+    error = Color(0xFFDC2626),
     onError = Color.White,
-    errorContainer = Color(0xFFFCECEC),
-    onErrorContainer = Color(0xFF7A1C1C)
+    errorContainer = Color(0xFFFBE9E9),
+    onErrorContainer = Color(0xFF7F1D1D)
 )
 
 @Composable
@@ -82,7 +82,7 @@ fun LapakKitaTheme(
                 @Suppress("DEPRECATION")
                 window.statusBarColor = Color.Transparent.toArgb()
                 @Suppress("DEPRECATION")
-                window.navigationBarColor = colorScheme.surface.toArgb()
+                window.navigationBarColor = colorScheme.background.toArgb()
                 val controller = WindowCompat.getInsetsController(window, view)
                 controller.isAppearanceLightStatusBars = !darkHeader && !darkTheme
                 controller.isAppearanceLightNavigationBars = !darkTheme

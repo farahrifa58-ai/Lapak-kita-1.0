@@ -62,9 +62,63 @@
         "createdAt", "updatedAt"
       ]
     },
+    "ActivationCode": {
+      "title": "ActivationCode",
+      "description": "Activation code managed by License Admin (format RAFDEV-XXXX-XXXX) claimed once on account registration.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "description": "Uppercase activation code matching the document ID." },
+        "status": { "type": "string", "enum": ["available", "used"] },
+        "usedByUid": { "type": "string" },
+        "usedByEmail": { "type": "string" },
+        "usedByBusinessName": { "type": "string" },
+        "registeredDeviceId": { "type": "string" },
+        "usedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["status"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Licensed Lapak Kita Admin account profile bound to a single registered device.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "businessName": { "type": "string" },
+        "licenseCode": { "type": "string" },
+        "registeredDeviceId": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "email", "businessName", "licenseCode",
+        "registeredDeviceId", "active", "createdAt", "updatedAt"
+      ]
+    },
+    "DeviceRegistration": {
+      "title": "DeviceRegistration",
+      "description": "Exact-device-ID lookup document enabling same-device auto-restore after reinstall without exposing user lists.",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string" },
+        "emailHint": { "type": "string" },
+        "businessName": { "type": "string" },
+        "licenseCode": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerUid", "emailHint", "businessName", "licenseCode",
+        "active", "createdAt", "updatedAt"
+      ]
+    },
     "LapakTransactionRecord": {
       "title": "LapakTransactionRecord",
-      "description": "Cloud-synced sales transaction record with itemized consignor revenue split and admin commission for real-time financial reporting.",
+      "description": "User-scoped cloud-synced sales transaction record with itemized consignor revenue split and admin commission.",
       "type": "object",
       "properties": {
         "ownerUid": { "type": "string" },
@@ -92,7 +146,7 @@
     },
     "LapakExpenseRecord": {
       "title": "LapakExpenseRecord",
-      "description": "Cloud-synced operating expense record for Lapak Kita financial ledger.",
+      "description": "User-scoped cloud-synced operating expense record for Lapak Kita financial ledger.",
       "type": "object",
       "properties": {
         "ownerUid": { "type": "string" },
@@ -111,7 +165,7 @@
     },
     "LapakSettlementRecord": {
       "title": "LapakSettlementRecord",
-      "description": "Cloud-synced seller payout/settlement record tracking amounts paid to each kitchen/consignor.",
+      "description": "User-scoped cloud-synced seller payout/settlement record tracking amounts paid to each consignor.",
       "type": "object",
       "properties": {
         "ownerUid": { "type": "string" },
@@ -132,27 +186,6 @@
         "vendorCode", "amount", "paymentDateMillis", "paymentMethod",
         "notes", "status", "createdAt", "updatedAt"
       ]
-    },
-    "LicenseCode": {
-      "title": "LicenseCode",
-      "description": "One-device permanent activation license code for the Lapak Kita Admin Android app.",
-      "type": "object",
-      "properties": {
-        "code": { "type": "string", "description": "Unique uppercase license code (e.g. LPK-XXXX-XXXX) matching the document ID." },
-        "appName": { "type": "string", "description": "Target application name (e.g. Lapak Kita)." },
-        "productKey": { "type": "string", "description": "Product identifier (lapak_kita)." },
-        "buyerNote": { "type": "string", "description": "Optional buyer name or purchase note added by developer." },
-        "isUsed": { "type": "boolean", "description": "Whether the license has been claimed by a device." },
-        "usedByDeviceId": { "type": "string", "description": "Stable Android device identifier bound on first activation." },
-        "usedAt": { "type": "string", "format": "date-time", "description": "Server timestamp when the license was activated." },
-        "createdByUid": { "type": "string", "description": "Developer Firebase Auth UID who generated the code." },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" }
-      },
-      "required": [
-        "code", "appName", "productKey", "buyerNote",
-        "isUsed", "usedByDeviceId", "createdByUid", "createdAt", "updatedAt"
-      ]
     }
   },
   "firestore": {
@@ -168,21 +201,29 @@
       "schema": { "$ref": "#/entities/VendorSubmission" },
       "description": "Vendor web portal submissions listened in real-time by the owning Admin."
     },
-    "/lapak_transactions/{transactionDocId}": {
+    "/activation_codes/{codeId}": {
+      "schema": { "$ref": "#/entities/ActivationCode" },
+      "description": "Activation codes generated by License Admin with status 'available' and transitioned to 'used' on registration."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Registered Admin profile with licenseCode, businessName, and Single Device Lock registeredDeviceId."
+    },
+    "/users/{userId}/transactions/{transactionDocId}": {
       "schema": { "$ref": "#/entities/LapakTransactionRecord" },
-      "description": "Admin-owned sales transactions synced in real-time for financial reporting and cross-device recovery."
+      "description": "User-owned sales transactions synced in real-time for financial reporting."
     },
-    "/lapak_expenses/{expenseDocId}": {
+    "/users/{userId}/expenses/{expenseDocId}": {
       "schema": { "$ref": "#/entities/LapakExpenseRecord" },
-      "description": "Admin-owned operating expenses synced in real-time for financial reporting."
+      "description": "User-owned operating expenses synced in real-time for financial reporting."
     },
-    "/lapak_settlements/{settlementDocId}": {
+    "/users/{userId}/settlements/{settlementDocId}": {
       "schema": { "$ref": "#/entities/LapakSettlementRecord" },
-      "description": "Admin-owned seller payout settlements synced in real-time for consignor recap reports."
+      "description": "User-owned seller payout settlements synced in real-time for consignor recap reports."
     },
-    "/license_codes/{licenseCode}": {
-      "schema": { "$ref": "#/entities/LicenseCode" },
-      "description": "Device-bound license activation codes generated by the Developer Admin and claimed once per device."
+    "/device_registry/{deviceId}": {
+      "schema": { "$ref": "#/entities/DeviceRegistration" },
+      "description": "Exact-ID device lookup enabling same-device auto-restore after reinstall without public user listing."
     }
   }
 }
