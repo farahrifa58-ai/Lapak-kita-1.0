@@ -117,6 +117,12 @@ fun SettingsScreen(
     var promoShowContact by remember(appSettings.posterShowContact) { mutableStateOf(appSettings.posterShowContact) }
     var promoCustomBgPath by remember(appSettings.posterCustomBgUri) { mutableStateOf(appSettings.posterCustomBgUri) }
 
+    // 4b. Reset Stok Harian State
+    var autoResetEnabled by remember(appSettings.autoResetStockEnabled) { mutableStateOf(appSettings.autoResetStockEnabled) }
+    var autoResetHour by remember(appSettings.autoResetHour) { mutableStateOf(appSettings.autoResetHour) }
+    var showConfirmResetStockDialog by remember { mutableStateOf(false) }
+    var isResettingStock by remember { mutableStateOf(false) }
+
     // Zero-permission Photo Picker for Shop Logo
     val logoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -851,6 +857,208 @@ fun SettingsScreen(
             }
 
             // =========================================================================
+            // 4B. RESET STOK HARIAN (SIKLUS 17:00 WIB)
+            // =========================================================================
+            item {
+                val formattedResetHour = OperationalCycleHelper.formatResetHour(autoResetHour)
+                val cutoffMinuteBefore = OperationalCycleHelper.formatCutoffMinuteBefore(autoResetHour)
+                val activeCycleId = OperationalCycleHelper.getOperationalCycleDate(autoResetHour)
+                val resetCardSubtitle = if (autoResetEnabled) {
+                    "Aktif • Otomatis pukul $formattedResetHour WIB"
+                } else {
+                    "Nonaktif • Reset dilakukan manual"
+                }
+                val totalActiveProductsCount = remember(products) { products.count { it.currentStock > 0 } }
+                val totalActiveStockQty = remember(products) { products.sumOf { it.currentStock } }
+
+                SettingsAccordionCard(
+                    title = "Reset Stok Harian",
+                    subtitle = resetCardSubtitle,
+                    icon = Icons.Default.Schedule,
+                    expanded = expandedSection == "daily_stock_reset",
+                    onToggle = { toggleSection("daily_stock_reset") },
+                    testTag = "accordion_reset_stok_harian"
+                ) {
+                    Surface(
+                        color = lapakColors.omzetCardBg,
+                        border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Text(
+                                text = "Siklus Operasional Aktif: $activeCycleId",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = lapakColors.omzetCardAccent
+                            )
+                            Text(
+                                text = "Stok yang diinput mulai pukul $formattedResetHour WIB hingga malam hari tersimpan aman melewati tengah malam (00:00) dan baru diarsipkan lalu direset ke 0 setiap pukul $formattedResetHour WIB keesokan harinya (cut-off $cutoffMinuteBefore WIB).",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+
+                    SettingsToggleRow(
+                        label = "Otomatis Reset Stok ke 0 Setiap Pukul $formattedResetHour",
+                        checked = autoResetEnabled,
+                        onCheckedChange = { checked ->
+                            autoResetEnabled = checked
+                            viewModel.updateDailyStockResetSettings(
+                                enabled = checked,
+                                resetHour = autoResetHour
+                            ) {
+                                Toast.makeText(
+                                    context,
+                                    if (checked) "Auto-Reset Stok Harian pukul $formattedResetHour WIB diaktifkan"
+                                    else "Auto-Reset Stok Harian dinonaktifkan",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Text(
+                        text = "Jam Reset Harian (WIB)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    // Fine-adjust hour stepper
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Jadwal reset setiap hari:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilledTonalIconButton(
+                                onClick = {
+                                    val newHour = (autoResetHour + 23) % 24
+                                    autoResetHour = newHour
+                                    viewModel.updateDailyStockResetSettings(autoResetEnabled, newHour)
+                                },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("btn_reset_hour_minus")
+                            ) {
+                                Icon(Icons.Default.Remove, contentDescription = "Kurangi Jam Reset", modifier = Modifier.size(18.dp))
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                            ) {
+                                Text(
+                                    text = "$formattedResetHour WIB",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                )
+                            }
+                            FilledTonalIconButton(
+                                onClick = {
+                                    val newHour = (autoResetHour + 1) % 24
+                                    autoResetHour = newHour
+                                    viewModel.updateDailyStockResetSettings(autoResetEnabled, newHour)
+                                },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("btn_reset_hour_plus")
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Tambah Jam Reset", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+
+                    // Quick Preset Hours
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val hourPresets = listOf(16, 17, 18, 19, 20, 21, 22, 0)
+                        items(hourPresets) { h ->
+                            val selected = autoResetHour == h
+                            FilterChip(
+                                selected = selected,
+                                onClick = {
+                                    autoResetHour = h
+                                    viewModel.updateDailyStockResetSettings(autoResetEnabled, h) {
+                                        Toast.makeText(
+                                            context,
+                                            "Jam reset diatur ke ${OperationalCycleHelper.formatResetHour(h)} WIB",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        OperationalCycleHelper.formatResetHour(h),
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                                )
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = lapakColors.cardBorder)
+
+                    Text(
+                        text = "Stok aktif saat ini: $totalActiveProductsCount produk ($totalActiveStockQty total stok)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedButton(
+                        onClick = { showConfirmResetStockDialog = true },
+                        enabled = !isResettingStock,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .testTag("btn_manual_reset_stock_now")
+                    ) {
+                        if (isResettingStock) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Text("Reset Semua Stok ke 0 Sekarang", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // =========================================================================
             // 5. BIAYA OPERASIONAL
             // =========================================================================
             item {
@@ -1260,6 +1468,70 @@ fun SettingsScreen(
             appSettings = appSettings,
             productsWithDetails = products,
             onDismiss = { showPromoPreviewDialog = false }
+        )
+    }
+
+    if (showConfirmResetStockDialog) {
+        val activeProdCount = products.count { it.currentStock > 0 }
+        val activeQtySum = products.sumOf { it.currentStock }
+        AlertDialog(
+            onDismissRequest = { if (!isResettingStock) showConfirmResetStockDialog = false },
+            icon = {
+                Icon(
+                    Icons.Default.RestartAlt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = {
+                Text(
+                    text = "Reset Semua Stok ke 0?",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = if (activeProdCount > 0) {
+                        "Sebanyak $activeProdCount produk ($activeQtySum total sisa stok) akan diarsipkan ke riwayat harian lalu direset menjadi 0 di aplikasi dan Portal Web Penyetor. Data transaksi penjualan & setoran tidak akan terhapus."
+                    } else {
+                        "Semua stok produk saat ini sudah 0. Tetap jalankan sinkronisasi reset stok ke Portal Web Penyetor?"
+                    },
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isResettingStock = true
+                        viewModel.resetAllStocksManually { result ->
+                            isResettingStock = false
+                            showConfirmResetStockDialog = false
+                            val msg = if (result.resetProductsCount > 0) {
+                                "Berhasil! ${result.resetProductsCount} produk (${result.totalArchivedQty} stok) diarsipkan & direset ke 0."
+                            } else {
+                                "Semua stok produk sudah 0 & disinkronkan."
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    enabled = !isResettingStock,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.testTag("confirm_manual_reset_stock_button")
+                ) {
+                    Text(if (isResettingStock) "Mereset..." else "Ya, Reset ke 0", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showConfirmResetStockDialog = false },
+                    enabled = !isResettingStock
+                ) {
+                    Text("Batal")
+                }
+            }
         )
     }
 

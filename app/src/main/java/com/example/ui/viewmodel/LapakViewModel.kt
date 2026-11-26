@@ -225,6 +225,58 @@ class LapakViewModel(
         }
     }
 
+    fun updateDailyStockResetSettings(
+        enabled: Boolean,
+        resetHour: Int,
+        onDone: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val safeHour = resetHour.coerceIn(0, 23)
+            val curr = repository.appSettings.first()
+            val updatedCycleId = OperationalCycleHelper.getOperationalCycleDate(safeHour)
+            repository.updateAppSettings(
+                curr.copy(
+                    autoResetStockEnabled = enabled,
+                    autoResetHour = safeHour,
+                    lastStockResetCycleId = updatedCycleId
+                )
+            )
+            onDone()
+        }
+    }
+
+    fun resetAllStocksManually(onDone: (StockResetResult) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = repository.resetAllStocksManually()
+            clearCart()
+            delay(150)
+            syncAllVendorsToCloud()
+            _webSyncNotification.value = if (result.resetProductsCount > 0) {
+                "Reset Stok Manual: ${result.resetProductsCount} produk (${result.totalArchivedQty} stok) diarsipkan & direset ke 0."
+            } else {
+                "Semua stok produk sudah bernilai 0 dan disinkronkan ke Web Penyetor."
+            }
+            onDone(result)
+        }
+    }
+
+    fun checkOperationalCycleOnResume() {
+        viewModelScope.launch {
+            val resetResult = repository.checkAndRunAutoStockResetIfNeeded()
+            if (resetResult != null) {
+                clearCart()
+                delay(150)
+                syncAllVendorsToCloud()
+                val hourLabel = OperationalCycleHelper.formatResetHour(appSettings.value.autoResetHour)
+                _webSyncNotification.value = if (resetResult.resetProductsCount > 0) {
+                    "Auto-Reset Harian ($hourLabel WIB): ${resetResult.resetProductsCount} produk (${resetResult.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
+                } else {
+                    "Siklus harian baru dimulai ($hourLabel WIB) • Semua stok siap untuk kiriman hari ini."
+                }
+            }
+        }
+    }
+
     fun testCloudConnection(onResult: (Boolean, String) -> Unit) {
         syncAllVendorsToCloud { ok, msg ->
             if (ok) {
@@ -296,11 +348,42 @@ class LapakViewModel(
             }
             repository.ensureSampleKitchensSeeded()
             repository.ensureAllSellersHaveVendorCodes()
+            val startupReset = repository.checkAndRunAutoStockResetIfNeeded()
+            if (startupReset != null && startupReset.resetProductsCount > 0) {
+                clearCart()
+                val hourLabel = OperationalCycleHelper.formatResetHour(
+                    repository.appSettings.first().autoResetHour
+                )
+                _webSyncNotification.value =
+                    "Auto-Reset Harian ($hourLabel WIB): ${startupReset.resetProductsCount} produk (${startupReset.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
+            }
             delay(300)
             syncAllVendorsToCloud()
         }
         // 2. Start real-time Firestore listener for incoming Web Penyetor submissions
         startWebSubmissionsListener()
+        // 3. Start operational cycle watcher (checks every 60 seconds for 17:00 WIB rollover)
+        startOperationalCycleWatcher()
+    }
+
+    private fun startOperationalCycleWatcher() {
+        viewModelScope.launch {
+            while (true) {
+                delay(60_000)
+                val resetResult = repository.checkAndRunAutoStockResetIfNeeded()
+                if (resetResult != null) {
+                    clearCart()
+                    delay(150)
+                    syncAllVendorsToCloud()
+                    val hourLabel = OperationalCycleHelper.formatResetHour(appSettings.value.autoResetHour)
+                    _webSyncNotification.value = if (resetResult.resetProductsCount > 0) {
+                        "Auto-Reset Harian ($hourLabel WIB): ${resetResult.resetProductsCount} produk (${resetResult.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
+                    } else {
+                        "Siklus operasional baru dimulai ($hourLabel WIB) • Siap menerima kiriman stok."
+                    }
+                }
+            }
+        }
     }
 
     private fun startWebSubmissionsListener() {

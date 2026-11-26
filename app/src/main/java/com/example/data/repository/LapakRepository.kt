@@ -76,6 +76,13 @@ data class DailyMetric(
     val itemsCount: Int
 )
 
+data class StockResetResult(
+    val resetProductsCount: Int,
+    val totalArchivedQty: Int,
+    val cycleId: String,
+    val isAutoReset: Boolean
+)
+
 class LapakRepository(private val dao: LapakDao) {
 
     // Shop Profile
@@ -131,6 +138,113 @@ class LapakRepository(private val dao: LapakDao) {
 
     suspend fun ensureSampleKitchensSeeded(): Int = withContext(Dispatchers.IO) {
         com.example.data.database.LapakDatabase.ensureSampleKitchensSeeded(dao)
+    }
+
+    private val stockResetMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * Checks WIB operational cycle (default 17:00 -> 17:00 next day).
+     * - Initializes baseline cycle ID on first run without wiping pre-existing stock.
+     * - When cycle rolls over past resetHour and autoResetStockEnabled is ON,
+     *   archives remaining stock into StockMovement history and resets all product stocks to 0.
+     */
+    suspend fun checkAndRunAutoStockResetIfNeeded(): StockResetResult? = withContext(Dispatchers.IO) {
+        stockResetMutex.lock()
+        try {
+            val settings = dao.getAppSettings() ?: AppSettings().also {
+                dao.insertOrUpdateAppSettings(it)
+            }
+            val currentCycleId = OperationalCycleHelper.getOperationalCycleDate(settings.autoResetHour)
+
+            if (settings.lastStockResetCycleId.isBlank()) {
+                dao.insertOrUpdateAppSettings(settings.copy(lastStockResetCycleId = currentCycleId))
+                return@withContext null
+            }
+
+            if (!settings.autoResetStockEnabled) {
+                return@withContext null
+            }
+
+            if (settings.lastStockResetCycleId != currentCycleId) {
+                return@withContext performResetAllStocksLocked(
+                    settings = settings,
+                    cycleId = currentCycleId,
+                    isAutoReset = true
+                )
+            }
+            null
+        } finally {
+            stockResetMutex.unlock()
+        }
+    }
+
+    /**
+     * Manually archives all remaining stock to daily history and resets every product stock to 0.
+     */
+    suspend fun resetAllStocksManually(): StockResetResult = withContext(Dispatchers.IO) {
+        stockResetMutex.lock()
+        try {
+            val settings = dao.getAppSettings() ?: AppSettings()
+            val currentCycleId = OperationalCycleHelper.getOperationalCycleDate(settings.autoResetHour)
+            performResetAllStocksLocked(
+                settings = settings,
+                cycleId = currentCycleId,
+                isAutoReset = false
+            )
+        } finally {
+            stockResetMutex.unlock()
+        }
+    }
+
+    private suspend fun performResetAllStocksLocked(
+        settings: AppSettings,
+        cycleId: String,
+        isAutoReset: Boolean
+    ): StockResetResult {
+        val activeLots = dao.getAllStockLotsDirect().filter { it.currentQty > 0 }
+        val lotsByProduct = activeLots.groupBy { it.productId }
+        val resetHourLabel = OperationalCycleHelper.formatResetHour(settings.autoResetHour)
+
+        var resetProductsCount = 0
+        var totalArchivedQty = 0
+
+        for ((productId, lots) in lotsByProduct) {
+            val sumRemaining = lots.sumOf { it.currentQty }
+            if (sumRemaining <= 0) continue
+
+            val firstLot = lots.first()
+            for (lot in lots) {
+                dao.updateStockLot(lot.copy(currentQty = 0))
+            }
+
+            val archiveNote = if (isAutoReset) {
+                "Arsip Auto-Reset Harian ($resetHourLabel WIB • Siklus $cycleId): sisa $sumRemaining ${firstLot.unit} direset ke 0"
+            } else {
+                "Arsip Reset Stok Manual (Siklus $cycleId): sisa $sumRemaining ${firstLot.unit} direset ke 0"
+            }
+
+            dao.insertMovement(
+                StockMovement(
+                    productId = productId,
+                    sellerId = firstLot.sellerId,
+                    stockLotId = firstLot.id,
+                    type = StockMovementType.PENGEMBALIAN,
+                    quantityChange = -sumRemaining,
+                    finalStock = 0,
+                    reasonOrNote = archiveNote
+                )
+            )
+            resetProductsCount++
+            totalArchivedQty += sumRemaining
+        }
+
+        dao.insertOrUpdateAppSettings(settings.copy(lastStockResetCycleId = cycleId))
+        return StockResetResult(
+            resetProductsCount = resetProductsCount,
+            totalArchivedQty = totalArchivedQty,
+            cycleId = cycleId,
+            isAutoReset = isAutoReset
+        )
     }
 
     suspend fun applyWebVendorSubmission(

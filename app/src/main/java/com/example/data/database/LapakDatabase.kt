@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
         SellerStatusHistory::class,
         AppSettings::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -65,6 +65,14 @@ abstract class LapakDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN autoResetStockEnabled INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN autoResetHour INTEGER NOT NULL DEFAULT 17")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN lastStockResetCycleId TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun getDatabase(context: Context, scope: CoroutineScope): LapakDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -72,7 +80,7 @@ abstract class LapakDatabase : RoomDatabase() {
                     LapakDatabase::class.java,
                     "lapak_kita_database"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .addCallback(LapakDatabaseCallback(scope))
                     .fallbackToDestructiveMigration()
                     .build()
@@ -115,7 +123,10 @@ abstract class LapakDatabase : RoomDatabase() {
                     language = "id",
                     adminFeeType = AdminFeeType.FIXED,
                     adminFeeValue = 2000.0,
-                    webPortalBaseUrl = DEFAULT_WEB_PORTAL_BASE_URL
+                    webPortalBaseUrl = DEFAULT_WEB_PORTAL_BASE_URL,
+                    autoResetStockEnabled = true,
+                    autoResetHour = 17,
+                    lastStockResetCycleId = OperationalCycleHelper.getOperationalCycleDate(17)
                 )
             )
 

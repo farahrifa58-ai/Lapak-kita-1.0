@@ -368,6 +368,43 @@ data class SellerStatusHistory(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+object OperationalCycleHelper {
+    private val wibTimeZone: java.util.TimeZone = java.util.TimeZone.getTimeZone("Asia/Jakarta")
+
+    /**
+     * Determines the operational sales cycle ID (yyyy-MM-dd) in WIB (Asia/Jakarta).
+     * - If local WIB hour >= resetHour (default 17:00): belongs to the NEW cycle (for tomorrow's sales).
+     * - If local WIB hour < resetHour (00:00..16:59): stays in the SAME cycle started at yesterday's 17:00,
+     *   so evening deliveries are never wiped when passing 00:00 midnight.
+     */
+    fun getOperationalCycleDate(
+        resetHour: Int = 17,
+        nowMillis: Long = System.currentTimeMillis()
+    ): String {
+        val safeHour = resetHour.coerceIn(0, 23)
+        val cal = java.util.Calendar.getInstance(wibTimeZone).apply {
+            timeInMillis = nowMillis
+        }
+        val currentHour = cal.get(java.util.Calendar.HOUR_OF_DAY)
+        if (safeHour > 0 && currentHour >= safeHour) {
+            cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+        }
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+            timeZone = wibTimeZone
+        }
+        return sdf.format(cal.time)
+    }
+
+    fun formatResetHour(hour: Int): String {
+        return String.format(java.util.Locale.US, "%02d:00", hour.coerceIn(0, 23))
+    }
+
+    fun formatCutoffMinuteBefore(hour: Int): String {
+        val prevHour = (hour.coerceIn(0, 23) + 23) % 24
+        return String.format(java.util.Locale.US, "%02d:59", prevHour)
+    }
+}
+
 @Entity(tableName = "app_settings")
 data class AppSettings(
     @PrimaryKey val id: Int = 1,
@@ -385,7 +422,10 @@ data class AppSettings(
     val posterShowLogo: Boolean = true,
     val posterShowShopName: Boolean = true,
     val posterShowContact: Boolean = true,
-    val posterCustomBgUri: String? = null
+    val posterCustomBgUri: String? = null,
+    val autoResetStockEnabled: Boolean = true,
+    val autoResetHour: Int = 17,
+    val lastStockResetCycleId: String = ""
 )
 
 data class SoldItemSummary(

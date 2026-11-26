@@ -261,12 +261,45 @@
     .stat-card.sky .stat-value { color: var(--sky-accent); }
     .stat-card.amber .stat-value { color: var(--amber-accent); }
 
+    .schedule-info-box {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 13px;
+      margin: 14px 0 4px;
+      border-radius: 14px;
+      background: var(--primary-soft);
+      border: 1px solid var(--primary-border);
+      color: var(--text);
+      font-size: 12.5px;
+      line-height: 1.45;
+      font-weight: 600;
+    }
+
+    .schedule-info-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 9px;
+      background: var(--surface);
+      border: 1px solid var(--primary-border);
+      color: var(--primary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .schedule-info-text strong {
+      color: var(--primary);
+      font-weight: 800;
+    }
+
     .section-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      margin: 18px 0 10px;
+      margin: 14px 0 10px;
     }
 
     .section-title {
@@ -789,6 +822,19 @@
         <div class="stat-card amber">
           <div class="stat-label">Setoran Belum Dibayar</div>
           <div class="stat-value" id="statUnpaidBalance">Rp 0</div>
+        </div>
+      </div>
+
+      <!-- Compact Schedule Info Box -->
+      <div class="schedule-info-box" role="note" aria-label="Jadwal Input Stok Harian">
+        <span class="schedule-info-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+        </span>
+        <div class="schedule-info-text">
+          <strong>Jadwal Input:</strong> Mulai pukul 17:00 WIB (stok otomatis kembali ke 0 setiap jam 16:59).
         </div>
       </div>
 
