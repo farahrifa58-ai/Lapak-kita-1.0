@@ -9,6 +9,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.firebase.FinancialSyncRepository
 import com.example.data.firebase.VendorSubmissionRemote
 import com.example.data.firebase.VendorSyncRepository
 import com.example.data.model.*
@@ -29,6 +30,7 @@ enum class AppScreen {
     CASHIER,
     HISTORY,
     SELLERS,
+    FINANCIAL_REPORT,
     SETTINGS,
     ABOUT
 }
@@ -43,6 +45,7 @@ data class SellerPayoutReceiptState(
 class LapakViewModel(
     private val repository: LapakRepository,
     private val vendorSyncRepository: VendorSyncRepository,
+    private val financialSyncRepository: FinancialSyncRepository,
     val currentUserId: String
 ) : ViewModel() {
 
@@ -338,6 +341,43 @@ class LapakViewModel(
         emptyList()
     )
 
+    // Financial Report Filter & Chronological Snapshot State
+    private val _financialPeriodFilter = MutableStateFlow(FinancialPeriodFilter())
+    val financialPeriodFilter: StateFlow<FinancialPeriodFilter> = _financialPeriodFilter.asStateFlow()
+
+    private val _isSyncingFinancials = MutableStateFlow(false)
+    val isSyncingFinancials: StateFlow<Boolean> = _isSyncingFinancials.asStateFlow()
+
+    fun setFinancialPeriodFilter(filter: FinancialPeriodFilter) {
+        _financialPeriodFilter.value = filter
+    }
+
+    val financialReport: StateFlow<FinancialReportSnapshot> = combine(
+        _financialPeriodFilter,
+        repository.allSellers,
+        repository.financialData
+    ) { filter, sellers, fin ->
+        FinancialReportBuilder.buildReport(
+            filter = filter,
+            sellers = sellers,
+            transactions = fin.transactions,
+            transactionItems = fin.items,
+            expenses = fin.expenses,
+            payments = fin.payments
+        )
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        FinancialReportBuilder.buildReport(
+            filter = FinancialPeriodFilter(),
+            sellers = emptyList(),
+            transactions = emptyList(),
+            transactionItems = emptyList(),
+            expenses = emptyList(),
+            payments = emptyList()
+        )
+    )
+
     init {
         // 1. Migrate legacy preview URL if present, ensure all sellers have valid vendorCode & writeToken, and push initial snapshot to Firestore
         viewModelScope.launch {
@@ -359,6 +399,7 @@ class LapakViewModel(
             }
             delay(300)
             syncAllVendorsToCloud()
+            syncAllFinancialDataWithCloud()
         }
         // 2. Start real-time Firestore listener for incoming Web Penyetor submissions
         startWebSubmissionsListener()
@@ -460,6 +501,69 @@ class LapakViewModel(
                 onComplete?.invoke(false, e.message ?: "Gagal menyinkronkan ke cloud")
             } finally {
                 _isSyncingCloud.value = false
+            }
+        }
+    }
+
+    /**
+     * Two-way Firestore financial synchronization:
+     * 1. Pulls chronological transactions, operating expenses, and seller settlements from Firestore
+     *    and merges any missing records into local Room DB (new-device cross-device recovery).
+     * 2. Pushes local transactions, expenses, and settlements to Firestore (`lapak_transactions`,
+     *    `lapak_expenses`, `lapak_settlements`).
+     */
+    fun syncAllFinancialDataWithCloud(onComplete: ((Boolean, String) -> Unit)? = null) {
+        viewModelScope.launch {
+            _isSyncingFinancials.value = true
+            try {
+                var pulledCount = 0
+                val cloudFetch = financialSyncRepository.fetchAllCloudFinancialData(currentUserId)
+                if (cloudFetch.isSuccess) {
+                    val bundle = cloudFetch.getOrThrow()
+                    pulledCount = repository.mergeCloudFinancialData(bundle)
+                }
+
+                val snapshot = repository.getFinancialSyncSnapshot()
+                val sellersById = snapshot.sellers.associateBy { it.id }
+                val sellerStatusById = repository.sellersWithStats.first()
+                    .associate { it.seller.id to it.paymentStatus }
+
+                var uploadedTrx = 0
+                var uploadedExp = 0
+                var uploadedPay = 0
+
+                for (trx in snapshot.transactions) {
+                    val trxItems = snapshot.itemsByTransactionId[trx.id].orEmpty()
+                    if (financialSyncRepository.syncTransactionToFirestore(trx, trxItems).isSuccess) {
+                        uploadedTrx++
+                    }
+                }
+                for (exp in snapshot.expenses) {
+                    if (financialSyncRepository.syncExpenseToFirestore(exp).isSuccess) {
+                        uploadedExp++
+                    }
+                }
+                for (pay in snapshot.payments) {
+                    val seller = sellersById[pay.sellerId]
+                    val status = sellerStatusById[pay.sellerId] ?: "SEBAGIAN"
+                    if (financialSyncRepository.syncSettlementToFirestore(pay, seller, status).isSuccess) {
+                        uploadedPay++
+                    }
+                }
+
+                _lastCloudSyncAt.value = System.currentTimeMillis()
+                val msg = buildString {
+                    append("Sinkronisasi laporan selesai ($uploadedTrx transaksi, $uploadedExp biaya, $uploadedPay setoran)")
+                    if (pulledCount > 0) append(" • $pulledCount catatan dipulihkan dari cloud")
+                }
+                onComplete?.invoke(true, msg)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("LapakViewModel", "Financial cloud sync failed", e)
+                onComplete?.invoke(false, e.message ?: "Gagal menyinkronkan laporan keuangan")
+            } finally {
+                _isSyncingFinancials.value = false
             }
         }
     }
@@ -839,6 +943,9 @@ class LapakViewModel(
                 _lastCompletedTransaction.value = trx
                 clearCart()
                 affectedSellerIds.forEach { syncSingleSellerToCloud(it) }
+                // Real-time sync transaction + itemized shares to Firestore
+                val savedItems = repository.getItemsForTransactionDirect(trx.id)
+                financialSyncRepository.syncTransactionToFirestore(trx, savedItems)
                 onSuccess(trx)
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Gagal memproses transaksi")
@@ -857,10 +964,15 @@ class LapakViewModel(
 
     fun cancelTransaction(trxId: Long, reason: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch {
-            val affectedSellers = repository.getItemsForTransaction(trxId).first().map { it.sellerId }.distinct()
+            val savedItems = repository.getItemsForTransactionDirect(trxId)
+            val affectedSellers = savedItems.map { it.sellerId }.distinct()
             val res = repository.cancelTransaction(trxId, reason)
             if (res.isSuccess) {
                 affectedSellers.forEach { syncSingleSellerToCloud(it) }
+                // Update cancelled status in Firestore immediately
+                repository.getTransactionById(trxId)?.let { updatedTrx ->
+                    financialSyncRepository.syncTransactionToFirestore(updatedTrx, savedItems)
+                }
                 onSuccess()
             } else {
                 onError(res.exceptionOrNull()?.message ?: "Gagal membatalkan transaksi")
@@ -950,11 +1062,17 @@ class LapakViewModel(
             val savedPayment = payment.copy(id = newId)
             val seller = rawSellers.value.firstOrNull { it.id == sellerId }
             val soldItems = getSoldItemsSummary(sellerId)
+            val currentDetail = sellersWithStats.value.firstOrNull { it.seller.id == sellerId }
+            val newRemaining = ((currentDetail?.remainingBalance ?: 0.0) - amount).coerceAtLeast(0.0)
+            val payoutStatus = when {
+                newRemaining <= 0.0 -> "LUNAS"
+                amount > 0.0 -> "SEBAGIAN"
+                else -> "BELUM_DIBAYAR"
+            }
             if (seller != null) {
-                val currentDetail = sellersWithStats.value.firstOrNull { it.seller.id == sellerId }
-                val newRemaining = ((currentDetail?.remainingBalance ?: 0.0) - amount).coerceAtLeast(0.0)
                 _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(savedPayment, seller, newRemaining, soldItems)
             }
+            financialSyncRepository.syncSettlementToFirestore(savedPayment, seller, payoutStatus)
             syncSingleSellerToCloud(sellerId)
             onDone(savedPayment)
         }
@@ -1006,13 +1124,13 @@ class LapakViewModel(
 
     fun addExpense(title: String, amount: Double, notes: String, onDone: () -> Unit) {
         viewModelScope.launch {
-            repository.addExpense(
-                OperatingExpense(
-                    title = title,
-                    amount = amount,
-                    notes = notes
-                )
+            val expense = OperatingExpense(
+                title = title,
+                amount = amount,
+                notes = notes
             )
+            val insertedId = repository.addExpense(expense)
+            financialSyncRepository.syncExpenseToFirestore(expense.copy(id = insertedId))
             onDone()
         }
     }
@@ -1020,6 +1138,7 @@ class LapakViewModel(
     fun deleteExpense(expense: OperatingExpense) {
         viewModelScope.launch {
             repository.deleteExpense(expense)
+            financialSyncRepository.deleteExpenseFromFirestore(expense)
         }
     }
 

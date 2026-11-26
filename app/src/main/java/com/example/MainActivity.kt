@@ -46,13 +46,17 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.config.AppConfig
+import com.example.config.LicenseStorage
 import com.example.config.TrialManager
 import com.example.data.database.LapakDatabase
+import com.example.data.firebase.FinancialSyncRepository
+import com.example.data.firebase.LicenseRepository
 import com.example.data.firebase.VendorSyncRepository
 import com.example.data.model.ThemeMode
 import com.example.data.repository.LapakRepository
 import com.example.i18n.AppStrings
 import com.example.ui.auth.AuthScreen
+import com.example.ui.auth.LicenseActivationScreen
 import com.example.ui.screens.*
 import com.example.ui.theme.LapakKitaTheme
 import com.example.ui.theme.LocalLapakColors
@@ -81,6 +85,9 @@ class MainActivity : ComponentActivity() {
         val repository = LapakRepository(database.lapakDao())
         val firestoreDb = FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id))
         val vendorSyncRepository = VendorSyncRepository(firestoreDb)
+        val financialSyncRepository = FinancialSyncRepository(firestoreDb)
+        val licenseStorage = LicenseStorage(appContext)
+        val licenseRepository = LicenseRepository(firestoreDb)
 
         setContent {
             val context = LocalContext.current
@@ -89,6 +96,8 @@ class MainActivity : ComponentActivity() {
             var showSplash by remember { mutableStateOf(true) }
             val trialManager = remember { TrialManager(context) }
             var isTrialExpired by remember { mutableStateOf(trialManager.isExpired()) }
+            var isLicensed by remember { mutableStateOf(licenseStorage.isLicenseActive()) }
+            var activeLicenseCode by remember { mutableStateOf(licenseStorage.getActivatedLicenseCode()) }
 
             if (AppConfig.IS_TRIAL) {
                 LaunchedEffect(Unit) {
@@ -123,6 +132,17 @@ class MainActivity : ComponentActivity() {
                         onClose = { (context as? Activity)?.finish() }
                     )
                 }
+            } else if (!isLicensed) {
+                LapakKitaTheme(darkTheme = systemDark) {
+                    LicenseActivationScreen(
+                        licenseRepository = licenseRepository,
+                        licenseStorage = licenseStorage,
+                        onActivated = { code ->
+                            activeLicenseCode = code
+                            isLicensed = true
+                        }
+                    )
+                }
             } else if (currentUser == null) {
                 LapakKitaTheme(darkTheme = systemDark) {
                     AuthScreen()
@@ -137,6 +157,7 @@ class MainActivity : ComponentActivity() {
                                 LapakViewModel(
                                     repository = repository,
                                     vendorSyncRepository = vendorSyncRepository,
+                                    financialSyncRepository = financialSyncRepository,
                                     currentUserId = uid
                                 )
                             }
@@ -145,7 +166,9 @@ class MainActivity : ComponentActivity() {
 
                     AuthenticatedAppShell(
                         viewModel = viewModel,
-                        systemDark = systemDark
+                        systemDark = systemDark,
+                        licenseRepository = licenseRepository,
+                        activeLicenseCode = activeLicenseCode
                     )
                 }
             }
@@ -156,7 +179,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AuthenticatedAppShell(
     viewModel: LapakViewModel,
-    systemDark: Boolean
+    systemDark: Boolean,
+    licenseRepository: LicenseRepository,
+    activeLicenseCode: String?
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
     val currentScreen by viewModel.currentScreen.collectAsState()
@@ -204,7 +229,10 @@ private fun AuthenticatedAppShell(
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
                 bottomBar = {
-                    if (currentScreen != AppScreen.SETTINGS && currentScreen != AppScreen.ABOUT) {
+                    val hideBottomBar = currentScreen == AppScreen.SETTINGS ||
+                        currentScreen == AppScreen.ABOUT ||
+                        currentScreen == AppScreen.FINANCIAL_REPORT
+                    if (!hideBottomBar) {
                         LapakModernBottomBar(
                             currentScreen = currentScreen,
                             cartItemCount = cartItemCount,
@@ -214,13 +242,16 @@ private fun AuthenticatedAppShell(
                     }
                 }
             ) { innerPadding ->
+                val hideBottomBar = currentScreen == AppScreen.SETTINGS ||
+                    currentScreen == AppScreen.ABOUT ||
+                    currentScreen == AppScreen.FINANCIAL_REPORT
                 Crossfade(
                     targetState = currentScreen,
                     label = "ScreenTransition",
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(
-                            bottom = if (currentScreen != AppScreen.SETTINGS && currentScreen != AppScreen.ABOUT) {
+                            bottom = if (!hideBottomBar) {
                                 innerPadding.calculateBottomPadding()
                             } else {
                                 0.dp
@@ -233,8 +264,17 @@ private fun AuthenticatedAppShell(
                         AppScreen.CASHIER -> CashierScreen(viewModel = viewModel)
                         AppScreen.HISTORY -> TransactionsScreen(viewModel = viewModel)
                         AppScreen.SELLERS -> SellersScreen(viewModel = viewModel)
-                        AppScreen.SETTINGS -> SettingsScreen(viewModel = viewModel)
-                        AppScreen.ABOUT -> SettingsScreen(viewModel = viewModel)
+                        AppScreen.FINANCIAL_REPORT -> FinancialReportScreen(viewModel = viewModel)
+                        AppScreen.SETTINGS -> SettingsScreen(
+                            viewModel = viewModel,
+                            licenseRepository = licenseRepository,
+                            activeLicenseCode = activeLicenseCode
+                        )
+                        AppScreen.ABOUT -> SettingsScreen(
+                            viewModel = viewModel,
+                            licenseRepository = licenseRepository,
+                            activeLicenseCode = activeLicenseCode
+                        )
                     }
                 }
             }

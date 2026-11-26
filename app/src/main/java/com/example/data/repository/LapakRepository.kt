@@ -83,6 +83,14 @@ data class StockResetResult(
     val isAutoReset: Boolean
 )
 
+data class LocalFinancialSyncSnapshot(
+    val sellers: List<Seller>,
+    val transactions: List<LapakTransaction>,
+    val itemsByTransactionId: Map<Long, List<TransactionItem>>,
+    val expenses: List<OperatingExpense>,
+    val payments: List<SellerPayment>
+)
+
 class LapakRepository(private val dao: LapakDao) {
 
     // Shop Profile
@@ -718,8 +726,18 @@ data class FinancialData(
     // Transactions list & items
     val allTransactions: Flow<List<LapakTransaction>> = dao.getAllTransactionsFlow()
 
+    val allTransactionItems: Flow<List<TransactionItem>> = dao.getAllTransactionItemsFlow()
+
     fun getItemsForTransaction(transactionId: Long): Flow<List<TransactionItem>> =
         dao.getItemsForTransactionFlow(transactionId)
+
+    suspend fun getTransactionById(transactionId: Long): LapakTransaction? = withContext(Dispatchers.IO) {
+        dao.getTransactionById(transactionId)
+    }
+
+    suspend fun getItemsForTransactionDirect(transactionId: Long): List<TransactionItem> = withContext(Dispatchers.IO) {
+        dao.getItemsForTransaction(transactionId)
+    }
 
     suspend fun getSoldItemsForSeller(sellerId: Long): List<TransactionItem> = withContext(Dispatchers.IO) {
         dao.getSoldItemsForSeller(sellerId)
@@ -1246,5 +1264,163 @@ data class FinancialData(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    // Cloud Financial Sync Snapshot & Cross-Device Merge
+    suspend fun getFinancialSyncSnapshot(): LocalFinancialSyncSnapshot = withContext(Dispatchers.IO) {
+        val sellers = dao.getAllSellersDirect()
+        val transactions = dao.getAllTransactionsDirect().sortedBy { it.timestamp }
+        val itemsByTrx = dao.getAllTransactionItemsDirect().groupBy { it.transactionId }
+        val expenses = dao.getAllOperatingExpensesDirect().sortedBy { it.expenseDate }
+        val payments = dao.getAllSellerPaymentsDirect().sortedBy { it.paymentDate }
+        LocalFinancialSyncSnapshot(
+            sellers = sellers,
+            transactions = transactions,
+            itemsByTransactionId = itemsByTrx,
+            expenses = expenses,
+            payments = payments
+        )
+    }
+
+    /**
+     * Merges financial records pulled from Firebase Firestore into local Room DB without duplicating
+     * existing records. Ensures opening the app on a brand-new device restores complete chronological
+     * sales transactions, operating expenses, and seller payout settlements.
+     */
+    suspend fun mergeCloudFinancialData(
+        bundle: com.example.data.firebase.CloudFinancialBundle
+    ): Int = withContext(Dispatchers.IO) {
+        var importedCount = 0
+
+        val sellers = dao.getAllSellersDirect().toMutableList()
+        val sellerByCode = sellers.filter { it.vendorCode.isNotBlank() }
+            .associateBy { it.vendorCode.trim().uppercase() }
+            .toMutableMap()
+        val sellerByName = sellers.associateBy { it.name.trim().lowercase() }.toMutableMap()
+
+        suspend fun resolveOrCreateSellerId(sellerName: String, vendorCode: String = ""): Long {
+            val cleanCode = vendorCode.trim().uppercase()
+            if (cleanCode.isNotBlank()) {
+                sellerByCode[cleanCode]?.let { return it.id }
+            }
+            val cleanName = sellerName.trim().ifEmpty { "Penyetor" }
+            val normName = cleanName.lowercase()
+            sellerByName[normName]?.let { return it.id }
+
+            val newSeller = Seller(
+                name = cleanName,
+                whatsappNumber = "",
+                status = SellerStatus.AKTIF,
+                vendorCode = cleanCode.takeIf { VendorCodeGenerator.isValidVendorCode(it) }
+                    ?: VendorCodeGenerator.generateVendorCode(),
+                writeToken = VendorCodeGenerator.generateWriteToken()
+            )
+            val newId = dao.insertSeller(newSeller)
+            val saved = newSeller.copy(id = newId)
+            sellers.add(saved)
+            sellerByCode[saved.vendorCode.uppercase()] = saved
+            sellerByName[normName] = saved
+            return newId
+        }
+
+        // 1. Merge Transactions chronologically
+        val existingTrxByNumber = dao.getAllTransactionsDirect()
+            .associateBy { it.transactionNumber.trim() }
+            .toMutableMap()
+
+        for (cloudTrx in bundle.transactions.sortedBy { it.timestampMillis }) {
+            val existing = existingTrxByNumber[cloudTrx.transactionNumber.trim()]
+            if (existing == null) {
+                val insertedTrxId = dao.insertTransaction(
+                    LapakTransaction(
+                        transactionNumber = cloudTrx.transactionNumber,
+                        timestamp = cloudTrx.timestampMillis,
+                        totalAmount = cloudTrx.totalAmount,
+                        totalItemsCount = cloudTrx.totalItemsCount,
+                        cashReceived = cloudTrx.cashReceived,
+                        changeGiven = cloudTrx.changeGiven,
+                        paymentMethod = cloudTrx.paymentMethod,
+                        totalAdminProfit = cloudTrx.totalAdminProfit,
+                        totalSellerShare = cloudTrx.totalSellerShare,
+                        isCancelled = cloudTrx.cancelled,
+                        cancellationReason = cloudTrx.cancellationReason.ifBlank { null }
+                    )
+                )
+                if (cloudTrx.items.isNotEmpty()) {
+                    val localItems = cloudTrx.items.map { ci ->
+                        val resolvedSellerId = resolveOrCreateSellerId(ci.sellerName)
+                        TransactionItem(
+                            transactionId = insertedTrxId,
+                            productId = 0L,
+                            sellerId = resolvedSellerId,
+                            stockLotId = 0L,
+                            productName = ci.productName,
+                            sellerName = ci.sellerName,
+                            unit = ci.unit,
+                            unitPrice = ci.unitPrice,
+                            sellerSharePerUnit = ci.sellerSharePerUnit,
+                            adminProfitPerUnit = ci.adminProfitPerUnit,
+                            quantity = ci.quantity,
+                            subtotal = ci.subtotal,
+                            totalSellerShare = ci.totalSellerShare,
+                            totalAdminProfit = ci.totalAdminProfit
+                        )
+                    }
+                    dao.insertTransactionItems(localItems)
+                }
+                importedCount++
+            } else if (!existing.isCancelled && cloudTrx.cancelled) {
+                dao.updateTransaction(
+                    existing.copy(
+                        isCancelled = true,
+                        cancellationReason = cloudTrx.cancellationReason.ifBlank { existing.cancellationReason }
+                    )
+                )
+            }
+        }
+
+        // 2. Merge Operating Expenses chronologically
+        val existingExpenseKeys = dao.getAllOperatingExpensesDirect()
+            .map { "${it.expenseDate}|${it.title.trim().lowercase()}|${it.amount.toLong()}" }
+            .toMutableSet()
+
+        for (cloudExp in bundle.expenses.sortedBy { it.expenseDateMillis }) {
+            val key = "${cloudExp.expenseDateMillis}|${cloudExp.title.trim().lowercase()}|${cloudExp.amount.toLong()}"
+            if (existingExpenseKeys.add(key)) {
+                dao.insertExpense(
+                    OperatingExpense(
+                        title = cloudExp.title,
+                        amount = cloudExp.amount,
+                        expenseDate = cloudExp.expenseDateMillis,
+                        notes = cloudExp.notes
+                    )
+                )
+                importedCount++
+            }
+        }
+
+        // 3. Merge Seller Payout Settlements chronologically
+        val existingPaymentKeys = dao.getAllSellerPaymentsDirect()
+            .map { "${it.paymentDate}|${it.sellerId}|${it.amount.toLong()}" }
+            .toMutableSet()
+
+        for (cloudPay in bundle.settlements.sortedBy { it.paymentDateMillis }) {
+            val resolvedSellerId = resolveOrCreateSellerId(cloudPay.sellerName, cloudPay.vendorCode)
+            val key = "${cloudPay.paymentDateMillis}|$resolvedSellerId|${cloudPay.amount.toLong()}"
+            if (existingPaymentKeys.add(key)) {
+                dao.insertPayment(
+                    SellerPayment(
+                        sellerId = resolvedSellerId,
+                        paymentDate = cloudPay.paymentDateMillis,
+                        amount = cloudPay.amount,
+                        notes = cloudPay.notes,
+                        paymentMethod = cloudPay.paymentMethod
+                    )
+                )
+                importedCount++
+            }
+        }
+
+        importedCount
     }
 }

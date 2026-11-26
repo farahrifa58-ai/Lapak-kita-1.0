@@ -40,9 +40,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.text.font.FontFamily
 import com.example.R
+import com.example.config.LicenseStorage
+import com.example.data.firebase.LicenseRepository
 import com.example.data.model.*
 import com.example.i18n.AppStrings
+import com.example.ui.auth.AdminLicenseGeneratorDialog
+import com.example.ui.auth.AdminPinPromptDialog
 import com.example.ui.auth.GoogleAuthHelper
 import com.example.ui.components.*
 import com.example.ui.theme.LocalLapakColors
@@ -59,11 +65,21 @@ import java.util.*
 @Composable
 fun SettingsScreen(
     viewModel: LapakViewModel,
+    licenseRepository: LicenseRepository? = null,
+    activeLicenseCode: String? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lapakColors = LocalLapakColors.current
+
+    val registeredLicenseCode = remember(activeLicenseCode) {
+        activeLicenseCode ?: LicenseStorage(context).getActivatedLicenseCode()
+    }
+    var aboutLogoTapCount by remember { mutableIntStateOf(0) }
+    var aboutLastTapMillis by remember { mutableLongStateOf(0L) }
+    var showAdminPinDialog by remember { mutableStateOf(false) }
+    var showAdminLicenseGenerator by remember { mutableStateOf(false) }
 
     val lang by viewModel.currentLanguage.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
@@ -1454,6 +1470,55 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // =========================================================================
+            // STATUS LISENSI PERMANEN (FOOTER)
+            // =========================================================================
+            item {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = lapakColors.omzetCardBg,
+                    border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_license_status_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VerifiedUser,
+                                contentDescription = "Lisensi Aktif",
+                                tint = lapakColors.omzetCardAccent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Status Lisensi: Aktif Permanen",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = lapakColors.omzetCardAccent
+                                )
+                                Text(
+                                    text = "Kode Terdaftar: ${registeredLicenseCode ?: "-"}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1592,9 +1657,48 @@ fun SettingsScreen(
     }
 
     if (showAboutDialog) {
+        fun handleAboutSecretTap() {
+            val now = System.currentTimeMillis()
+            if (now - aboutLastTapMillis > 2500L) {
+                aboutLogoTapCount = 1
+            } else {
+                aboutLogoTapCount += 1
+            }
+            aboutLastTapMillis = now
+
+            if (aboutLogoTapCount >= 7) {
+                aboutLogoTapCount = 0
+                showAboutDialog = false
+                showAdminPinDialog = true
+            } else if (aboutLogoTapCount >= 5) {
+                val remaining = 7 - aboutLogoTapCount
+                Toast.makeText(
+                    context,
+                    "Ketuk ${remaining}x lagi untuk Panel Admin Lisensi",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+
         AlertDialog(
-            onDismissRequest = { showAboutDialog = false },
-            title = { Text("Lapak Kita", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary) },
+            onDismissRequest = {
+                aboutLogoTapCount = 0
+                showAboutDialog = false
+            },
+            title = {
+                Text(
+                    text = "Lapak Kita",
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { handleAboutSecretTap() }
+                        )
+                        .testTag("about_lapak_kita_title")
+                )
+            },
             text = {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1606,7 +1710,12 @@ fun SettingsScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(130.dp)
-                            .clip(RoundedCornerShape(12.dp)),
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { handleAboutSecretTap() }
+                            ),
                         contentScale = ContentScale.Crop
                     )
                     Spacer(Modifier.height(12.dp))
@@ -1622,16 +1731,45 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold
                     )
+                    if (!registeredLicenseCode.isNullOrBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Lisensi Aktif: $registeredLicenseCode",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Button(
-                    onClick = { showAboutDialog = false },
+                    onClick = {
+                        aboutLogoTapCount = 0
+                        showAboutDialog = false
+                    },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
                     Text("Tutup")
                 }
             }
+        )
+    }
+
+    if (showAdminPinDialog) {
+        AdminPinPromptDialog(
+            onVerified = {
+                showAdminPinDialog = false
+                showAdminLicenseGenerator = true
+            },
+            onDismiss = { showAdminPinDialog = false }
+        )
+    }
+
+    if (showAdminLicenseGenerator && licenseRepository != null) {
+        AdminLicenseGeneratorDialog(
+            licenseRepository = licenseRepository,
+            onDismiss = { showAdminLicenseGenerator = false }
         )
     }
 }

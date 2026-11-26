@@ -301,3 +301,170 @@ test("Web Penyetor submissions: valid token succeeds, wrong token fails, Admin p
     })
   );
 });
+
+test("Financial collections (transactions, expenses, settlements): owner CRUD succeeds, cross-user & public denied", async () => {
+  const adminADb = testEnv.authenticatedContext(ADMIN_A).firestore();
+  const adminBDb = testEnv.authenticatedContext(ADMIN_B).firestore();
+  const publicDb = testEnv.unauthenticatedContext().firestore();
+  const now = new Date(Date.now() - 2000);
+
+  const validTrx = {
+    ownerUid: ADMIN_A,
+    transactionNumber: "TRX-20261126-001",
+    timestampMillis: Date.now() - 5000,
+    totalAmount: 27000,
+    totalItemsCount: 2,
+    cashReceived: 30000,
+    changeGiven: 3000,
+    paymentMethod: "Tunai",
+    totalAdminProfit: 4000,
+    totalSellerShare: 23000,
+    cancelled: false,
+    cancellationReason: "",
+    items: [
+      {
+        productName: "Nasi Kuning Komplit",
+        sellerName: "Dapur Bu Sari",
+        unit: "porsi",
+        unitPrice: 12000,
+        sellerSharePerUnit: 10000,
+        adminProfitPerUnit: 2000,
+        quantity: 1,
+        subtotal: 12000,
+        totalSellerShare: 10000,
+        totalAdminProfit: 2000,
+      },
+    ],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const validExpense = {
+    ownerUid: ADMIN_A,
+    localExpenseId: 1,
+    title: "Plastik Kresek",
+    amount: 15000,
+    expenseDateMillis: Date.now() - 4000,
+    notes: "2 pak besar",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const validSettlement = {
+    ownerUid: ADMIN_A,
+    localPaymentId: 1,
+    localSellerId: 2,
+    sellerName: "Dapur Bu Sari",
+    vendorCode: VENDOR_CODE,
+    amount: 50000,
+    paymentDateMillis: Date.now() - 3000,
+    paymentMethod: "Transfer",
+    notes: "Setoran harian",
+    status: "LUNAS",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  // Owner Admin A create + scoped list + update + delete
+  await assertSucceeds(adminADb.collection("lapak_transactions").doc("trx_20261126_001").set(validTrx));
+  await assertSucceeds(adminADb.collection("lapak_expenses").doc("exp_1").set(validExpense));
+  await assertSucceeds(adminADb.collection("lapak_settlements").doc("pay_1").set(validSettlement));
+
+  await assertSucceeds(adminADb.collection("lapak_transactions").where("ownerUid", "==", ADMIN_A).get());
+  await assertSucceeds(adminADb.collection("lapak_expenses").where("ownerUid", "==", ADMIN_A).get());
+  await assertSucceeds(adminADb.collection("lapak_settlements").where("ownerUid", "==", ADMIN_A).get());
+
+  await assertSucceeds(
+    adminADb.collection("lapak_transactions").doc("trx_20261126_001").update({
+      cancelled: true,
+      cancellationReason: "Salah input",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Unauthenticated public rejected on all financial collections
+  await assertFails(publicDb.collection("lapak_transactions").doc("trx_20261126_001").get());
+  await assertFails(publicDb.collection("lapak_expenses").doc("exp_1").get());
+  await assertFails(publicDb.collection("lapak_settlements").doc("pay_1").get());
+
+  // Cross-user Admin B rejected on read, list, update, delete
+  await assertFails(adminBDb.collection("lapak_transactions").doc("trx_20261126_001").get());
+  await assertFails(adminBDb.collection("lapak_transactions").where("ownerUid", "==", ADMIN_A).get());
+  await assertFails(adminBDb.collection("lapak_expenses").doc("exp_1").delete());
+  await assertFails(adminBDb.collection("lapak_settlements").doc("pay_1").update({
+    amount: 999999,
+    updatedAt: new Date(Date.now() - 500),
+  }));
+
+  // Owner can delete own expense
+  await assertSucceeds(adminADb.collection("lapak_expenses").doc("exp_1").delete());
+});
+
+test("License codes: developer generates & lists, buyer activates once, second device blocked, non-dev denied list/create", async () => {
+  const devDb = testEnv
+    .authenticatedContext("dev_uid_1", {
+      email: "rendykurniawan0311@gmail.com",
+      email_verified: true,
+    })
+    .firestore();
+  const buyerDb = testEnv
+    .authenticatedContext("buyer_uid_1", {
+      email: "pembeli@gmail.com",
+      email_verified: true,
+    })
+    .firestore();
+  const publicDb = testEnv.unauthenticatedContext().firestore();
+
+  const code = "LPK-A7K9-M2P4";
+  const now = new Date(Date.now() - 2000);
+  const validLicense = {
+    code,
+    appName: "Lapak Kita",
+    productKey: "lapak_kita",
+    buyerNote: "Bu Sari - Bandung",
+    isUsed: false,
+    usedByDeviceId: "",
+    createdByUid: "dev_uid_1",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  // Buyer and unauthenticated users CANNOT create or list license codes
+  await assertFails(buyerDb.collection("license_codes").doc(code).set({ ...validLicense, createdByUid: "buyer_uid_1" }));
+  await assertFails(publicDb.collection("license_codes").doc(code).set(validLicense));
+  await assertFails(buyerDb.collection("license_codes").get());
+  await assertFails(publicDb.collection("license_codes").get());
+
+  // Developer can create and list license codes
+  await assertSucceeds(devDb.collection("license_codes").doc(code).set(validLicense));
+  await assertSucceeds(devDb.collection("license_codes").get());
+
+  // Buyer (before Google Sign-In) can GET exact code and atomically claim it once
+  await assertSucceeds(publicDb.collection("license_codes").doc(code).get());
+  await assertSucceeds(
+    publicDb.collection("license_codes").doc(code).update({
+      isUsed: true,
+      usedByDeviceId: "AND-DEVICE-11112222",
+      usedAt: new Date(Date.now() - 500),
+      appName: "Lapak Kita",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Second device CANNOT overwrite an already-used license code (terminal state lock)
+  await assertFails(
+    publicDb.collection("license_codes").doc(code).update({
+      isUsed: true,
+      usedByDeviceId: "AND-DEVICE-99998888",
+      usedAt: new Date(Date.now() - 100),
+      appName: "Lapak Kita",
+      updatedAt: new Date(Date.now() - 100),
+    })
+  );
+
+  // Buyer CANNOT delete license code; Developer CAN delete
+  await assertFails(buyerDb.collection("license_codes").doc(code).delete());
+  await assertSucceeds(devDb.collection("license_codes").doc(code).delete());
+});
+
+

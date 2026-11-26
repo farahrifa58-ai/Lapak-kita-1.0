@@ -3,9 +3,11 @@ package com.example.ui.screens
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -22,10 +24,12 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.LapakTransaction
 import com.example.i18n.AppStrings
 import com.example.ui.components.CancelTransactionDialog
+import com.example.ui.components.HeaderActionIconButton
 import com.example.ui.components.LapakTopHeader
 import com.example.ui.components.ReceiptCustomerDialog
 import com.example.ui.components.TransactionAdminDetailDialog
 import com.example.ui.theme.LocalLapakColors
+import com.example.ui.viewmodel.AppScreen
 import com.example.ui.viewmodel.LapakViewModel
 import java.text.SimpleDateFormat
 import java.util.*
@@ -64,11 +68,20 @@ fun TransactionsScreen(
             LapakTopHeader(
                 title = AppStrings.get("history_title", lang),
                 subtitle = "${transactions.count { !it.isCancelled }} transaksi tercatat",
-                paletteKey = shopProfile.headerBgColorKey
+                paletteKey = shopProfile.headerBgColorKey,
+                actions = {
+                    HeaderActionIconButton(
+                        icon = Icons.Default.Assessment,
+                        contentDescription = "Laporan Keuangan",
+                        onClick = { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) },
+                        modifier = Modifier.testTag("history_header_financial_report_button")
+                    )
+                }
             )
         },
         modifier = modifier
     ) { paddingValues ->
+        val lapakColors = LocalLapakColors.current
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -77,6 +90,59 @@ fun TransactionsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(top = 12.dp, bottom = 36.dp)
         ) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = lapakColors.omzetCardBg),
+                    border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
+                    shape = RoundedCornerShape(14.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) }
+                        .testTag("history_financial_report_button")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Assessment,
+                                contentDescription = null,
+                                tint = lapakColors.omzetCardAccent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Buka Laporan Keuangan (Excel & PDF)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = lapakColors.omzetCardAccent
+                            )
+                            Text(
+                                text = "Filter periode, urutan kronologis & sinkron cloud",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = lapakColors.omzetCardAccent.copy(alpha = 0.85f)
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = lapakColors.omzetCardAccent
+                        )
+                    }
+                }
+            }
+
             item {
                 OutlinedTextField(
                     value = searchQuery,
