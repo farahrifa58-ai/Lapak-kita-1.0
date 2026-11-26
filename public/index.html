@@ -1003,16 +1003,27 @@
       authDomain: "gen-lang-client-0676480047.firebaseapp.com",
       projectId: "gen-lang-client-0676480047"
     };
-    const FIRESTORE_DATABASE_ID = "ai-studio-android-lapakkit-7600eb97-cc5e-45ea-a204-647022c41df2";
+    const PRIMARY_FIRESTORE_DATABASE_ID = "ai-studio-android-lapakkit-460958e0-853f-47f3-a70c-59b3209be0b0";
+    const LEGACY_FIRESTORE_DATABASE_ID = "ai-studio-android-lapakkit-7600eb97-cc5e-45ea-a204-647022c41df2";
 
     const app = initializeApp(FIREBASE_CONFIG);
-    const db = getFirestore(app, FIRESTORE_DATABASE_ID);
+    const dbInstances = new Map();
+    function getFirestoreById(databaseId) {
+      const key = String(databaseId || PRIMARY_FIRESTORE_DATABASE_ID).trim() || PRIMARY_FIRESTORE_DATABASE_ID;
+      if (!dbInstances.has(key)) {
+        dbInstances.set(key, getFirestore(app, key));
+      }
+      return dbInstances.get(key);
+    }
+
+    let activeDb = getFirestoreById(PRIMARY_FIRESTORE_DATABASE_ID);
 
     // --- State ---
     let activeVendorCode = "";
     let activeWriteToken = "";
     let vendorData = null;
     let unsubscribeVendor = null;
+    let lastProductsPriceSignature = null;
 
     // Draft queues (not yet sent to Firestore)
     let draftNewProducts = [];       // { tempId, name, category, unit, sellingPrice, initialStock }
@@ -1159,6 +1170,67 @@
       return { price, feeType, feeVal, adminFee, sellerNet };
     }
 
+    function getProductId(p) {
+      return Number(p?.id ?? p?.localProductId ?? 0);
+    }
+
+    function getProductStock(p) {
+      return Math.max(0, Number(p?.stock ?? p?.currentStock ?? 0));
+    }
+
+    /**
+     * Resolves Harga Jual, Uang Bersih Penjual (basePrice / sellerShare), and Komisi Admin
+     * (commission / adminProfitPerUnit) directly from each product item so custom per-item
+     * commissions configured by Admin are NEVER overwritten by the vendor's global tariff.
+     */
+    function resolveItemPricing(p) {
+      const price = Math.max(0, Math.round(Number(p?.sellingPrice) || 0));
+      const globalSplit = calculateSplit(price);
+
+      const hasBasePrice = p?.basePrice !== undefined && p?.basePrice !== null && !Number.isNaN(Number(p.basePrice));
+      const hasSellerShare = p?.sellerShare !== undefined && p?.sellerShare !== null && !Number.isNaN(Number(p.sellerShare));
+      const hasCommission = p?.commission !== undefined && p?.commission !== null && !Number.isNaN(Number(p.commission));
+      const hasAdminProfit = p?.adminProfitPerUnit !== undefined && p?.adminProfitPerUnit !== null && !Number.isNaN(Number(p.adminProfitPerUnit));
+
+      let sellerNet;
+      let adminFee;
+
+      if (hasBasePrice || hasSellerShare) {
+        const rawBase = Number(hasBasePrice ? p.basePrice : p.sellerShare);
+        sellerNet = Math.max(0, Math.min(price, Math.round(rawBase)));
+        if (hasCommission || hasAdminProfit) {
+          const rawComm = Math.round(Number(hasCommission ? p.commission : p.adminProfitPerUnit));
+          adminFee = Math.max(0, Math.min(price, rawComm));
+          if (Math.abs((sellerNet + adminFee) - price) > 1) {
+            adminFee = Math.max(0, price - sellerNet);
+          }
+        } else {
+          adminFee = Math.max(0, price - sellerNet);
+        }
+      } else if (hasCommission || hasAdminProfit) {
+        const rawComm = Math.round(Number(hasCommission ? p.commission : p.adminProfitPerUnit));
+        adminFee = Math.max(0, Math.min(price, rawComm));
+        sellerNet = Math.max(0, price - adminFee);
+      } else {
+        sellerNet = globalSplit.sellerNet;
+        adminFee = globalSplit.adminFee;
+      }
+
+      const isCustomCommission = Math.abs(adminFee - globalSplit.adminFee) > 0;
+      return { price, sellerNet, adminFee, isCustomCommission };
+    }
+
+    function buildProductsPriceSignature(products) {
+      if (!Array.isArray(products)) return "";
+      return products
+        .map((p) => {
+          const pricing = resolveItemPricing(p);
+          return `${getProductId(p)}:${p?.name || ""}:${pricing.price}:${pricing.sellerNet}:${pricing.adminFee}`;
+        })
+        .sort()
+        .join("|");
+    }
+
     function formatTariffText() {
       if (!vendorData) return "-";
       if (vendorData.adminFeeType === "PERCENTAGE") {
@@ -1284,14 +1356,32 @@
       }
 
       productsContainer.innerHTML = products.map((p) => {
-        const id = Number(p.localProductId);
+        const id = getProductId(p);
         const editDraft = draftEditedProducts[id];
+        const basePricing = resolveItemPricing(p);
         const displayName = editDraft ? editDraft.name : p.name;
         const displayCat = editDraft ? editDraft.category : p.category;
         const displayUnit = editDraft ? editDraft.unit : (p.unit || "pcs");
-        const displayPrice = editDraft ? editDraft.sellingPrice : Number(p.sellingPrice || 0);
-        const split = calculateSplit(displayPrice);
-        const stock = Math.max(0, Number(p.currentStock || 0));
+        const displayPrice = editDraft ? Math.max(0, Math.round(Number(editDraft.sellingPrice) || 0)) : basePricing.price;
+
+        let displayNet;
+        let displayCommission;
+        let isCustomCommission = basePricing.isCustomCommission;
+
+        if (!editDraft || displayPrice === basePricing.price) {
+          displayNet = basePricing.sellerNet;
+          displayCommission = basePricing.adminFee;
+        } else if (basePricing.isCustomCommission) {
+          displayCommission = Math.min(displayPrice, basePricing.adminFee);
+          displayNet = Math.max(0, displayPrice - displayCommission);
+        } else {
+          const recalculated = calculateSplit(displayPrice);
+          displayNet = recalculated.sellerNet;
+          displayCommission = recalculated.adminFee;
+          isCustomCommission = false;
+        }
+
+        const stock = getProductStock(p);
         const addedQty = Math.max(0, Number(draftStockAdditions[id] || 0));
 
         let stockBadgeClass = "badge-success";
@@ -1311,8 +1401,9 @@
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px;">
                   <h4 class="product-name">${escapeHtml(displayName)}</h4>
                   ${editDraft ? `<span class="badge badge-warn">Diedit</span>` : ""}
+                  ${isCustomCommission ? `<span class="badge badge-primary">Komisi Khusus</span>` : ""}
                 </div>
-                <div class="product-meta">${escapeHtml(displayCat || "Makanan")} • Satuan: ${escapeHtml(displayUnit)}</div>
+                <div class="product-meta">${escapeHtml(displayCat || "Makanan")} • Satuan: ${escapeHtml(displayUnit)} • Komisi Admin: ${formatRupiah(displayCommission)}</div>
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
                 <span class="badge ${stockBadgeClass}">${stockLabel}</span>
@@ -1323,11 +1414,11 @@
             <div class="price-row">
               <div>
                 <div class="price-label">Harga Jual</div>
-                <div class="price-val">${formatRupiah(split.price)}</div>
+                <div class="price-val">${formatRupiah(displayPrice)}</div>
               </div>
               <div>
                 <div class="price-label">Uang Bersih Penjual</div>
-                <div class="price-val net">${formatRupiah(split.sellerNet)} / ${escapeHtml(displayUnit)}</div>
+                <div class="price-val net">${formatRupiah(displayNet)} / ${escapeHtml(displayUnit)}</div>
               </div>
             </div>
 
@@ -1387,8 +1478,28 @@
 
     // --- Modal Logic ---
     function updateModalSplitPreview() {
-      const price = Number(prodPriceInput.value) || 0;
+      const price = Math.max(0, Math.round(Number(prodPriceInput.value) || 0));
       const unit = prodUnitInput.value || "pcs";
+
+      if (modalMode === "editExisting") {
+        const numId = Number(modalTargetId);
+        const existing = (vendorData?.products || []).find((p) => getProductId(p) === numId);
+        if (existing) {
+          const itemPricing = resolveItemPricing(existing);
+          if (price === itemPricing.price || itemPricing.isCustomCommission) {
+            const adminFee = Math.min(price, itemPricing.adminFee);
+            const sellerNet = Math.max(0, price - adminFee);
+            splitSellingPrice.textContent = formatRupiah(price);
+            splitFeeLabel.textContent = itemPricing.isCustomCommission
+              ? "Komisi Admin Khusus Item"
+              : "Biaya Admin Lapak";
+            splitFeeAmount.textContent = `- ${formatRupiah(adminFee)}`;
+            splitNetReceive.textContent = `${formatRupiah(sellerNet)} / ${unit}`;
+            return;
+          }
+        }
+      }
+
       const split = calculateSplit(price);
       splitSellingPrice.textContent = formatRupiah(split.price);
       splitFeeLabel.textContent = split.feeType === "PERCENTAGE"
@@ -1422,7 +1533,7 @@
         initialStockGroup.classList.remove("hidden");
       } else if (mode === "editExisting") {
         const numId = Number(targetId);
-        const existing = (vendorData?.products || []).find((p) => Number(p.localProductId) === numId);
+        const existing = (vendorData?.products || []).find((p) => getProductId(p) === numId);
         if (!existing) return;
         const draft = draftEditedProducts[numId];
         modalTitle.textContent = "Edit Produk";
@@ -1497,14 +1608,25 @@
         ensureBatchSubmissionId();
       } else if (modalMode === "editExisting") {
         const numId = Number(modalTargetId);
-        draftEditedProducts[numId] = {
-          localProductId: numId,
-          name,
-          category,
-          unit,
-          sellingPrice
-        };
-        ensureBatchSubmissionId();
+        const existing = (vendorData?.products || []).find((p) => getProductId(p) === numId);
+        const isUnchanged = existing &&
+          String(existing.name || "").trim() === name &&
+          String(existing.category || "Makanan").trim() === category &&
+          String(existing.unit || "pcs").trim() === unit &&
+          Math.round(Number(existing.sellingPrice || 0)) === sellingPrice;
+
+        if (isUnchanged) {
+          delete draftEditedProducts[numId];
+        } else {
+          draftEditedProducts[numId] = {
+            localProductId: numId,
+            name,
+            category,
+            unit,
+            sellingPrice
+          };
+          ensureBatchSubmissionId();
+        }
       }
 
       closeProductModal();
@@ -1680,7 +1802,7 @@
       };
 
       try {
-        await setDoc(doc(db, "lapak_vendor_submissions", submissionId), payload);
+        await setDoc(doc(activeDb, "lapak_vendor_submissions", submissionId), payload);
         lastSubmittedId = submissionId;
 
         // Immediately clear all draft queues & reset UI back to initial clean disabled state
@@ -1708,8 +1830,71 @@
       }
     });
 
-    // --- Subscribe to Vendor Document ---
-    function connectToVendor(code, token) {
+    // --- Subscribe to Vendor Document (Real-Time onSnapshot with Primary -> Legacy DB Fallback) ---
+    function subscribeVendorDoc(normalizedCode, databaseId, allowLegacyFallback) {
+      if (unsubscribeVendor) {
+        unsubscribeVendor();
+        unsubscribeVendor = null;
+      }
+
+      const targetDb = getFirestoreById(databaseId);
+      const vendorRef = doc(targetDb, "lapak_vendors", normalizedCode);
+      unsubscribeVendor = onSnapshot(
+        vendorRef,
+        (snap) => {
+          if (!snap.exists()) {
+            if (allowLegacyFallback && databaseId !== LEGACY_FIRESTORE_DATABASE_ID) {
+              subscribeVendorDoc(normalizedCode, LEGACY_FIRESTORE_DATABASE_ID, false);
+              return;
+            }
+            loadingCard.classList.add("hidden");
+            vendorData = null;
+            lastProductsPriceSignature = null;
+            portalContent.classList.add("hidden");
+            stickySubmitBar.classList.add("hidden");
+            accessCard.classList.remove("hidden");
+            manualCodeInput.value = normalizedCode;
+            showBanner("error", `Data penyetor ${normalizedCode} belum ditemukan. Pastikan Admin Lapak sudah menekan Sinkronkan Cloud.`);
+            return;
+          }
+
+          activeDb = targetDb;
+          loadingCard.classList.add("hidden");
+          const incomingData = snap.data();
+          const incomingProducts = Array.isArray(incomingData?.products) ? incomingData.products : [];
+          const validIds = new Set(incomingProducts.map((p) => getProductId(p)));
+
+          // Prune draft stock/edit entries if Admin deleted a product
+          Object.keys(draftStockAdditions).forEach((k) => {
+            if (!validIds.has(Number(k))) delete draftStockAdditions[k];
+          });
+          Object.keys(draftEditedProducts).forEach((k) => {
+            if (!validIds.has(Number(k))) delete draftEditedProducts[k];
+          });
+
+          const nextSignature = buildProductsPriceSignature(incomingProducts);
+          const hadPreviousData = vendorData !== null;
+          const pricingChanged = hadPreviousData && lastProductsPriceSignature !== null && nextSignature !== lastProductsPriceSignature;
+          lastProductsPriceSignature = nextSignature;
+
+          vendorData = incomingData;
+          portalContent.classList.remove("hidden");
+          stickySubmitBar.classList.remove("hidden");
+          renderPortal();
+
+          if (pricingChanged) {
+            showSuccessToast("🔄 Harga & komisi produk diperbarui otomatis dari Admin!");
+          }
+        },
+        (err) => {
+          loadingCard.classList.add("hidden");
+          console.error("Vendor snapshot error:", err);
+          showBanner("error", "Gagal memuat data dari server. Periksa koneksi internet Anda lalu muat ulang halaman.");
+        }
+      );
+    }
+
+    function connectToVendor(code, token, customDbId = "") {
       if (unsubscribeVendor) {
         unsubscribeVendor();
         unsubscribeVendor = null;
@@ -1728,6 +1913,7 @@
       }
 
       activeVendorCode = normalizedCode;
+      lastProductsPriceSignature = null;
       const cleanedToken = cleanUrlToken(token);
       if (cleanedToken.length >= 12) {
         activeWriteToken = cleanedToken;
@@ -1743,32 +1929,9 @@
       loadingCard.classList.remove("hidden");
       hideBanner();
 
-      const vendorRef = doc(db, "lapak_vendors", normalizedCode);
-      unsubscribeVendor = onSnapshot(
-        vendorRef,
-        (snap) => {
-          loadingCard.classList.add("hidden");
-          if (!snap.exists()) {
-            vendorData = null;
-            portalContent.classList.add("hidden");
-            stickySubmitBar.classList.add("hidden");
-            accessCard.classList.remove("hidden");
-            manualCodeInput.value = normalizedCode;
-            showBanner("error", `Data penyetor ${normalizedCode} belum ditemukan. Pastikan Admin Lapak sudah menekan Sinkronkan Cloud.`);
-            return;
-          }
-
-          vendorData = snap.data();
-          portalContent.classList.remove("hidden");
-          stickySubmitBar.classList.remove("hidden");
-          renderPortal();
-        },
-        (err) => {
-          loadingCard.classList.add("hidden");
-          console.error("Vendor snapshot error:", err);
-          showBanner("error", "Gagal memuat data dari server. Periksa koneksi internet Anda lalu muat ulang halaman.");
-        }
-      );
+      const explicitDb = String(customDbId || "").trim();
+      const startDbId = explicitDb || PRIMARY_FIRESTORE_DATABASE_ID;
+      subscribeVendorDoc(normalizedCode, startDbId, !explicitDb);
     }
 
     openPortalBtn.addEventListener("click", () => {
@@ -1790,13 +1953,14 @@
       const hashParams = new URLSearchParams(hashStr);
       const code = searchParams.get("kode") || searchParams.get("code") || hashParams.get("kode") || hashParams.get("code") || "";
       const token = searchParams.get("token") || searchParams.get("writeToken") || hashParams.get("token") || hashParams.get("writeToken") || "";
-      return { code: cleanVendorCode(code), token: cleanUrlToken(token) };
+      const dbId = searchParams.get("db") || hashParams.get("db") || "";
+      return { code: cleanVendorCode(code), token: cleanUrlToken(token), dbId: dbId.trim() };
     }
 
-    const { code: urlCode, token: urlToken } = extractParams();
+    const { code: urlCode, token: urlToken, dbId: urlDbId } = extractParams();
 
     if (urlCode) {
-      connectToVendor(urlCode, urlToken);
+      connectToVendor(urlCode, urlToken, urlDbId);
     } else {
       loadingCard.classList.add("hidden");
       accessCard.classList.remove("hidden");

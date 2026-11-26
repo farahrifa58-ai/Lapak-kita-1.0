@@ -91,6 +91,13 @@ data class LocalFinancialSyncSnapshot(
     val payments: List<SellerPayment>
 )
 
+data class SellerCloudSyncSnapshot(
+    val sellerDetail: SellerDetailItem,
+    val sellerProducts: List<ProductDetailItem>,
+    val shopProfile: ShopProfile,
+    val appSettings: AppSettings
+)
+
 class LapakRepository(private val dao: LapakDao) {
 
     // Shop Profile
@@ -109,6 +116,41 @@ class LapakRepository(private val dao: LapakDao) {
 
     suspend fun updateAppSettings(settings: AppSettings) = withContext(Dispatchers.IO) {
         dao.insertOrUpdateAppSettings(settings)
+    }
+
+    /**
+     * Ensures a fresh per-UID local database has clean default profile & settings rows
+     * without inserting any demo sellers, products, transactions, or expenses.
+     */
+    suspend fun ensureDefaultProfileAndSettings(initialBusinessName: String? = null) = withContext(Dispatchers.IO) {
+        if (dao.getShopProfile() == null) {
+            val cleanShopName = initialBusinessName?.trim().orEmpty().ifBlank { "Lapak Kita" }
+            dao.insertOrUpdateShopProfile(
+                ShopProfile(
+                    id = 1,
+                    shopName = cleanShopName,
+                    ownerName = "",
+                    whatsappNumber = "",
+                    address = "",
+                    footerMessage = "Terima kasih atas kunjungan & kepercayaan Anda berbelanja di $cleanShopName!"
+                )
+            )
+        }
+        if (dao.getAppSettings() == null) {
+            dao.insertOrUpdateAppSettings(
+                AppSettings(
+                    id = 1,
+                    themeMode = ThemeMode.SYSTEM,
+                    language = "id",
+                    adminFeeType = AdminFeeType.FIXED,
+                    adminFeeValue = 2000.0,
+                    webPortalBaseUrl = DEFAULT_WEB_PORTAL_BASE_URL,
+                    autoResetStockEnabled = true,
+                    autoResetHour = 17,
+                    lastStockResetCycleId = OperationalCycleHelper.getOperationalCycleDate(17)
+                )
+            )
+        }
     }
 
     // Sellers
@@ -332,18 +374,39 @@ class LapakRepository(private val dao: LapakDao) {
         }
 
         // 2. Edit existing products belonging strictly to this seller
+        // Preserve Admin's custom per-item pricing/commission whenever price is unchanged or has a custom commission.
         val existingSellerProducts = dao.getProductsBySellerDirect(seller.id).associateBy { it.id }
         for (ep in submission.editedProducts) {
             val existing = existingSellerProducts[ep.localProductId] ?: continue
-            val calc = AdminFeeCalculator.calculate(ep.sellingPrice, feeType, feeValue)
+            val existingPrice = existing.sellingPrice.coerceAtLeast(0.0)
+            val existingShare = existing.sellerShare.coerceIn(0.0, existingPrice)
+            val existingCommission = (existingPrice - existingShare).coerceAtLeast(0.0)
+            val globalCalcForOldPrice = AdminFeeCalculator.calculate(existingPrice, feeType, feeValue)
+            val hasCustomItemCommission = kotlin.math.abs(existingCommission - globalCalcForOldPrice.adminFee) > 0.01
+            val priceUnchanged = kotlin.math.abs(ep.sellingPrice - existingPrice) < 0.01
+
+            val (finalPrice, finalShare, finalCommission) = when {
+                priceUnchanged -> Triple(existingPrice, existingShare, existingCommission)
+                hasCustomItemCommission -> {
+                    val safeNewPrice = ep.sellingPrice.coerceAtLeast(0.0)
+                    val preservedCommission = existingCommission.coerceIn(0.0, safeNewPrice)
+                    val recalculatedShare = (safeNewPrice - preservedCommission).coerceAtLeast(0.0)
+                    Triple(safeNewPrice, recalculatedShare, preservedCommission)
+                }
+                else -> {
+                    val calc = AdminFeeCalculator.calculate(ep.sellingPrice, feeType, feeValue)
+                    Triple(calc.sellingPrice, calc.sellerShare, calc.adminFee)
+                }
+            }
+
             dao.updateProduct(
                 existing.copy(
                     name = ep.name,
                     category = ep.category,
                     unit = ep.unit,
-                    sellingPrice = calc.sellingPrice,
-                    sellerShare = calc.sellerShare,
-                    adminProfitPerUnit = calc.adminFee
+                    sellingPrice = finalPrice,
+                    sellerShare = finalShare,
+                    adminProfitPerUnit = finalCommission
                 )
             )
             editedProductsCount++
@@ -426,11 +489,111 @@ class LapakRepository(private val dao: LapakDao) {
     }
 
     suspend fun updateProduct(product: Product) = withContext(Dispatchers.IO) {
-        dao.updateProduct(product)
+        val safePrice = product.sellingPrice.coerceAtLeast(0.0)
+        val safeShare = product.sellerShare.coerceIn(0.0, safePrice)
+        val safeProfit = (safePrice - safeShare).coerceAtLeast(0.0)
+        val normalized = product.copy(
+            sellingPrice = safePrice,
+            sellerShare = safeShare,
+            adminProfitPerUnit = safeProfit
+        )
+        dao.updateProduct(normalized)
+        // Keep active stock lots aligned with updated product price/share/unit
+        val activeLots = dao.getActiveStockLotsForProduct(normalized.id)
+        for (lot in activeLots) {
+            if (lot.sellingPrice != safePrice || lot.sellerShare != safeShare || lot.unit != normalized.unit) {
+                dao.updateStockLot(
+                    lot.copy(
+                        unit = normalized.unit,
+                        sellingPrice = safePrice,
+                        sellerShare = safeShare
+                    )
+                )
+            }
+        }
     }
 
     suspend fun deleteProduct(product: Product) = withContext(Dispatchers.IO) {
         dao.deleteProduct(product)
+    }
+
+    /**
+     * Builds an immediately consistent, fresh cloud-sync snapshot directly from Room DAO
+     * (never relies on possibly stale Flow emissions or arbitrary delays after a local edit).
+     */
+    suspend fun getSellerSyncSnapshotDirect(sellerId: Long): SellerCloudSyncSnapshot? = withContext(Dispatchers.IO) {
+        val rawSeller = dao.getSellerById(sellerId) ?: return@withContext null
+        val seller = if (!VendorCodeGenerator.isValidVendorCode(rawSeller.vendorCode) ||
+            !VendorCodeGenerator.isValidWriteToken(rawSeller.writeToken)
+        ) {
+            val fixed = rawSeller.copy(
+                vendorCode = rawSeller.vendorCode.takeIf { VendorCodeGenerator.isValidVendorCode(it) }
+                    ?: VendorCodeGenerator.generateVendorCode(),
+                writeToken = rawSeller.writeToken.takeIf { VendorCodeGenerator.isValidWriteToken(it) }
+                    ?: VendorCodeGenerator.generateWriteToken()
+            )
+            dao.updateSeller(fixed)
+            fixed
+        } else {
+            rawSeller
+        }
+
+        val sellerProductsRaw = dao.getProductsBySellerDirect(seller.id)
+        val allLots = dao.getAllStockLotsDirect()
+        val sellerLots = allLots.filter { it.sellerId == seller.id }
+        val lotsByProd = sellerLots.groupBy { it.productId }
+
+        val productDetails = sellerProductsRaw.map { prod ->
+            val activeLots = lotsByProd[prod.id]?.filter { it.currentQty > 0 }.orEmpty()
+            ProductDetailItem(
+                product = prod,
+                seller = seller,
+                currentStock = activeLots.sumOf { it.currentQty },
+                activeLots = activeLots
+            )
+        }
+
+        val validTrxIds = dao.getAllTransactionsDirect()
+            .filter { !it.isCancelled }
+            .map { it.id }
+            .toSet()
+        val sellerSoldItems = dao.getAllTransactionItemsDirect()
+            .filter { it.sellerId == seller.id && it.transactionId in validTrxIds }
+        val sellerPayments = dao.getAllSellerPaymentsDirect()
+            .filter { it.sellerId == seller.id }
+
+        val totalStock = sellerLots.sumOf { it.currentQty }
+        val totalSoldQty = sellerSoldItems.sumOf { it.quantity }
+        val totalRights = sellerSoldItems.sumOf { it.totalSellerShare }
+        val totalPaid = sellerPayments.sumOf { it.amount }
+        val remainingBalance = (totalRights - totalPaid).coerceAtLeast(0.0)
+        val paymentStatus = when {
+            totalRights == 0.0 -> "Lunas"
+            remainingBalance <= 0.0 -> "Lunas"
+            totalPaid > 0.0 -> "Dibayar Sebagian"
+            else -> "Belum Dibayar"
+        }
+
+        SellerCloudSyncSnapshot(
+            sellerDetail = SellerDetailItem(
+                seller = seller,
+                products = sellerProductsRaw,
+                totalStock = totalStock,
+                totalSoldQty = totalSoldQty,
+                totalRights = totalRights,
+                totalPaid = totalPaid,
+                remainingBalance = remainingBalance,
+                paymentStatus = paymentStatus
+            ),
+            sellerProducts = productDetails,
+            shopProfile = dao.getShopProfile() ?: ShopProfile(),
+            appSettings = dao.getAppSettings() ?: AppSettings()
+        )
+    }
+
+    suspend fun getSellerSyncSnapshotByCodeDirect(vendorCode: String): SellerCloudSyncSnapshot? = withContext(Dispatchers.IO) {
+        val seller = dao.getSellerByVendorCode(vendorCode.trim().uppercase()) ?: return@withContext null
+        getSellerSyncSnapshotDirect(seller.id)
     }
 
     // Combined Products with real-time stock & seller details
@@ -1291,7 +1454,8 @@ data class FinancialData(
      */
     suspend fun mergeCloudVendorsCatalog(
         vendors: List<com.example.data.firebase.CloudVendorCatalogRecord>,
-        currentDeviceId: String
+        currentDeviceId: String,
+        ignoreSourceDeviceCheck: Boolean = false
     ): Int = withContext(Dispatchers.IO) {
         cloudMergeMutex.lock()
         try {
@@ -1306,14 +1470,18 @@ data class FinancialData(
                 .toMutableMap()
 
             for (cv in vendors) {
-                if (cv.sourceDeviceId.isNotBlank() && cv.sourceDeviceId == currentDeviceId) {
-                    continue
-                }
                 val cleanCode = cv.vendorCode.trim().uppercase()
                 val parsedStatus = runCatching { SellerStatus.valueOf(cv.sellerStatus.uppercase()) }
                     .getOrDefault(SellerStatus.AKTIF)
 
                 val matchedSeller = sellerByCode[cleanCode] ?: sellerByName[cv.sellerName.trim().lowercase()]
+                // Only skip self-echo when this vendor already exists locally; always restore missing vendors
+                // (e.g. after app update, legacy cache cleanup, or re-login on the same phone).
+                if (!ignoreSourceDeviceCheck && matchedSeller != null &&
+                    cv.sourceDeviceId.isNotBlank() && cv.sourceDeviceId == currentDeviceId
+                ) {
+                    continue
+                }
                 val targetSeller = if (matchedSeller == null) {
                     val created = Seller(
                         name = cv.sellerName,

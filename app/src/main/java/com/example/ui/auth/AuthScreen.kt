@@ -147,7 +147,7 @@ fun AuthScreen(
                                 onSetAuthError(check.message)
                             }
                             is LoginDeviceCheckResult.OfflineFallback -> {
-                                val cached = licenseStorage.getOfflineSession()
+                                val cached = licenseStorage.getOfflineSession(fbUser.uid)
                                 if (cached != null && cached.uid == fbUser.uid) {
                                     onSetAuthError(null)
                                     onAuthenticated(

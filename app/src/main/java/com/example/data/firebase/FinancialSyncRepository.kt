@@ -22,6 +22,7 @@ import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
@@ -133,9 +134,14 @@ class FinancialSyncRepository(
     private fun settlementsCollection(uid: String): CollectionReference =
         db.collection("users").document(uid).collection("settlements")
 
-    private fun requireUserId(): String =
-        auth.currentUser?.uid
+    private fun requireMatchingUserId(expectedUid: String? = null): String {
+        val activeUid = auth.currentUser?.uid
             ?: throw IllegalStateException("Admin harus masuk terlebih dahulu.")
+        if (!expectedUid.isNullOrBlank() && activeUid != expectedUid) {
+            throw IllegalStateException("Sesi akun telah berubah. Operasi sinkronisasi dibatalkan untuk mencegah penimpaan lintas akun.")
+        }
+        return activeUid
+    }
 
     private fun sanitizeDocId(raw: String, prefix: String): String {
         val clean = raw.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(100)
@@ -154,7 +160,8 @@ class FinancialSyncRepository(
     suspend fun syncVendorCatalogToUserCloud(
         sellerDetail: SellerDetailItem,
         sellerProducts: List<ProductDetailItem>,
-        sourceDeviceId: String
+        sourceDeviceId: String,
+        expectedUid: String? = null
     ): Result<Unit> {
         val seller = sellerDetail.seller
         val vendorCode = seller.vendorCode.trim().uppercase()
@@ -164,7 +171,7 @@ class FinancialSyncRepository(
         }
 
         val uid = try {
-            requireUserId()
+            requireMatchingUserId(expectedUid)
         } catch (e: Exception) {
             return Result.failure(e)
         }
@@ -178,14 +185,20 @@ class FinancialSyncRepository(
             val safePrice = p.sellingPrice.coerceAtLeast(0.0)
             val safeShare = p.sellerShare.coerceIn(0.0, safePrice)
             val safeProfit = (safePrice - safeShare).coerceAtLeast(0.0)
+            val safeStock = detail.currentStock.coerceAtLeast(0)
             mapOf(
+                "id" to p.id,
+                "localProductId" to p.id,
                 "name" to p.name.trim().ifEmpty { "Produk" }.take(100),
                 "category" to p.category.trim().ifEmpty { "Makanan" }.take(50),
                 "unit" to p.unit.trim().ifEmpty { "pcs" }.take(20),
                 "sellingPrice" to safePrice,
+                "basePrice" to safeShare,
                 "sellerShare" to safeShare,
+                "commission" to safeProfit,
                 "adminProfitPerUnit" to safeProfit,
-                "currentStock" to detail.currentStock.coerceAtLeast(0),
+                "stock" to safeStock,
+                "currentStock" to safeStock,
                 "isActive" to p.isActive
             )
         }
@@ -244,10 +257,17 @@ class FinancialSyncRepository(
         }
     }
 
-    suspend fun deleteVendorCatalogFromUserCloud(vendorCode: String): Result<Unit> {
+    suspend fun deleteVendorCatalogFromUserCloud(
+        vendorCode: String,
+        expectedUid: String? = null
+    ): Result<Unit> {
         val cleanCode = vendorCode.trim().uppercase()
         if (!VendorCodeGenerator.isValidVendorCode(cleanCode)) return Result.success(Unit)
-        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val uid = try {
+            requireMatchingUserId(expectedUid)
+        } catch (_: Exception) {
+            return Result.success(Unit)
+        }
         val path = "users/$uid/vendors/$cleanCode"
         return try {
             vendorsCatalogCollection(uid).document(cleanCode).delete().await()
@@ -262,10 +282,11 @@ class FinancialSyncRepository(
 
     suspend fun syncTransactionToFirestore(
         transaction: LapakTransaction,
-        items: List<TransactionItem>
+        items: List<TransactionItem>,
+        expectedUid: String? = null
     ): Result<Unit> {
         val uid = try {
-            requireUserId()
+            requireMatchingUserId(expectedUid)
         } catch (e: Exception) {
             return Result.failure(e)
         }
@@ -341,9 +362,12 @@ class FinancialSyncRepository(
         }
     }
 
-    suspend fun syncExpenseToFirestore(expense: OperatingExpense): Result<Unit> {
+    suspend fun syncExpenseToFirestore(
+        expense: OperatingExpense,
+        expectedUid: String? = null
+    ): Result<Unit> {
         val uid = try {
-            requireUserId()
+            requireMatchingUserId(expectedUid)
         } catch (e: Exception) {
             return Result.failure(e)
         }
@@ -392,8 +416,15 @@ class FinancialSyncRepository(
         }
     }
 
-    suspend fun deleteExpenseFromFirestore(expense: OperatingExpense): Result<Unit> {
-        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+    suspend fun deleteExpenseFromFirestore(
+        expense: OperatingExpense,
+        expectedUid: String? = null
+    ): Result<Unit> {
+        val uid = try {
+            requireMatchingUserId(expectedUid)
+        } catch (_: Exception) {
+            return Result.success(Unit)
+        }
         val docId = buildExpenseDocId(expense)
         val path = "users/$uid/expenses/$docId"
         return try {
@@ -410,10 +441,11 @@ class FinancialSyncRepository(
     suspend fun syncSettlementToFirestore(
         payment: SellerPayment,
         seller: Seller?,
-        status: String
+        status: String,
+        expectedUid: String? = null
     ): Result<Unit> {
         val uid = try {
-            requireUserId()
+            requireMatchingUserId(expectedUid)
         } catch (e: Exception) {
             return Result.failure(e)
         }
@@ -475,8 +507,35 @@ class FinancialSyncRepository(
         }
     }
 
+    suspend fun fetchCloudVendorsCatalog(ownerUid: String): Result<List<CloudVendorCatalogRecord>> {
+        if (ownerUid.isBlank()) return Result.failure(IllegalStateException("UID tidak valid"))
+        val activeUid = auth.currentUser?.uid
+        if (activeUid != ownerUid) {
+            return Result.failure(IllegalStateException("Sesi akun tidak cocok untuk memuat katalog cloud."))
+        }
+        return try {
+            val snap = vendorsCatalogCollection(ownerUid).get().await()
+            val vendors = snap.documents.mapNotNull { parseVendorCatalog(it) }
+            Result.success(vendors)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: FirebaseFirestoreException) {
+            try {
+                handleFirestoreError(e, OperationType.LIST, "users/$ownerUid/vendors")
+            } catch (wrapped: IllegalStateException) {
+                Result.failure(wrapped)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun fetchAllCloudFinancialData(ownerUid: String): Result<CloudFinancialBundle> {
         if (ownerUid.isBlank()) return Result.failure(IllegalStateException("UID tidak valid"))
+        val activeUid = auth.currentUser?.uid
+        if (activeUid != ownerUid) {
+            return Result.failure(IllegalStateException("Sesi akun tidak cocok untuk memuat data keuangan cloud."))
+        }
         return try {
             val trxSnap = transactionsCollection(ownerUid).get().await()
             val expSnap = expensesCollection(ownerUid).get().await()
@@ -506,6 +565,7 @@ class FinancialSyncRepository(
     // --- REAL-TIME SNAPSHOT LISTENERS (MetadataChanges.INCLUDE) FOR 2-HP SYNC ---
 
     fun observeVendorsCatalogRealtime(ownerUid: String): Flow<List<CloudVendorCatalogRecord>> {
+        if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/vendors"
         return vendorsCatalogCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)
@@ -520,6 +580,7 @@ class FinancialSyncRepository(
     }
 
     fun observeTransactionsChronological(ownerUid: String): Flow<List<CloudTransactionRecord>> {
+        if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/transactions"
         return transactionsCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)
@@ -535,6 +596,7 @@ class FinancialSyncRepository(
     }
 
     fun observeExpensesRealtime(ownerUid: String): Flow<List<CloudExpenseRecord>> {
+        if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/expenses"
         return expensesCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)
@@ -550,6 +612,7 @@ class FinancialSyncRepository(
     }
 
     fun observeSettlementsRealtime(ownerUid: String): Flow<List<CloudSettlementRecord>> {
+        if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/settlements"
         return settlementsCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)

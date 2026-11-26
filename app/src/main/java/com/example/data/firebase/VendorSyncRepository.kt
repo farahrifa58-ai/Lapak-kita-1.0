@@ -19,6 +19,7 @@ import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
@@ -63,16 +64,22 @@ class VendorSyncRepository(
     private val vendorsCollection = db.collection("lapak_vendors")
     private val submissionsCollection = db.collection("lapak_vendor_submissions")
 
-    private fun requireUserId(): String =
-        auth.currentUser?.uid
+    private fun requireMatchingUserId(expectedUid: String? = null): String {
+        val activeUid = auth.currentUser?.uid
             ?: throw IllegalStateException("Admin harus masuk dengan akun Google terlebih dahulu.")
+        if (!expectedUid.isNullOrBlank() && activeUid != expectedUid) {
+            throw IllegalStateException("Sesi akun telah berubah. Sinkronisasi Web Penyetor dibatalkan demi keamanan data.")
+        }
+        return activeUid
+    }
 
     suspend fun syncVendorToFirestore(
         sellerDetail: SellerDetailItem,
         sellerProducts: List<ProductDetailItem>,
         shopProfile: ShopProfile,
         appSettings: AppSettings,
-        lastProcessedSubmissionId: String = ""
+        lastProcessedSubmissionId: String = "",
+        expectedUid: String? = null
     ): Result<Unit> {
         val seller = sellerDetail.seller
         val vendorCode = seller.vendorCode.trim().uppercase()
@@ -82,7 +89,7 @@ class VendorSyncRepository(
         }
 
         val uid = try {
-            requireUserId()
+            requireMatchingUserId(expectedUid)
         } catch (e: Exception) {
             return Result.failure(e)
         }
@@ -97,15 +104,20 @@ class VendorSyncRepository(
             val safePrice = p.sellingPrice.coerceAtLeast(0.0)
             val safeShare = p.sellerShare.coerceIn(0.0, safePrice)
             val safeAdminProfit = (safePrice - safeShare).coerceAtLeast(0.0)
+            val safeStock = detail.currentStock.coerceAtLeast(0)
             mapOf(
+                "id" to p.id,
                 "localProductId" to p.id,
                 "name" to p.name.trim().ifEmpty { "Produk" }.take(100),
                 "category" to p.category.trim().ifEmpty { "Makanan" }.take(50),
                 "unit" to p.unit.trim().ifEmpty { "pcs" }.take(20),
                 "sellingPrice" to safePrice,
+                "basePrice" to safeShare,
                 "sellerShare" to safeShare,
+                "commission" to safeAdminProfit,
                 "adminProfitPerUnit" to safeAdminProfit,
-                "currentStock" to detail.currentStock.coerceAtLeast(0),
+                "stock" to safeStock,
+                "currentStock" to safeStock,
                 "isActive" to p.isActive
             )
         }
@@ -202,9 +214,16 @@ class VendorSyncRepository(
         }
     }
 
-    suspend fun deleteVendorFromFirestore(vendorCode: String): Result<Unit> {
+    suspend fun deleteVendorFromFirestore(
+        vendorCode: String,
+        expectedUid: String? = null
+    ): Result<Unit> {
         if (!VendorCodeGenerator.isValidVendorCode(vendorCode)) return Result.success(Unit)
-        if (auth.currentUser == null) return Result.success(Unit)
+        try {
+            requireMatchingUserId(expectedUid)
+        } catch (_: Exception) {
+            return Result.success(Unit)
+        }
 
         val vendorPath = "lapak_vendors/$vendorCode"
         return try {
@@ -226,6 +245,7 @@ class VendorSyncRepository(
     }
 
     fun observePendingSubmissions(ownerUid: String): Flow<List<VendorSubmissionRemote>> {
+        if (ownerUid.isBlank()) return emptyFlow()
         val path = "lapak_vendor_submissions"
         return submissionsCollection
             .whereEqualTo("ownerUid", ownerUid)
@@ -248,11 +268,12 @@ class VendorSyncRepository(
 
     suspend fun markSubmissionStatus(
         submissionId: String,
-        status: String
+        status: String,
+        expectedUid: String? = null
     ): Result<Unit> {
         val path = "lapak_vendor_submissions/$submissionId"
         return try {
-            requireUserId()
+            requireMatchingUserId(expectedUid)
             submissionsCollection.document(submissionId).update(
                 mapOf(
                     "status" to status,

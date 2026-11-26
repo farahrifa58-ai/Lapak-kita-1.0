@@ -40,6 +40,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -76,10 +78,8 @@ import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.PersistentCacheSettings
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private sealed class AccessGateState {
     data object Checking : AccessGateState()
@@ -93,21 +93,22 @@ private sealed class AccessGateState {
     ) : AccessGateState()
     data class Granted(
         val uid: String,
-        val licenseCode: String
+        val licenseCode: String,
+        val businessName: String = ""
     ) : AccessGateState()
 }
 
 class MainActivity : ComponentActivity() {
-
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         val appContext = applicationContext
-        val database = LapakDatabase.getDatabase(appContext, appScope)
-        val repository = LapakRepository(database.lapakDao())
+        val licenseStorage = LicenseStorage(appContext)
+        // One-time startup cleanup: purge legacy global (non-UID-prefixed) Room DB, prefs & files
+        licenseStorage.cleanupLegacyGlobalCacheOnce()
+
         val firestoreDb = FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id)).apply {
             runCatching {
                 firestoreSettings = FirebaseFirestoreSettings.Builder()
@@ -118,7 +119,6 @@ class MainActivity : ComponentActivity() {
         val vendorSyncRepository = VendorSyncRepository(firestoreDb)
         val financialSyncRepository = FinancialSyncRepository(firestoreDb)
         val activationAuthRepository = ActivationAuthRepository(firestoreDb)
-        val licenseStorage = LicenseStorage(appContext)
 
         setContent {
             val context = LocalContext.current
@@ -138,6 +138,7 @@ class MainActivity : ComponentActivity() {
             }
 
             val auth = remember { Firebase.auth }
+            val rootScope = rememberCoroutineScope()
             var currentUser by remember { mutableStateOf<FirebaseUser?>(auth.currentUser) }
             var gateState by remember { mutableStateOf<AccessGateState>(AccessGateState.Checking) }
 
@@ -147,7 +148,18 @@ class MainActivity : ComponentActivity() {
 
             DisposableEffect(auth) {
                 val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
-                    currentUser = firebaseAuth.currentUser
+                    val latestUser = firebaseAuth.currentUser
+                    val previousUid = (gateState as? AccessGateState.Granted)?.uid
+                    // If auth UID switched or signed out while an old session was mounted,
+                    // immediately unmount the old session so all Firestore listeners & caches tear down first.
+                    if (previousUid != null && latestUser?.uid != previousUid) {
+                        gateState = if (latestUser == null) {
+                            AccessGateState.RequireGoogleSignIn()
+                        } else {
+                            AccessGateState.Checking
+                        }
+                    }
+                    currentUser = latestUser
                 }
                 auth.addAuthStateListener(listener)
                 onDispose {
@@ -155,26 +167,38 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Startup Auto-Restore & Single Device Lock observer (Offline-First!)
+            // Startup Auto-Restore & Single Device Lock observer (Offline-First, strictly UID-isolated!)
             LaunchedEffect(currentUser?.uid, isAuthActionRunning) {
                 if (isAuthActionRunning) return@LaunchedEffect
 
                 val deviceId = licenseStorage.getDeviceId()
                 val fbUser = currentUser
-                val offlineSession = licenseStorage.getOfflineSession()
+
+                // Ensure any previous UID's Granted shell is unmounted BEFORE loading the new UID
+                val currentGate = gateState
+                if (currentGate is AccessGateState.Granted && currentGate.uid != fbUser?.uid) {
+                    gateState = if (fbUser == null) {
+                        AccessGateState.RequireGoogleSignIn()
+                    } else {
+                        AccessGateState.Checking
+                    }
+                }
 
                 if (fbUser != null) {
+                    val offlineSession = licenseStorage.getOfflineSession(fbUser.uid)
+
                     // Already on CompleteActivation screen for this exact UID -> don't bounce!
                     val existingState = gateState
                     if (existingState is AccessGateState.CompleteActivation && existingState.uid == fbUser.uid) {
                         return@LaunchedEffect
                     }
 
-                    // 1. Offline-first instant entry if cached session matches this user & device
+                    // 1. Offline-first instant entry if cached session matches this exact UID & device
                     if (offlineSession != null && offlineSession.uid == fbUser.uid) {
                         gateState = AccessGateState.Granted(
                             uid = fbUser.uid,
-                            licenseCode = offlineSession.licenseCode
+                            licenseCode = offlineSession.licenseCode,
+                            businessName = offlineSession.businessName
                         )
                         // Background online Single Device Lock check (does NOT block offline use)
                         when (
@@ -196,23 +220,24 @@ class MainActivity : ComponentActivity() {
                                 )
                                 gateState = AccessGateState.Granted(
                                     uid = onlineCheck.profile.userId,
-                                    licenseCode = onlineCheck.profile.licenseCode
+                                    licenseCode = onlineCheck.profile.licenseCode,
+                                    businessName = onlineCheck.profile.businessName
                                 )
                             }
                             is LoginDeviceCheckResult.BlockedOtherDevice -> {
                                 authError = onlineCheck.message
-                                GoogleAuthHelper.signOut(context)
-                                licenseStorage.clearSession()
                                 gateState = AccessGateState.RequireGoogleSignIn()
+                                licenseStorage.clearSession(fbUser.uid)
+                                GoogleAuthHelper.signOut(context)
                             }
                             is LoginDeviceCheckResult.InactiveAccount -> {
                                 authError = onlineCheck.message
-                                GoogleAuthHelper.signOut(context)
-                                licenseStorage.clearSession()
                                 gateState = AccessGateState.RequireGoogleSignIn()
+                                licenseStorage.clearSession(fbUser.uid)
+                                GoogleAuthHelper.signOut(context)
                             }
                             is LoginDeviceCheckResult.NotRegistered -> {
-                                licenseStorage.clearSession()
+                                licenseStorage.clearSession(fbUser.uid)
                                 gateState = AccessGateState.CompleteActivation(
                                     uid = fbUser.uid,
                                     email = fbUser.email.orEmpty(),
@@ -244,7 +269,8 @@ class MainActivity : ComponentActivity() {
                                 authError = null
                                 gateState = AccessGateState.Granted(
                                     uid = onlineCheck.profile.userId,
-                                    licenseCode = onlineCheck.profile.licenseCode
+                                    licenseCode = onlineCheck.profile.licenseCode,
+                                    businessName = onlineCheck.profile.businessName
                                 )
                             }
                             is LoginDeviceCheckResult.NotRegistered -> {
@@ -257,20 +283,20 @@ class MainActivity : ComponentActivity() {
                             }
                             is LoginDeviceCheckResult.BlockedOtherDevice -> {
                                 authError = onlineCheck.message
-                                GoogleAuthHelper.signOut(context)
-                                licenseStorage.clearSession()
                                 gateState = AccessGateState.RequireGoogleSignIn()
+                                licenseStorage.clearSession(fbUser.uid)
+                                GoogleAuthHelper.signOut(context)
                             }
                             is LoginDeviceCheckResult.InactiveAccount -> {
                                 authError = onlineCheck.message
-                                GoogleAuthHelper.signOut(context)
-                                licenseStorage.clearSession()
                                 gateState = AccessGateState.RequireGoogleSignIn()
+                                licenseStorage.clearSession(fbUser.uid)
+                                GoogleAuthHelper.signOut(context)
                             }
                             is LoginDeviceCheckResult.OfflineFallback -> {
                                 authError = "Perlu koneksi internet untuk memverifikasi akun Google pertama kali."
-                                GoogleAuthHelper.signOut(context)
                                 gateState = AccessGateState.RequireGoogleSignIn()
+                                GoogleAuthHelper.signOut(context)
                             }
                         }
                     }
@@ -348,7 +374,8 @@ class MainActivity : ComponentActivity() {
                                     authError = null
                                     gateState = AccessGateState.Granted(
                                         uid = profile.userId,
-                                        licenseCode = profile.licenseCode
+                                        licenseCode = profile.licenseCode,
+                                        businessName = profile.businessName
                                     )
                                 }
                             )
@@ -373,7 +400,8 @@ class MainActivity : ComponentActivity() {
                                     authError = null
                                     gateState = AccessGateState.Granted(
                                         uid = profile.userId,
-                                        licenseCode = profile.licenseCode
+                                        licenseCode = profile.licenseCode,
+                                        businessName = profile.businessName
                                     )
                                 }
                             )
@@ -381,31 +409,71 @@ class MainActivity : ComponentActivity() {
                     }
                     is AccessGateState.Granted -> {
                         key(state.uid) {
+                            // Dedicated per-UID ViewModelStore + UID-scoped Room DB (`lapakkita_{uid}_db`)
+                            // so switching accounts NEVER reuses another account's ViewModel, listeners, or SQLite DB!
+                            val sessionStoreOwner = remember(state.uid) {
+                                object : ViewModelStoreOwner {
+                                    override val viewModelStore: ViewModelStore = ViewModelStore()
+                                }
+                            }
+                            val userDatabase = remember(state.uid) {
+                                LapakDatabase.getDatabaseForUser(appContext, state.uid)
+                            }
+                            val userRepository = remember(state.uid, userDatabase) {
+                                LapakRepository(userDatabase.lapakDao())
+                            }
                             val viewModel: LapakViewModel = viewModel(
-                                key = state.uid,
+                                viewModelStoreOwner = sessionStoreOwner,
+                                key = "lapak_vm_${state.uid}",
                                 factory = viewModelFactory {
                                     initializer {
                                         LapakViewModel(
-                                            repository = repository,
+                                            repository = userRepository,
                                             vendorSyncRepository = vendorSyncRepository,
                                             financialSyncRepository = financialSyncRepository,
                                             activationAuthRepository = activationAuthRepository,
                                             licenseStorage = licenseStorage,
                                             currentUserId = state.uid,
-                                            currentDeviceId = licenseStorage.getDeviceId()
+                                            currentDeviceId = licenseStorage.getDeviceId(),
+                                            initialBusinessName = state.businessName
                                         )
                                     }
                                 }
                             )
+
+                            DisposableEffect(state.uid) {
+                                onDispose {
+                                    // 1. Unsubscribe all Firestore onSnapshot listeners & reset in-memory state immediately
+                                    viewModel.teardownSessionAndUnsubscribe()
+                                    // 2. Clear dedicated per-UID ViewModelStore (cancels viewModelScope cleanly)
+                                    sessionStoreOwner.viewModelStore.clear()
+                                    // 3. Close & evict this UID's Room DB handle
+                                    LapakDatabase.closeUserDatabase(state.uid)
+                                }
+                            }
 
                             AuthenticatedAppShell(
                                 viewModel = viewModel,
                                 systemDark = systemDark,
                                 activeLicenseCode = state.licenseCode,
                                 onSignedOut = {
-                                    licenseStorage.clearSession()
-                                    authError = null
-                                    gateState = AccessGateState.RequireGoogleSignIn()
+                                    val uidToTearDown = state.uid
+                                    rootScope.launch {
+                                        isAuthActionRunning = true
+                                        try {
+                                            // 1. FIRST unsubscribe all Firestore listeners & reset in-memory state
+                                            viewModel.teardownSessionAndUnsubscribe()
+                                            // 2. Clear cached offline session for this UID
+                                            licenseStorage.clearSession(uidToTearDown)
+                                            // 3. Immediately unmount AuthenticatedAppShell (triggers onDispose -> clear store & close DB)
+                                            authError = null
+                                            gateState = AccessGateState.RequireGoogleSignIn()
+                                            // 4. Sign out from Firebase Auth & Android Credential Manager
+                                            GoogleAuthHelper.signOut(context)
+                                        } finally {
+                                            isAuthActionRunning = false
+                                        }
+                                    }
                                 }
                             )
                         }
@@ -413,6 +481,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) {
+            LapakDatabase.closeAllDatabases()
+        }
+        super.onDestroy()
     }
 }
 

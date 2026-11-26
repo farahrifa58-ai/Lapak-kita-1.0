@@ -57,8 +57,12 @@ fun SettingsScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val registeredLicenseCode = remember(activeLicenseCode) {
-        activeLicenseCode ?: LicenseStorage(context).getActivatedLicenseCode()
+    val safeUidKey = remember(viewModel.currentUserId) {
+        LicenseStorage.sanitizeUidForStorageKey(viewModel.currentUserId)
+    }
+
+    val registeredLicenseCode = remember(activeLicenseCode, viewModel.currentUserId) {
+        activeLicenseCode ?: LicenseStorage(context).getActivatedLicenseCode(viewModel.currentUserId)
     }
 
     val lang by viewModel.currentLanguage.collectAsState()
@@ -117,13 +121,13 @@ fun SettingsScreen(
     var showConfirmResetStockDialog by remember { mutableStateOf(false) }
     var isResettingStock by remember { mutableStateOf(false) }
 
-    // Zero-permission Photo Picker for Shop Logo
+    // Zero-permission Photo Picker for Shop Logo (strictly UID-scoped file name)
     val logoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
             scope.launch(Dispatchers.IO) {
-                val saved = copyPickedImageToInternal(context, uri, "shop_logo.jpg")
+                val saved = copyPickedImageToInternal(context, uri, "lapakkita_${safeUidKey}_shop_logo.jpg")
                 withContext(Dispatchers.Main) {
                     if (saved != null) {
                         localLogoPath = saved
@@ -137,13 +141,13 @@ fun SettingsScreen(
         }
     }
 
-    // Zero-permission Photo Picker for Default Poster Background
+    // Zero-permission Photo Picker for Default Poster Background (strictly UID-scoped file name)
     val posterBgPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
             scope.launch(Dispatchers.IO) {
-                val saved = copyPickedImageToInternal(context, uri, "poster_default_bg.jpg")
+                val saved = copyPickedImageToInternal(context, uri, "lapakkita_${safeUidKey}_poster_default_bg.jpg")
                 withContext(Dispatchers.Main) {
                     if (saved != null) {
                         promoCustomBgPath = saved
@@ -165,7 +169,9 @@ fun SettingsScreen(
     var showRestorePrompt by remember { mutableStateOf(false) }
     var jsonInputForRestore by remember { mutableStateOf("") }
 
-    val signedInEmail = remember { Firebase.auth.currentUser?.email ?: "Admin Lapak" }
+    val signedInEmail = remember(viewModel.currentUserId) {
+        Firebase.auth.currentUser?.email ?: "Admin Lapak"
+    }
     val syncTimeFormatter = remember { SimpleDateFormat("dd MMM HH:mm:ss", Locale("id", "ID")) }
 
     BackHandler {
@@ -621,10 +627,7 @@ fun SettingsScreen(
                                     lastCloudSyncAt = lastCloudSyncAt,
                                     syncTimeFormatter = syncTimeFormatter,
                                     onSignOutClick = {
-                                        scope.launch {
-                                            GoogleAuthHelper.signOut(context)
-                                            onSignedOut()
-                                        }
+                                        onSignedOut()
                                     }
                                 )
                             }

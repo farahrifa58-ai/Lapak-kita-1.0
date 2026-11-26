@@ -156,9 +156,9 @@ object VendorCodeGenerator {
 data class ShopProfile(
     @PrimaryKey val id: Int = 1,
     val shopName: String = "Lapak Kita",
-    val ownerName: String = "Rafline Dev",
-    val whatsappNumber: String = "0812-3456-7890",
-    val address: String = "Jl. Pasar Segar No. 18, Sentra Kuliner Lapak Kita",
+    val ownerName: String = "",
+    val whatsappNumber: String = "",
+    val address: String = "",
     val logoUri: String? = null,
     val footerMessage: String = "Terima kasih atas kunjungan dan kepercayaan Anda!",
     val shopIconKey: String = ShopIconKey.STORE,

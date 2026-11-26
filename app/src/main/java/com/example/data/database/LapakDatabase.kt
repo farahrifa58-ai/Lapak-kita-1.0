@@ -9,9 +9,6 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.dao.LapakDao
 import com.example.data.model.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 @Database(
     entities = [
@@ -36,8 +33,9 @@ abstract class LapakDatabase : RoomDatabase() {
     abstract fun lapakDao(): LapakDao
 
     companion object {
-        @Volatile
-        private var INSTANCE: LapakDatabase? = null
+        const val LEGACY_GLOBAL_DB_NAME = "lapak_kita_database"
+
+        private val userInstances = mutableMapOf<String, LapakDatabase>()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -73,31 +71,78 @@ abstract class LapakDatabase : RoomDatabase() {
             }
         }
 
-        fun getDatabase(context: Context, scope: CoroutineScope): LapakDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
-                    context.applicationContext,
-                    LapakDatabase::class.java,
-                    "lapak_kita_database"
-                )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
-                    .addCallback(LapakDatabaseCallback(scope))
-                    .fallbackToDestructiveMigration()
-                    .build()
-                INSTANCE = instance
-                instance
+        fun sanitizeUidForStorage(uid: String): String {
+            val cleaned = uid.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(64)
+            require(cleaned.isNotBlank()) { "UID akun wajib diisi untuk penyimpanan lokal terisolasi." }
+            return cleaned
+        }
+
+        fun databaseNameForUser(uid: String): String {
+            val safeUid = sanitizeUidForStorage(uid)
+            return "lapakkita_${safeUid}_db"
+        }
+
+        /**
+         * Returns a strictly UID-isolated Room SQLite database (`lapakkita_{uid}_db`) so
+         * operational data (sellers, products, stocks, transactions, expenses, settlements, settings)
+         * can NEVER leak across different accounts logged in on the same device.
+         */
+        fun getDatabaseForUser(context: Context, uid: String): LapakDatabase {
+            val safeUid = sanitizeUidForStorage(uid)
+            return synchronized(this) {
+                val existing = userInstances[safeUid]
+                if (existing != null && existing.isOpen) {
+                    existing
+                } else {
+                    val dbName = "lapakkita_${safeUid}_db"
+                    val instance = Room.databaseBuilder(
+                        context.applicationContext,
+                        LapakDatabase::class.java,
+                        dbName
+                    )
+                        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                        .fallbackToDestructiveMigration()
+                        .build()
+                    userInstances[safeUid] = instance
+                    instance
+                }
             }
         }
 
-        private class LapakDatabaseCallback(
-            private val scope: CoroutineScope
-        ) : RoomDatabase.Callback() {
-            override fun onCreate(db: SupportSQLiteDatabase) {
-                super.onCreate(db)
-                INSTANCE?.let { database ->
-                    scope.launch(Dispatchers.IO) {
-                        populateInitialData(database.lapakDao())
-                    }
+        /**
+         * Closes and evicts the Room database handle for [uid] during logout / account switch.
+         */
+        fun closeUserDatabase(uid: String) {
+            val safeUid = uid.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(64)
+            if (safeUid.isBlank()) return
+            synchronized(this) {
+                userInstances.remove(safeUid)?.let { db ->
+                    runCatching { db.close() }
+                }
+            }
+        }
+
+        fun closeAllDatabases() {
+            synchronized(this) {
+                userInstances.values.forEach { db ->
+                    runCatching { db.close() }
+                }
+                userInstances.clear()
+            }
+        }
+
+        /**
+         * Permanently deletes the old global un-prefixed SQLite database (`lapak_kita_database`)
+         * along with its WAL/SHM/journal files so legacy test data can never bleed into user accounts.
+         */
+        fun deleteLegacyGlobalDatabase(context: Context) {
+            val appContext = context.applicationContext
+            runCatching { appContext.deleteDatabase(LEGACY_GLOBAL_DB_NAME) }
+            val dbFile = appContext.getDatabasePath(LEGACY_GLOBAL_DB_NAME)
+            listOf("", "-wal", "-shm", "-journal").forEach { suffix ->
+                runCatching {
+                    val f = java.io.File(dbFile.path + suffix)
+                    if (f.exists()) f.delete()
                 }
             }
         }
@@ -108,9 +153,9 @@ abstract class LapakDatabase : RoomDatabase() {
                 ShopProfile(
                     id = 1,
                     shopName = "Lapak Kita",
-                    ownerName = "Rafline Dev",
-                    whatsappNumber = "0812-3456-7890",
-                    address = "Jl. Pasar Anyar No. 24, Sentra Kuliner Lapak Kita",
+                    ownerName = "",
+                    whatsappNumber = "",
+                    address = "",
                     footerMessage = "Terima kasih atas kunjungan & kepercayaan Anda berbelanja di Lapak Kita!"
                 )
             )

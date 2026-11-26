@@ -62,6 +62,9 @@ fun SellersScreen(
     var showShareAllLinksDialog by remember { mutableStateOf(false) }
     var editTargetSeller by remember { mutableStateOf<Seller?>(null) }
     var deleteTargetSeller by remember { mutableStateOf<Seller?>(null) }
+    var addProductTargetSellerId by remember { mutableStateOf<Long?>(null) }
+    var editTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
+    var deleteTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
 
     val filteredSellers = remember(sellersWithStats, searchQuery, statusFilter) {
         sellersWithStats.filter { item ->
@@ -248,7 +251,10 @@ fun SellersScreen(
                         onViewReceipt = { viewModel.showLatestPaymentReceipt(item) },
                         onViewStock = { stockDetailTargetSeller = item },
                         onEdit = { editTargetSeller = item.seller },
-                        onDelete = { deleteTargetSeller = item.seller }
+                        onDelete = { deleteTargetSeller = item.seller },
+                        onAddProduct = { addProductTargetSellerId = item.seller.id },
+                        onEditProduct = { prodItem -> editTargetProduct = prodItem },
+                        onDeleteProduct = { prodItem -> deleteTargetProduct = prodItem }
                     )
                 }
             }
@@ -628,15 +634,70 @@ fun SellersScreen(
     }
 
     // Seller Stock Detail Dialog
-    stockDetailTargetSeller?.let { sellerDetail ->
-        val sellerProducts = remember(allProductsWithDetails, sellerDetail.seller.id) {
-            allProductsWithDetails.filter { it.product.sellerId == sellerDetail.seller.id }
+    stockDetailTargetSeller?.let { selectedDetail ->
+        val freshSellerDetail = remember(sellersWithStats, selectedDetail.seller.id) {
+            sellersWithStats.firstOrNull { it.seller.id == selectedDetail.seller.id } ?: selectedDetail
+        }
+        val sellerProducts = remember(allProductsWithDetails, freshSellerDetail.seller.id) {
+            allProductsWithDetails.filter { it.product.sellerId == freshSellerDetail.seller.id }
         }
         SellerStockDetailDialog(
-            sellerDetail = sellerDetail,
+            sellerDetail = freshSellerDetail,
             productsWithStock = sellerProducts,
             lang = lang,
+            onEditProduct = { prodItem -> editTargetProduct = prodItem },
+            onDeleteProduct = { prodItem -> deleteTargetProduct = prodItem },
+            onAddProduct = { addProductTargetSellerId = freshSellerDetail.seller.id },
             onDismiss = { stockDetailTargetSeller = null }
+        )
+    }
+
+    // Add Product Dialog directly from SellersScreen
+    addProductTargetSellerId?.let { targetSellerId ->
+        AddProductDialog(
+            sellers = rawSellers,
+            preselectedSellerId = targetSellerId,
+            appSettings = appSettings,
+            lang = lang,
+            onConfirm = { sellerId, name, cat, unit, sp, ss, initStock ->
+                viewModel.addProduct(sellerId, name, cat, unit, sp, ss, initStock) {
+                    addProductTargetSellerId = null
+                    Toast.makeText(context, "Produk '$name' ditambahkan & disinkronkan ke Web Penyetor", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { addProductTargetSellerId = null }
+        )
+    }
+
+    // Edit Product Dialog directly from SellersScreen
+    editTargetProduct?.let { prodDetail ->
+        EditProductDialog(
+            product = prodDetail.product,
+            seller = prodDetail.seller,
+            appSettings = appSettings,
+            lang = lang,
+            onConfirm = { updated ->
+                viewModel.updateProduct(updated) {
+                    editTargetProduct = null
+                    Toast.makeText(context, "Harga & komisi '${updated.name}' diperbarui ke Web Penyetor", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { editTargetProduct = null }
+        )
+    }
+
+    // Delete Product Dialog directly from SellersScreen
+    deleteTargetProduct?.let { prodDetail ->
+        DeleteConfirmDialog(
+            title = "Hapus Produk",
+            message = "Apakah Anda yakin ingin menghapus produk '${prodDetail.product.name}' milik ${prodDetail.seller.name}? Perubahan akan langsung disinkronkan ke Web Penyetor.",
+            onConfirm = {
+                viewModel.deleteProduct(prodDetail.product) {
+                    deleteTargetProduct = null
+                    Toast.makeText(context, "Produk '${prodDetail.product.name}' dihapus & disinkronkan", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { deleteTargetProduct = null }
         )
     }
 }
@@ -655,7 +716,10 @@ fun SellerCard(
     onViewReceipt: () -> Unit,
     onViewStock: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onAddProduct: () -> Unit,
+    onEditProduct: (ProductDetailItem) -> Unit,
+    onDeleteProduct: (ProductDetailItem) -> Unit
 ) {
     val lapakColors = LocalLapakColors.current
     var isExpandedInline by remember { mutableStateOf(false) }
@@ -758,6 +822,11 @@ fun SellerCard(
                                     showOverflowMenu = false
                                     if (item.seller.status == SellerStatus.LIBUR) onReactivate() else onSetLeave()
                                 }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Tambah Produk Baru") },
+                                leadingIcon = { Icon(Icons.Default.AddCircleOutline, contentDescription = null) },
+                                onClick = { showOverflowMenu = false; onAddProduct() }
                             )
                             DropdownMenuItem(
                                 text = { Text("Edit Penyetor & Tarif") },
@@ -906,7 +975,7 @@ fun SellerCard(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
                                         Text(
                                             text = prodItem.product.name,
                                             style = MaterialTheme.typography.bodySmall,
@@ -914,25 +983,76 @@ fun SellerCard(
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Text(
-                                            text = "Jual ${LapakViewModel.formatRupiah(prodItem.product.sellingPrice)} • Hak ${LapakViewModel.formatRupiah(prodItem.product.sellerShare)} • Laba ${LapakViewModel.formatRupiah(prodItem.product.adminProfitPerUnit)}",
+                                            text = "Jual ${LapakViewModel.formatRupiah(prodItem.product.sellingPrice)} • Hak ${LapakViewModel.formatRupiah(prodItem.product.sellerShare)} • Komisi ${LapakViewModel.formatRupiah(prodItem.product.adminProfitPerUnit)}",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                    Surface(
-                                        color = if (prodItem.currentStock > 0) lapakColors.stockSafeBg else lapakColors.stockEmptyBg,
-                                        shape = RoundedCornerShape(6.dp)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp)
                                     ) {
-                                        Text(
-                                            text = if (prodItem.currentStock > 0) "${prodItem.currentStock} ${prodItem.product.unit}" else "Habis",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (prodItem.currentStock > 0) lapakColors.stockSafeText else lapakColors.stockEmptyText,
-                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                                        )
+                                        Surface(
+                                            color = if (prodItem.currentStock > 0) lapakColors.stockSafeBg else lapakColors.stockEmptyBg,
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text(
+                                                text = if (prodItem.currentStock > 0) "${prodItem.currentStock} ${prodItem.product.unit}" else "Habis",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (prodItem.currentStock > 0) lapakColors.stockSafeText else lapakColors.stockEmptyText,
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { onEditProduct(prodItem) },
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .testTag("edit_seller_product_${prodItem.product.id}")
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Edit,
+                                                contentDescription = "Edit Produk ${prodItem.product.name}",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteProduct(prodItem) },
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .testTag("delete_seller_product_${prodItem.product.id}")
+                                        ) {
+                                            Icon(
+                                                Icons.Default.DeleteOutline,
+                                                contentDescription = "Hapus Produk ${prodItem.product.name}",
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
+                        }
+                        Spacer(Modifier.height(2.dp))
+                        OutlinedButton(
+                            onClick = onAddProduct,
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 38.dp)
+                                .testTag("add_product_for_seller_${item.seller.id}")
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "Tambah Produk untuk ${item.seller.name}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }

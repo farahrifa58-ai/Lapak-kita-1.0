@@ -17,14 +17,24 @@ import com.example.data.firebase.VendorSyncRepository
 import com.example.data.model.*
 import com.example.data.repository.*
 import com.example.i18n.AppStrings
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class AppScreen {
     DASHBOARD,
@@ -44,6 +54,7 @@ data class SellerPayoutReceiptState(
     val soldItems: List<SoldItemSummary> = emptyList()
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class LapakViewModel(
     private val repository: LapakRepository,
     private val vendorSyncRepository: VendorSyncRepository,
@@ -51,8 +62,84 @@ class LapakViewModel(
     private val activationAuthRepository: ActivationAuthRepository,
     private val licenseStorage: LicenseStorage,
     val currentUserId: String,
-    private val currentDeviceId: String = licenseStorage.getDeviceId()
+    private val currentDeviceId: String = licenseStorage.getDeviceId(),
+    private val initialBusinessName: String? = null
 ) : ViewModel() {
+
+    private val sessionActiveFlag = AtomicBoolean(true)
+    private val cloudHydratedFlag = AtomicBoolean(false)
+    private val _sessionActive = MutableStateFlow(true)
+
+    private val jobsLock = Any()
+    private val listenerJobs = mutableListOf<Job>()
+    private val backgroundJobs = mutableListOf<Job>()
+    private val sellerSyncMutexes = ConcurrentHashMap<Long, Mutex>()
+
+    private fun isActiveAuthenticatedSession(): Boolean {
+        return sessionActiveFlag.get() &&
+            currentUserId.isNotBlank() &&
+            Firebase.auth.currentUser?.uid == currentUserId
+    }
+
+    private fun trackListenerJob(job: Job) {
+        synchronized(jobsLock) {
+            if (!sessionActiveFlag.get()) {
+                job.cancel()
+            } else {
+                listenerJobs.add(job)
+            }
+        }
+    }
+
+    private fun trackBackgroundJob(job: Job) {
+        synchronized(jobsLock) {
+            if (!sessionActiveFlag.get()) {
+                job.cancel()
+            } else {
+                backgroundJobs.removeAll { !it.isActive }
+                backgroundJobs.add(job)
+            }
+        }
+    }
+
+    /**
+     * Immediately unsubscribes all active Firestore `onSnapshot` listeners, cancels any in-flight
+     * sync/watcher jobs, and resets every in-memory UI state flow back to empty/default values.
+     * Must be invoked BEFORE `Firebase.auth.signOut()` or switching to another account UID.
+     */
+    fun teardownSessionAndUnsubscribe() {
+        sessionActiveFlag.set(false)
+        cloudHydratedFlag.set(false)
+        _sessionActive.value = false
+
+        synchronized(jobsLock) {
+            listenerJobs.forEach { it.cancel() }
+            listenerJobs.clear()
+            backgroundJobs.forEach { it.cancel() }
+            backgroundJobs.clear()
+        }
+
+        processedSubmissionIds.clear()
+        _currentScreen.value = AppScreen.DASHBOARD
+        _connectedDevicesCount.value = 1
+        _webSyncNotification.value = null
+        _isSyncingCloud.value = false
+        _lastCloudSyncAt.value = null
+        _cartWarningMessage.value = null
+        _timeframe.value = "TODAY"
+        _financialPeriodFilter.value = FinancialPeriodFilter()
+        _isSyncingFinancials.value = false
+        _cart.value = emptyList()
+        _cashReceivedText.value = ""
+        _paymentMethod.value = "Tunai"
+        _lastCompletedTransaction.value = null
+        _lastSellerPaymentReceipt.value = null
+    }
+
+    override fun onCleared() {
+        teardownSessionAndUnsubscribe()
+        super.onCleared()
+    }
 
     // Navigation
     private val _currentScreen = MutableStateFlow(AppScreen.DASHBOARD)
@@ -63,7 +150,9 @@ class LapakViewModel(
     }
 
     // Multi-Device Real-Time Sync Status ("Perangkat Terhubung: X / 2 HP")
-    private val _connectedDevicesCount = MutableStateFlow(licenseStorage.getCachedConnectedDevicesCount())
+    private val _connectedDevicesCount = MutableStateFlow(
+        licenseStorage.getCachedConnectedDevicesCount(currentUserId)
+    )
     val connectedDevicesCount: StateFlow<Int> = _connectedDevicesCount.asStateFlow()
 
     // Real-time Web Penyetor Sync Status & Notification Banner
@@ -79,7 +168,7 @@ class LapakViewModel(
     private val _cartWarningMessage = MutableStateFlow<String?>(null)
     val cartWarningMessage: StateFlow<String?> = _cartWarningMessage.asStateFlow()
 
-    private val processedSubmissionIds = mutableSetOf<String>()
+    private val processedSubmissionIds = Collections.synchronizedSet(mutableSetOf<String>())
 
     fun dismissWebSyncNotification() {
         _webSyncNotification.value = null
@@ -90,13 +179,17 @@ class LapakViewModel(
     }
 
     // Settings & Profile
-    val shopProfile: StateFlow<ShopProfile> = repository.shopProfile.stateIn(
+    val shopProfile: StateFlow<ShopProfile> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(ShopProfile()) else repository.shopProfile
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         ShopProfile()
     )
 
-    val appSettings: StateFlow<AppSettings> = repository.appSettings.stateIn(
+    val appSettings: StateFlow<AppSettings> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(AppSettings()) else repository.appSettings
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         AppSettings()
@@ -307,44 +400,53 @@ class LapakViewModel(
         _timeframe.value = tf
     }
 
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    val dashboardSummary: StateFlow<DashboardSummary> = _timeframe.flatMapLatest { tf ->
-        repository.getDashboardSummary(tf)
+    private val emptyDashboardSummary = DashboardSummary(
+        totalOmzet = 0.0,
+        totalSellerShare = 0.0,
+        grossAdminProfit = 0.0,
+        operatingExpenses = 0.0,
+        netAdminProfit = 0.0,
+        totalItemsSold = 0,
+        activeSellersCount = 0,
+        leaveSellersCount = 0,
+        availableStockCount = 0,
+        totalUnpaidSellerPayables = 0.0,
+        topSellingProducts = emptyList(),
+        lowStockProducts = emptyList(),
+        dailyTrend = emptyList()
+    )
+
+    val dashboardSummary: StateFlow<DashboardSummary> = combine(_sessionActive, _timeframe) { active, tf ->
+        active to tf
+    }.flatMapLatest { (active, tf) ->
+        if (!active) flowOf(emptyDashboardSummary) else repository.getDashboardSummary(tf)
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
-        DashboardSummary(
-            totalOmzet = 0.0,
-            totalSellerShare = 0.0,
-            grossAdminProfit = 0.0,
-            operatingExpenses = 0.0,
-            netAdminProfit = 0.0,
-            totalItemsSold = 0,
-            activeSellersCount = 0,
-            leaveSellersCount = 0,
-            availableStockCount = 0,
-            totalUnpaidSellerPayables = 0.0,
-            topSellingProducts = emptyList(),
-            lowStockProducts = emptyList(),
-            dailyTrend = emptyList()
-        )
+        emptyDashboardSummary
     )
 
     // Products & Stock
-    val productsWithDetails: StateFlow<List<ProductDetailItem>> = repository.productsWithDetails.stateIn(
+    val productsWithDetails: StateFlow<List<ProductDetailItem>> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(emptyList()) else repository.productsWithDetails
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         emptyList()
     )
 
     // Sellers
-    val sellersWithStats: StateFlow<List<SellerDetailItem>> = repository.sellersWithStats.stateIn(
+    val sellersWithStats: StateFlow<List<SellerDetailItem>> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(emptyList()) else repository.sellersWithStats
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         emptyList()
     )
 
-    val rawSellers: StateFlow<List<Seller>> = repository.allSellers.stateIn(
+    val rawSellers: StateFlow<List<Seller>> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(emptyList()) else repository.allSellers
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         emptyList()
@@ -361,41 +463,56 @@ class LapakViewModel(
         _financialPeriodFilter.value = filter
     }
 
-    val financialReport: StateFlow<FinancialReportSnapshot> = combine(
-        _financialPeriodFilter,
-        repository.allSellers,
-        repository.financialData
-    ) { filter, sellers, fin ->
-        FinancialReportBuilder.buildReport(
-            filter = filter,
-            sellers = sellers,
-            transactions = fin.transactions,
-            transactionItems = fin.items,
-            expenses = fin.expenses,
-            payments = fin.payments
-        )
+    private val emptyFinancialReport = FinancialReportBuilder.buildReport(
+        filter = FinancialPeriodFilter(),
+        sellers = emptyList(),
+        transactions = emptyList(),
+        transactionItems = emptyList(),
+        expenses = emptyList(),
+        payments = emptyList()
+    )
+
+    val financialReport: StateFlow<FinancialReportSnapshot> = _sessionActive.flatMapLatest { active ->
+        if (!active) {
+            flowOf(emptyFinancialReport)
+        } else {
+            combine(
+                _financialPeriodFilter,
+                repository.allSellers,
+                repository.financialData
+            ) { filter, sellers, fin ->
+                FinancialReportBuilder.buildReport(
+                    filter = filter,
+                    sellers = sellers,
+                    transactions = fin.transactions,
+                    transactionItems = fin.items,
+                    expenses = fin.expenses,
+                    payments = fin.payments
+                )
+            }
+        }
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
-        FinancialReportBuilder.buildReport(
-            filter = FinancialPeriodFilter(),
-            sellers = emptyList(),
-            transactions = emptyList(),
-            transactionItems = emptyList(),
-            expenses = emptyList(),
-            payments = emptyList()
-        )
+        emptyFinancialReport
     )
 
     init {
-        // 1. Migrate legacy preview URL if present, ensure all sellers have valid vendorCode & writeToken, and push initial snapshot to Firestore
-        viewModelScope.launch {
+        // Cloud-First Isolated Initialization:
+        // 1. Ensure clean default ShopProfile & AppSettings (NO sample demo data injection!)
+        // 2. Pull cloud data from `users/{currentUserId}/...` FIRST before pushing anything
+        // 3. Start real-time Firestore `onSnapshot` listeners tracked for immediate teardown on logout
+        // 4. Only upload genuinely non-empty offline-created local records missing from cloud
+        val startupJob = viewModelScope.launch {
+            if (!sessionActiveFlag.get()) return@launch
+            repository.ensureDefaultProfileAndSettings(initialBusinessName)
+
             val currentSettings = repository.appSettings.first()
             val cleanUrl = sanitizeWebPortalBaseUrl(currentSettings.webPortalBaseUrl)
             if (cleanUrl != currentSettings.webPortalBaseUrl) {
                 repository.updateAppSettings(currentSettings.copy(webPortalBaseUrl = cleanUrl))
             }
-            repository.ensureSampleKitchensSeeded()
+
             repository.ensureAllSellersHaveVendorCodes()
             val startupReset = repository.checkAndRunAutoStockResetIfNeeded()
             if (startupReset != null && startupReset.resetProductsCount > 0) {
@@ -406,180 +523,333 @@ class LapakViewModel(
                 _webSyncNotification.value =
                     "Auto-Reset Harian ($hourLabel WIB): ${startupReset.resetProductsCount} produk (${startupReset.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
             }
-            delay(300)
-            syncAllVendorsToCloud()
-            syncAllFinancialDataWithCloud()
+
+            // Step 2: Hydrate from Firestore FIRST for this exact UID (NEVER upload empty/stale state first!)
+            var cloudVendorCodes = emptySet<String>()
+            var cloudTrxNumbers = emptySet<String>()
+            var cloudExpenseKeys = emptySet<String>()
+            var cloudPaymentKeys = emptySet<String>()
+            var vendorsFetchedOk = false
+            var financialFetchedOk = false
+
+            if (isActiveAuthenticatedSession()) {
+                val cloudVendorsRes = financialSyncRepository.fetchCloudVendorsCatalog(currentUserId)
+                if (cloudVendorsRes.isSuccess && isActiveAuthenticatedSession()) {
+                    val remoteVendors = cloudVendorsRes.getOrThrow()
+                    vendorsFetchedOk = true
+                    cloudVendorCodes = remoteVendors.map { it.vendorCode.trim().uppercase() }.toSet()
+                    if (remoteVendors.isNotEmpty()) {
+                        val merged = repository.mergeCloudVendorsCatalog(
+                            vendors = remoteVendors,
+                            currentDeviceId = currentDeviceId,
+                            ignoreSourceDeviceCheck = true
+                        )
+                        if (merged > 0) {
+                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        }
+                    }
+                }
+
+                val cloudFinancialRes = financialSyncRepository.fetchAllCloudFinancialData(currentUserId)
+                if (cloudFinancialRes.isSuccess && isActiveAuthenticatedSession()) {
+                    val bundle = cloudFinancialRes.getOrThrow()
+                    financialFetchedOk = true
+                    cloudTrxNumbers = bundle.transactions.map { it.transactionNumber.trim() }.toSet()
+                    cloudExpenseKeys = bundle.expenses.map {
+                        "${it.expenseDateMillis}|${it.title.trim().lowercase()}|${it.amount.toLong()}"
+                    }.toSet()
+                    cloudPaymentKeys = bundle.settlements.map {
+                        "${it.paymentDateMillis}|${it.sellerName.trim().lowercase()}|${it.amount.toLong()}"
+                    }.toSet()
+                    if (bundle.transactions.isNotEmpty() || bundle.expenses.isNotEmpty() || bundle.settlements.isNotEmpty()) {
+                        val mergedFin = repository.mergeCloudFinancialData(bundle)
+                        if (mergedFin > 0) {
+                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        }
+                    }
+                }
+            }
+
+            if (!sessionActiveFlag.get()) return@launch
+            cloudHydratedFlag.set(true)
+
+            // Step 3: Start tracked real-time Firestore listeners & operational watcher
+            startWebSubmissionsListener()
+            startMultiDeviceRealtimeListeners()
+            startOperationalCycleWatcher()
+
+            // Step 4: Only push non-empty local-only records that were created offline & not yet on cloud
+            if (vendorsFetchedOk && financialFetchedOk && isActiveAuthenticatedSession()) {
+                pushLocalUnsyncedRecordsAfterHydration(
+                    existingCloudVendorCodes = cloudVendorCodes,
+                    existingCloudTrxNumbers = cloudTrxNumbers,
+                    existingCloudExpenseKeys = cloudExpenseKeys,
+                    existingCloudPaymentKeys = cloudPaymentKeys
+                )
+            }
         }
-        // 2. Start real-time Firestore listener for incoming Web Penyetor submissions
-        startWebSubmissionsListener()
-        // 3. Start real-time Firestore listeners (MetadataChanges.INCLUDE) for 2-HP live sync
-        startMultiDeviceRealtimeListeners()
-        // 4. Start operational cycle watcher (checks every 60 seconds for 17:00 WIB rollover)
-        startOperationalCycleWatcher()
+        trackBackgroundJob(startupJob)
+    }
+
+    private suspend fun pushLocalUnsyncedRecordsAfterHydration(
+        existingCloudVendorCodes: Set<String>,
+        existingCloudTrxNumbers: Set<String>,
+        existingCloudExpenseKeys: Set<String>,
+        existingCloudPaymentKeys: Set<String>
+    ) {
+        if (!isActiveAuthenticatedSession() || !cloudHydratedFlag.get()) return
+
+        val sellers = repository.sellersWithStats.first()
+        val products = repository.productsWithDetails.first()
+        val profile = repository.shopProfile.first()
+        val settings = repository.appSettings.first()
+
+        // Only push local sellers that are not yet present in cloud (never upload empty state)
+        for (sellerDetail in sellers) {
+            if (!isActiveAuthenticatedSession()) return
+            val code = sellerDetail.seller.vendorCode.trim().uppercase()
+            if (code.isBlank() || code in existingCloudVendorCodes) continue
+            val directSnapshot = repository.getSellerSyncSnapshotDirect(sellerDetail.seller.id) ?: continue
+            syncSellerSnapshotConcurrently(directSnapshot)
+        }
+
+        val snapshot = repository.getFinancialSyncSnapshot()
+        val sellersById = snapshot.sellers.associateBy { it.id }
+        val sellerStatusById = sellers.associate { it.seller.id to it.paymentStatus }
+
+        for (trx in snapshot.transactions) {
+            if (!isActiveAuthenticatedSession()) return
+            if (trx.transactionNumber.trim() in existingCloudTrxNumbers) continue
+            val trxItems = snapshot.itemsByTransactionId[trx.id].orEmpty()
+            financialSyncRepository.syncTransactionToFirestore(
+                transaction = trx,
+                items = trxItems,
+                expectedUid = currentUserId
+            )
+        }
+
+        for (exp in snapshot.expenses) {
+            if (!isActiveAuthenticatedSession()) return
+            val key = "${exp.expenseDate}|${exp.title.trim().lowercase()}|${exp.amount.toLong()}"
+            if (key in existingCloudExpenseKeys) continue
+            financialSyncRepository.syncExpenseToFirestore(
+                expense = exp,
+                expectedUid = currentUserId
+            )
+        }
+
+        for (pay in snapshot.payments) {
+            if (!isActiveAuthenticatedSession()) return
+            val seller = sellersById[pay.sellerId]
+            val sellerNameKey = seller?.name?.trim()?.lowercase().orEmpty()
+            val key = "${pay.paymentDate}|$sellerNameKey|${pay.amount.toLong()}"
+            if (key in existingCloudPaymentKeys) continue
+            val status = sellerStatusById[pay.sellerId] ?: "SEBAGIAN"
+            financialSyncRepository.syncSettlementToFirestore(
+                payment = pay,
+                seller = seller,
+                status = status,
+                expectedUid = currentUserId
+            )
+        }
     }
 
     /**
      * Live real-time `onSnapshot` listeners (with MetadataChanges.INCLUDE) under `users/{uid}`
      * so transactions, products, consignment stocks, settlements, expenses, and connected device count
      * stay synchronized instantly between HP Kasir and HP Owner without manual refresh.
+     * Every listener job is tracked in [listenerJobs] for instant cancellation on Logout / UID switch.
      */
     private fun startMultiDeviceRealtimeListeners() {
+        if (!isActiveAuthenticatedSession()) return
+
         // 1. Live connected devices counter ("Perangkat Terhubung: X / 2 HP")
-        viewModelScope.launch {
-            activationAuthRepository.observeUserProfile(currentUserId).collect { profile ->
-                if (profile != null) {
-                    val count = profile.connectedDevicesCount.coerceIn(1, ActivationAuthRepository.MAX_REGISTERED_DEVICES)
-                    _connectedDevicesCount.value = count
-                    licenseStorage.updateConnectedDevicesCount(count)
+        trackListenerJob(
+            viewModelScope.launch {
+                activationAuthRepository.observeUserProfile(currentUserId).collect { profile ->
+                    if (!isActiveAuthenticatedSession()) return@collect
+                    if (profile != null) {
+                        val count = profile.connectedDevicesCount.coerceIn(1, ActivationAuthRepository.MAX_REGISTERED_DEVICES)
+                        _connectedDevicesCount.value = count
+                        licenseStorage.updateConnectedDevicesCount(currentUserId, count)
+                    }
                 }
             }
-        }
+        )
 
         // 2. Real-time sellers, products & consignment stock catalog
-        viewModelScope.launch {
-            try {
-                financialSyncRepository.observeVendorsCatalogRealtime(currentUserId).collect { remoteVendors ->
-                    val changed = repository.mergeCloudVendorsCatalog(remoteVendors, currentDeviceId)
-                    if (changed > 0) {
-                        _lastCloudSyncAt.value = System.currentTimeMillis()
+        trackListenerJob(
+            viewModelScope.launch {
+                try {
+                    financialSyncRepository.observeVendorsCatalogRealtime(currentUserId).collect { remoteVendors ->
+                        if (!isActiveAuthenticatedSession()) return@collect
+                        val changed = repository.mergeCloudVendorsCatalog(remoteVendors, currentDeviceId)
+                        if (changed > 0) {
+                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("LapakViewModel", "Realtime vendors catalog listener error: ${e.message}")
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w("LapakViewModel", "Realtime vendors catalog listener error: ${e.message}")
             }
-        }
+        )
 
         // 3. Real-time cashier transactions
-        viewModelScope.launch {
-            try {
-                financialSyncRepository.observeTransactionsChronological(currentUserId).collect { remoteTrxs ->
-                    val changed = repository.mergeCloudTransactions(remoteTrxs)
-                    if (changed > 0) {
-                        _lastCloudSyncAt.value = System.currentTimeMillis()
+        trackListenerJob(
+            viewModelScope.launch {
+                try {
+                    financialSyncRepository.observeTransactionsChronological(currentUserId).collect { remoteTrxs ->
+                        if (!isActiveAuthenticatedSession()) return@collect
+                        val changed = repository.mergeCloudTransactions(remoteTrxs)
+                        if (changed > 0) {
+                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("LapakViewModel", "Realtime transactions listener error: ${e.message}")
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w("LapakViewModel", "Realtime transactions listener error: ${e.message}")
             }
-        }
+        )
 
         // 4. Real-time operating expenses
-        viewModelScope.launch {
-            try {
-                financialSyncRepository.observeExpensesRealtime(currentUserId).collect { remoteExps ->
-                    val changed = repository.mergeCloudExpenses(remoteExps)
-                    if (changed > 0) {
-                        _lastCloudSyncAt.value = System.currentTimeMillis()
+        trackListenerJob(
+            viewModelScope.launch {
+                try {
+                    financialSyncRepository.observeExpensesRealtime(currentUserId).collect { remoteExps ->
+                        if (!isActiveAuthenticatedSession()) return@collect
+                        val changed = repository.mergeCloudExpenses(remoteExps)
+                        if (changed > 0) {
+                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("LapakViewModel", "Realtime expenses listener error: ${e.message}")
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w("LapakViewModel", "Realtime expenses listener error: ${e.message}")
             }
-        }
+        )
 
         // 5. Real-time seller payout settlements
-        viewModelScope.launch {
-            try {
-                financialSyncRepository.observeSettlementsRealtime(currentUserId).collect { remoteSettlements ->
-                    val changed = repository.mergeCloudSettlements(remoteSettlements)
-                    if (changed > 0) {
-                        _lastCloudSyncAt.value = System.currentTimeMillis()
+        trackListenerJob(
+            viewModelScope.launch {
+                try {
+                    financialSyncRepository.observeSettlementsRealtime(currentUserId).collect { remoteSettlements ->
+                        if (!isActiveAuthenticatedSession()) return@collect
+                        val changed = repository.mergeCloudSettlements(remoteSettlements)
+                        if (changed > 0) {
+                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("LapakViewModel", "Realtime settlements listener error: ${e.message}")
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w("LapakViewModel", "Realtime settlements listener error: ${e.message}")
             }
-        }
+        )
     }
 
     private fun startOperationalCycleWatcher() {
-        viewModelScope.launch {
-            while (true) {
-                delay(60_000)
-                val resetResult = repository.checkAndRunAutoStockResetIfNeeded()
-                if (resetResult != null) {
-                    clearCart()
-                    delay(150)
-                    syncAllVendorsToCloud()
-                    val hourLabel = OperationalCycleHelper.formatResetHour(appSettings.value.autoResetHour)
-                    _webSyncNotification.value = if (resetResult.resetProductsCount > 0) {
-                        "Auto-Reset Harian ($hourLabel WIB): ${resetResult.resetProductsCount} produk (${resetResult.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
-                    } else {
-                        "Siklus operasional baru dimulai ($hourLabel WIB) • Siap menerima kiriman stok."
+        trackBackgroundJob(
+            viewModelScope.launch {
+                while (sessionActiveFlag.get()) {
+                    delay(60_000)
+                    if (!sessionActiveFlag.get()) break
+                    val resetResult = repository.checkAndRunAutoStockResetIfNeeded()
+                    if (resetResult != null && sessionActiveFlag.get()) {
+                        clearCart()
+                        delay(150)
+                        syncAllVendorsToCloud()
+                        val hourLabel = OperationalCycleHelper.formatResetHour(appSettings.value.autoResetHour)
+                        _webSyncNotification.value = if (resetResult.resetProductsCount > 0) {
+                            "Auto-Reset Harian ($hourLabel WIB): ${resetResult.resetProductsCount} produk (${resetResult.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
+                        } else {
+                            "Siklus operasional baru dimulai ($hourLabel WIB) • Siap menerima kiriman stok."
+                        }
                     }
                 }
             }
-        }
+        )
     }
 
     private fun startWebSubmissionsListener() {
-        viewModelScope.launch {
-            try {
-                vendorSyncRepository.observePendingSubmissions(currentUserId).collect { pendingList ->
-                    for (sub in pendingList) {
-                        if (sub.submissionId in processedSubmissionIds) continue
-                        processedSubmissionIds.add(sub.submissionId)
-                        handleIncomingWebSubmission(sub)
+        if (!isActiveAuthenticatedSession()) return
+        trackListenerJob(
+            viewModelScope.launch {
+                try {
+                    vendorSyncRepository.observePendingSubmissions(currentUserId).collect { pendingList ->
+                        if (!isActiveAuthenticatedSession()) return@collect
+                        for (sub in pendingList) {
+                            if (!isActiveAuthenticatedSession()) break
+                            if (sub.ownerUid != currentUserId) continue
+                            if (sub.submissionId in processedSubmissionIds) continue
+                            processedSubmissionIds.add(sub.submissionId)
+                            handleIncomingWebSubmission(sub)
+                        }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: FirebaseFirestoreException) {
+                    Log.e("LapakViewModel", "Firestore submission listener error: ${e.message}", e)
+                } catch (e: Exception) {
+                    Log.e("LapakViewModel", "Submission listener error: ${e.message}", e)
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: FirebaseFirestoreException) {
-                Log.e("LapakViewModel", "Firestore submission listener error: ${e.message}", e)
-            } catch (e: Exception) {
-                Log.e("LapakViewModel", "Submission listener error: ${e.message}", e)
             }
-        }
+        )
     }
 
     private suspend fun handleIncomingWebSubmission(submission: VendorSubmissionRemote) {
+        if (!isActiveAuthenticatedSession() || submission.ownerUid != currentUserId) return
         val applyResult = repository.applyWebVendorSubmission(submission)
         if (applyResult.isSuccess) {
             val message = applyResult.getOrNull() ?: "Pembaruan dari Web Penyetor diterima"
-            vendorSyncRepository.markSubmissionStatus(submission.submissionId, "PROCESSED")
-            // Give Room flows a beat to refresh before pushing updated products & stock back to Firestore
-            delay(200)
-            syncVendorByCodeToCloud(submission.vendorCode, submission.submissionId)
-            _webSyncNotification.value = message
+            vendorSyncRepository.markSubmissionStatus(
+                submissionId = submission.submissionId,
+                status = "PROCESSED",
+                expectedUid = currentUserId
+            )
+            if (isActiveAuthenticatedSession()) {
+                syncVendorByCodeToCloud(submission.vendorCode, submission.submissionId)
+                _webSyncNotification.value = message
+            }
         } else {
             Log.w("LapakViewModel", "Submission ${submission.submissionId} rejected: ${applyResult.exceptionOrNull()?.message}")
-            vendorSyncRepository.markSubmissionStatus(submission.submissionId, "REJECTED")
+            vendorSyncRepository.markSubmissionStatus(
+                submissionId = submission.submissionId,
+                status = "REJECTED",
+                expectedUid = currentUserId
+            )
         }
     }
 
     fun syncAllVendorsToCloud(onComplete: ((Boolean, String) -> Unit)? = null) {
-        viewModelScope.launch {
+        if (!isActiveAuthenticatedSession()) {
+            onComplete?.invoke(false, "Sesi akun tidak aktif.")
+            return
+        }
+        val job = viewModelScope.launch {
             _isSyncingCloud.value = true
             try {
+                if (!isActiveAuthenticatedSession()) return@launch
                 repository.ensureAllSellersHaveVendorCodes()
-                val sellers = repository.sellersWithStats.first()
-                val products = repository.productsWithDetails.first()
-                val profile = repository.shopProfile.first()
-                val settings = repository.appSettings.first()
+                val sellers = repository.allSellers.first()
+                if (sellers.isEmpty()) {
+                    _lastCloudSyncAt.value = System.currentTimeMillis()
+                    onComplete?.invoke(true, "Belum ada penyetor lokal untuk disinkronkan.")
+                    return@launch
+                }
 
                 var successCount = 0
                 var lastError: String? = null
-                for (sellerDetail in sellers) {
-                    val sellerProds = products.filter { it.product.sellerId == sellerDetail.seller.id }
-                    val res = vendorSyncRepository.syncVendorToFirestore(
-                        sellerDetail = sellerDetail,
-                        sellerProducts = sellerProds,
-                        shopProfile = profile,
-                        appSettings = settings
-                    )
-                    financialSyncRepository.syncVendorCatalogToUserCloud(
-                        sellerDetail = sellerDetail,
-                        sellerProducts = sellerProds,
-                        sourceDeviceId = currentDeviceId
-                    )
+                for (seller in sellers) {
+                    if (!isActiveAuthenticatedSession()) return@launch
+                    val directSnapshot = repository.getSellerSyncSnapshotDirect(seller.id) ?: continue
+                    val res = syncSellerSnapshotConcurrently(directSnapshot)
                     if (res.isSuccess) {
                         successCount++
                     } else {
@@ -601,25 +871,42 @@ class LapakViewModel(
                 _isSyncingCloud.value = false
             }
         }
+        trackBackgroundJob(job)
     }
 
     /**
      * Two-way Firestore financial synchronization:
      * 1. Pulls chronological transactions, operating expenses, and seller settlements from Firestore
      *    and merges any missing records into local Room DB (new-device cross-device recovery).
-     * 2. Pushes local transactions, expenses, and settlements to Firestore (`lapak_transactions`,
-     *    `lapak_expenses`, `lapak_settlements`).
+     * 2. Pushes non-empty local transactions, expenses, and settlements to Firestore strictly under
+     *    `users/{currentUserId}/...` after verifying active UID match.
      */
     fun syncAllFinancialDataWithCloud(onComplete: ((Boolean, String) -> Unit)? = null) {
-        viewModelScope.launch {
+        if (!isActiveAuthenticatedSession()) {
+            onComplete?.invoke(false, "Sesi akun tidak aktif.")
+            return
+        }
+        val job = viewModelScope.launch {
             _isSyncingFinancials.value = true
             try {
+                if (!isActiveAuthenticatedSession()) return@launch
                 var pulledCount = 0
-                val cloudFetch = financialSyncRepository.fetchAllCloudFinancialData(currentUserId)
-                if (cloudFetch.isSuccess) {
-                    val bundle = cloudFetch.getOrThrow()
-                    pulledCount = repository.mergeCloudFinancialData(bundle)
+                val cloudVendors = financialSyncRepository.fetchCloudVendorsCatalog(currentUserId)
+                if (cloudVendors.isSuccess && isActiveAuthenticatedSession()) {
+                    pulledCount += repository.mergeCloudVendorsCatalog(
+                        vendors = cloudVendors.getOrThrow(),
+                        currentDeviceId = currentDeviceId,
+                        ignoreSourceDeviceCheck = true
+                    )
                 }
+
+                val cloudFetch = financialSyncRepository.fetchAllCloudFinancialData(currentUserId)
+                if (cloudFetch.isSuccess && isActiveAuthenticatedSession()) {
+                    val bundle = cloudFetch.getOrThrow()
+                    pulledCount += repository.mergeCloudFinancialData(bundle)
+                }
+
+                if (!isActiveAuthenticatedSession()) return@launch
 
                 val snapshot = repository.getFinancialSyncSnapshot()
                 val sellersById = snapshot.sellers.associateBy { it.id }
@@ -631,20 +918,23 @@ class LapakViewModel(
                 var uploadedPay = 0
 
                 for (trx in snapshot.transactions) {
+                    if (!isActiveAuthenticatedSession()) return@launch
                     val trxItems = snapshot.itemsByTransactionId[trx.id].orEmpty()
-                    if (financialSyncRepository.syncTransactionToFirestore(trx, trxItems).isSuccess) {
+                    if (financialSyncRepository.syncTransactionToFirestore(trx, trxItems, expectedUid = currentUserId).isSuccess) {
                         uploadedTrx++
                     }
                 }
                 for (exp in snapshot.expenses) {
-                    if (financialSyncRepository.syncExpenseToFirestore(exp).isSuccess) {
+                    if (!isActiveAuthenticatedSession()) return@launch
+                    if (financialSyncRepository.syncExpenseToFirestore(exp, expectedUid = currentUserId).isSuccess) {
                         uploadedExp++
                     }
                 }
                 for (pay in snapshot.payments) {
+                    if (!isActiveAuthenticatedSession()) return@launch
                     val seller = sellersById[pay.sellerId]
                     val status = sellerStatusById[pay.sellerId] ?: "SEBAGIAN"
-                    if (financialSyncRepository.syncSettlementToFirestore(pay, seller, status).isSuccess) {
+                    if (financialSyncRepository.syncSettlementToFirestore(pay, seller, status, expectedUid = currentUserId).isSuccess) {
                         uploadedPay++
                     }
                 }
@@ -664,33 +954,67 @@ class LapakViewModel(
                 _isSyncingFinancials.value = false
             }
         }
+        trackBackgroundJob(job)
+    }
+
+    private suspend fun syncSellerSnapshotConcurrently(
+        snapshot: SellerCloudSyncSnapshot,
+        lastProcessedSubmissionId: String = ""
+    ): Result<Unit> {
+        if (!isActiveAuthenticatedSession()) {
+            return Result.failure(IllegalStateException("Sesi akun tidak aktif"))
+        }
+        val mutex = sellerSyncMutexes.computeIfAbsent(snapshot.sellerDetail.seller.id) { Mutex() }
+        return mutex.withLock {
+            if (!isActiveAuthenticatedSession()) {
+                return@withLock Result.failure(IllegalStateException("Sesi akun tidak aktif"))
+            }
+            coroutineScope {
+                val publicPortalDeferred = async {
+                    vendorSyncRepository.syncVendorToFirestore(
+                        sellerDetail = snapshot.sellerDetail,
+                        sellerProducts = snapshot.sellerProducts,
+                        shopProfile = snapshot.shopProfile,
+                        appSettings = snapshot.appSettings,
+                        lastProcessedSubmissionId = lastProcessedSubmissionId,
+                        expectedUid = currentUserId
+                    )
+                }
+                val userCatalogDeferred = async {
+                    financialSyncRepository.syncVendorCatalogToUserCloud(
+                        sellerDetail = snapshot.sellerDetail,
+                        sellerProducts = snapshot.sellerProducts,
+                        sourceDeviceId = currentDeviceId,
+                        expectedUid = currentUserId
+                    )
+                }
+                val publicResult = publicPortalDeferred.await()
+                val userCatalogResult = userCatalogDeferred.await()
+                if (userCatalogResult.isFailure) {
+                    Log.w(
+                        "LapakViewModel",
+                        "User cloud vendor catalog sync warning: ${userCatalogResult.exceptionOrNull()?.message}"
+                    )
+                }
+                publicResult
+            }
+        }
     }
 
     fun syncSingleSellerToCloud(sellerId: Long, onComplete: ((Boolean) -> Unit)? = null) {
-        viewModelScope.launch {
+        if (!isActiveAuthenticatedSession()) {
+            onComplete?.invoke(false)
+            return
+        }
+        val job = viewModelScope.launch {
             _isSyncingCloud.value = true
             try {
-                repository.ensureAllSellersHaveVendorCodes()
-                delay(120)
-                val sellers = repository.sellersWithStats.first()
-                val target = sellers.firstOrNull { it.seller.id == sellerId } ?: run {
+                if (!isActiveAuthenticatedSession()) return@launch
+                val snapshot = repository.getSellerSyncSnapshotDirect(sellerId) ?: run {
                     onComplete?.invoke(false)
                     return@launch
                 }
-                val products = repository.productsWithDetails.first().filter { it.product.sellerId == sellerId }
-                val profile = repository.shopProfile.first()
-                val settings = repository.appSettings.first()
-                val res = vendorSyncRepository.syncVendorToFirestore(
-                    sellerDetail = target,
-                    sellerProducts = products,
-                    shopProfile = profile,
-                    appSettings = settings
-                )
-                financialSyncRepository.syncVendorCatalogToUserCloud(
-                    sellerDetail = target,
-                    sellerProducts = products,
-                    sourceDeviceId = currentDeviceId
-                )
+                val res = syncSellerSnapshotConcurrently(snapshot)
                 if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
                 onComplete?.invoke(res.isSuccess)
             } catch (e: CancellationException) {
@@ -702,26 +1026,13 @@ class LapakViewModel(
                 _isSyncingCloud.value = false
             }
         }
+        trackBackgroundJob(job)
     }
 
     private suspend fun syncVendorByCodeToCloud(vendorCode: String, lastProcessedSubmissionId: String) {
-        val sellers = repository.sellersWithStats.first()
-        val target = sellers.firstOrNull { it.seller.vendorCode == vendorCode } ?: return
-        val products = repository.productsWithDetails.first().filter { it.product.sellerId == target.seller.id }
-        val profile = repository.shopProfile.first()
-        val settings = repository.appSettings.first()
-        val res = vendorSyncRepository.syncVendorToFirestore(
-            sellerDetail = target,
-            sellerProducts = products,
-            shopProfile = profile,
-            appSettings = settings,
-            lastProcessedSubmissionId = lastProcessedSubmissionId
-        )
-        financialSyncRepository.syncVendorCatalogToUserCloud(
-            sellerDetail = target,
-            sellerProducts = products,
-            sourceDeviceId = currentDeviceId
-        )
+        if (!isActiveAuthenticatedSession()) return
+        val snapshot = repository.getSellerSyncSnapshotByCodeDirect(vendorCode) ?: return
+        val res = syncSellerSnapshotConcurrently(snapshot, lastProcessedSubmissionId)
         if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
     }
 
@@ -818,8 +1129,18 @@ class LapakViewModel(
     fun deleteSeller(seller: Seller, onDone: () -> Unit) {
         viewModelScope.launch {
             repository.deleteSeller(seller)
-            vendorSyncRepository.deleteVendorFromFirestore(seller.vendorCode)
-            financialSyncRepository.deleteVendorCatalogFromUserCloud(seller.vendorCode)
+            if (isActiveAuthenticatedSession()) {
+                coroutineScope {
+                    val publicDelete = async {
+                        vendorSyncRepository.deleteVendorFromFirestore(seller.vendorCode, expectedUid = currentUserId)
+                    }
+                    val userDelete = async {
+                        financialSyncRepository.deleteVendorCatalogFromUserCloud(seller.vendorCode, expectedUid = currentUserId)
+                    }
+                    publicDelete.await()
+                    userDelete.await()
+                }
+            }
             onDone()
         }
     }
@@ -1054,7 +1375,9 @@ class LapakViewModel(
                 affectedSellerIds.forEach { syncSingleSellerToCloud(it) }
                 // Real-time sync transaction + itemized shares to Firestore
                 val savedItems = repository.getItemsForTransactionDirect(trx.id)
-                financialSyncRepository.syncTransactionToFirestore(trx, savedItems)
+                if (isActiveAuthenticatedSession()) {
+                    financialSyncRepository.syncTransactionToFirestore(trx, savedItems, expectedUid = currentUserId)
+                }
                 onSuccess(trx)
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Gagal memproses transaksi")
@@ -1063,7 +1386,9 @@ class LapakViewModel(
     }
 
     // Transactions History
-    val allTransactions: StateFlow<List<LapakTransaction>> = repository.allTransactions.stateIn(
+    val allTransactions: StateFlow<List<LapakTransaction>> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(emptyList()) else repository.allTransactions
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         emptyList()
@@ -1079,8 +1404,10 @@ class LapakViewModel(
             if (res.isSuccess) {
                 affectedSellers.forEach { syncSingleSellerToCloud(it) }
                 // Update cancelled status in Firestore immediately
-                repository.getTransactionById(trxId)?.let { updatedTrx ->
-                    financialSyncRepository.syncTransactionToFirestore(updatedTrx, savedItems)
+                if (isActiveAuthenticatedSession()) {
+                    repository.getTransactionById(trxId)?.let { updatedTrx ->
+                        financialSyncRepository.syncTransactionToFirestore(updatedTrx, savedItems, expectedUid = currentUserId)
+                    }
                 }
                 onSuccess()
             } else {
@@ -1181,7 +1508,14 @@ class LapakViewModel(
             if (seller != null) {
                 _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(savedPayment, seller, newRemaining, soldItems)
             }
-            financialSyncRepository.syncSettlementToFirestore(savedPayment, seller, payoutStatus)
+            if (isActiveAuthenticatedSession()) {
+                financialSyncRepository.syncSettlementToFirestore(
+                    payment = savedPayment,
+                    seller = seller,
+                    status = payoutStatus,
+                    expectedUid = currentUserId
+                )
+            }
             syncSingleSellerToCloud(sellerId)
             onDone(savedPayment)
         }
@@ -1225,7 +1559,9 @@ class LapakViewModel(
     }
 
     // Operating Expenses
-    val allExpenses: StateFlow<List<OperatingExpense>> = repository.allExpenses.stateIn(
+    val allExpenses: StateFlow<List<OperatingExpense>> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(emptyList()) else repository.allExpenses
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         emptyList()
@@ -1239,7 +1575,9 @@ class LapakViewModel(
                 notes = notes
             )
             val insertedId = repository.addExpense(expense)
-            financialSyncRepository.syncExpenseToFirestore(expense.copy(id = insertedId))
+            if (isActiveAuthenticatedSession()) {
+                financialSyncRepository.syncExpenseToFirestore(expense.copy(id = insertedId), expectedUid = currentUserId)
+            }
             onDone()
         }
     }
@@ -1247,7 +1585,9 @@ class LapakViewModel(
     fun deleteExpense(expense: OperatingExpense) {
         viewModelScope.launch {
             repository.deleteExpense(expense)
-            financialSyncRepository.deleteExpenseFromFirestore(expense)
+            if (isActiveAuthenticatedSession()) {
+                financialSyncRepository.deleteExpenseFromFirestore(expense, expectedUid = currentUserId)
+            }
         }
     }
 
