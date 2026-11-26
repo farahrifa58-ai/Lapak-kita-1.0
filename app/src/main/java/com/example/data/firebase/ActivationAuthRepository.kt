@@ -1,6 +1,7 @@
 package com.example.data.firebase
 
 import android.util.Log
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -37,6 +38,11 @@ data class DeviceAutoRestoreHint(
 
 sealed class CodeAvailabilityResult {
     data class Available(val normalizedCode: String) : CodeAvailabilityResult()
+    data class OwnedByCurrentUser(
+        val normalizedCode: String,
+        val businessName: String,
+        val registeredDeviceIds: List<String>
+    ) : CodeAvailabilityResult()
     data class InvalidOrUsed(val message: String) : CodeAvailabilityResult()
     data class NetworkError(val message: String) : CodeAvailabilityResult()
 }
@@ -49,12 +55,25 @@ sealed class LoginDeviceCheckResult {
     data class OfflineFallback(val message: String) : LoginDeviceCheckResult()
 }
 
+private data class ClaimedActivationCodeMatch(
+    val code: String,
+    val usedByUid: String,
+    val usedByEmail: String,
+    val businessName: String,
+    val registeredDeviceIds: List<String>
+)
+
 /**
  * 100% synced with the external "License Admin" Firestore database:
- * - Reads & claims activation codes from `activation_codes/{code}` verifying `status == "available"`.
- * - Stores user profiles & enforces Multi-Device Lock (up to 2 devices via `registeredDeviceIds` array,
- *   while maintaining full backward compatibility with legacy single-string `registeredDeviceId`).
- * - Maintains exact-ID `device_registry/{deviceId}` for seamless same-HP auto-restore after reinstall.
+ * - Performs dual activation lookup on login:
+ *   1) Checks `users/{uid}` (treating `licenseCode`, `isActivated == true`, `active == true`, or
+ *      existing operational subcollections `vendors`/`transactions`/`expenses`/`settlements` as active).
+ *   2) Falls back to querying `activation_codes` by `usedByUid == uid` or `usedByEmail == email`
+ *      (`status == "used"`) and auto-restores `users/{uid}` so previously activated accounts NEVER
+ *      get prompted for a license code again.
+ * - Supports seamless same-account reactivation when entering a `"used"` code already bound to the
+ *   signed-in Google user's `uid` or `email`.
+ * - Enforces Multi-Device Lock (up to 2 devices via `registeredDeviceIds` array).
  */
 class ActivationAuthRepository(
     private val db: FirebaseFirestore
@@ -66,9 +85,6 @@ class ActivationAuthRepository(
     fun normalizeCode(raw: String): String =
         raw.trim().uppercase().replace(Regex("[^A-Z0-9_\\-]"), "")
 
-    /**
-     * Step 1 helper: reads raw `registeredDeviceIds` array if present (or empty list).
-     */
     private fun extractRawDeviceArray(snap: DocumentSnapshot): List<String> {
         val rawList = snap.get("registeredDeviceIds") as? List<*> ?: return emptyList()
         val result = linkedSetOf<String>()
@@ -79,12 +95,6 @@ class ActivationAuthRepository(
         return result.toList()
     }
 
-    /**
-     * Legacy auto-migration Steps 1 & 2:
-     * 1. Build initial `existingDevices` from `registeredDeviceIds` array (or empty list).
-     * 2. If legacy `registeredDeviceId` is non-empty and not yet in `existingDevices`,
-     *    add it so the original HP #1 stays recorded as device #1.
-     */
     private fun extractRegisteredDeviceIds(snap: DocumentSnapshot): List<String> {
         val existingDevices = extractRawDeviceArray(snap).toMutableList()
         val legacySingle = snap.getString("registeredDeviceId")?.trim().orEmpty()
@@ -92,6 +102,24 @@ class ActivationAuthRepository(
             existingDevices.add(legacySingle)
         }
         return existingDevices
+    }
+
+    private fun isCodeOwnedByUser(
+        codeSnap: DocumentSnapshot,
+        uid: String,
+        email: String
+    ): Boolean {
+        val cleanUid = uid.trim()
+        val cleanEmail = email.trim()
+
+        val uidCandidates = listOf("usedByUid", "ownerUid", "userId", "uid")
+            .mapNotNull { codeSnap.getString(it)?.trim()?.takeIf { v -> v.isNotEmpty() } }
+        val emailCandidates = listOf("usedByEmail", "email", "buyerEmail", "ownerEmail", "usedBy")
+            .mapNotNull { codeSnap.getString(it)?.trim()?.takeIf { v -> v.isNotEmpty() } }
+
+        val uidMatches = cleanUid.isNotEmpty() && uidCandidates.any { it == cleanUid }
+        val emailMatches = cleanEmail.isNotEmpty() && emailCandidates.any { it.equals(cleanEmail, ignoreCase = true) }
+        return uidMatches || emailMatches
     }
 
     /**
@@ -105,14 +133,22 @@ class ActivationAuthRepository(
             .map { snap ->
                 if (!snap.exists()) return@map null
                 val deviceIds = extractRegisteredDeviceIds(snap)
+                val activeFlag = snap.getBoolean("active")
+                val isActivatedFlag = snap.getBoolean("isActivated")
+                val licenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty()
+                val effectiveActive = when {
+                    activeFlag == false && isActivatedFlag != true -> false
+                    activeFlag == true || isActivatedFlag == true || licenseCode.isNotBlank() -> true
+                    else -> false
+                }
                 UserProfileDoc(
                     userId = snap.getString("userId")?.trim().orEmpty().ifBlank { uid },
                     email = snap.getString("email")?.trim().orEmpty(),
                     businessName = snap.getString("businessName")?.trim().orEmpty().ifBlank { "Lapak Kita" },
-                    licenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty(),
+                    licenseCode = licenseCode,
                     registeredDeviceId = deviceIds.firstOrNull().orEmpty(),
                     registeredDeviceIds = deviceIds,
-                    active = snap.getBoolean("active") ?: false
+                    active = effectiveActive
                 )
             }
             .catch { cause ->
@@ -123,9 +159,18 @@ class ActivationAuthRepository(
     }
 
     /**
-     * Checks `activation_codes/{code}` against server to verify `status == "available"`.
+     * Checks `activation_codes/{code}` against server:
+     * - If `status == "available"` -> [CodeAvailabilityResult.Available]
+     * - If `status == "used"` AND bound to the same Google account (`usedByUid == currentUid` or
+     *   `usedByEmail == currentEmail`) -> [CodeAvailabilityResult.OwnedByCurrentUser] (allows
+     *   seamless automatic reactivation instead of rejecting!)
+     * - Otherwise -> [CodeAvailabilityResult.InvalidOrUsed]
      */
-    suspend fun checkActivationCodeAvailable(rawCode: String): CodeAvailabilityResult {
+    suspend fun checkActivationCodeAvailable(
+        rawCode: String,
+        currentUid: String = "",
+        currentEmail: String = ""
+    ): CodeAvailabilityResult {
         val code = normalizeCode(rawCode)
         if (code.length < 4 || code.length > 48) {
             return CodeAvailabilityResult.InvalidOrUsed("Kode aktivasi tidak valid atau sudah pernah digunakan.")
@@ -134,15 +179,33 @@ class ActivationAuthRepository(
         return try {
             val snapshot = activationCodesCollection.document(code).get(Source.SERVER).await()
             if (!snapshot.exists()) {
-                return CodeAvailabilityResult.InvalidOrUsed("Kode aktivasi tidak valid atau sudah pernah digunakan.")
+                return CodeAvailabilityResult.InvalidOrUsed(
+                    "Kode aktivasi $code tidak ditemukan di server saat ini. Pastikan penulisan benar atau buat kode baru di License Admin."
+                )
             }
 
             val status = snapshot.getString("status")?.trim()?.lowercase().orEmpty()
-            if (status != "available") {
-                return CodeAvailabilityResult.InvalidOrUsed("Kode aktivasi tidak valid atau sudah pernah digunakan.")
+            if (status == "available") {
+                return CodeAvailabilityResult.Available(normalizedCode = code)
             }
 
-            CodeAvailabilityResult.Available(normalizedCode = code)
+            if ((status == "used" || status == "active") && isCodeOwnedByUser(snapshot, currentUid, currentEmail)) {
+                return CodeAvailabilityResult.OwnedByCurrentUser(
+                    normalizedCode = code,
+                    businessName = snapshot.getString("usedByBusinessName")?.trim().orEmpty(),
+                    registeredDeviceIds = extractRegisteredDeviceIds(snapshot)
+                )
+            }
+
+            if (status == "used" || status == "active") {
+                return CodeAvailabilityResult.InvalidOrUsed(
+                    "Kode aktivasi $code sudah terdaftar pada akun Google lain."
+                )
+            }
+
+            CodeAvailabilityResult.InvalidOrUsed(
+                "Kode aktivasi $code tidak aktif (status: ${status.ifBlank { "tidak valid" }}). Hubungi admin."
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: FirebaseFirestoreException) {
@@ -152,7 +215,7 @@ class ActivationAuthRepository(
                 FirebaseFirestoreException.Code.DEADLINE_EXCEEDED ->
                     CodeAvailabilityResult.NetworkError("Tidak dapat terhubung ke server. Periksa koneksi internet Anda.")
                 else ->
-                    CodeAvailabilityResult.InvalidOrUsed("Kode aktivasi tidak valid atau sudah pernah digunakan.")
+                    CodeAvailabilityResult.InvalidOrUsed("Gagal memverifikasi kode aktivasi (${e.code.name}).")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected activation code check error", e)
@@ -161,10 +224,8 @@ class ActivationAuthRepository(
     }
 
     /**
-     * Completes new account activation after Google Sign-In succeeds:
-     * 1. Re-verifies `activation_codes/{code}` has `status == "available"`.
-     * 2. Atomically updates `activation_codes/{code}` -> `status: "used"` + `registeredDeviceIds: [deviceId]`
-     *    and writes `users/{uid}` + `device_registry/{deviceId}`.
+     * Completes new activation OR automatic reactivation when the entered code is already
+     * bound to this exact Google account (`usedByUid == uid` or `usedByEmail == email`).
      */
     suspend fun completeRegistrationWithCode(
         uid: String,
@@ -187,81 +248,120 @@ class ActivationAuthRepository(
         val deviceRef = deviceRegistryCollection.document(cleanDeviceId)
 
         return try {
-            // Re-verify on server right before claiming
             val codeSnap = codeRef.get(Source.SERVER).await()
             val status = codeSnap.getString("status")?.trim()?.lowercase().orEmpty()
-            if (!codeSnap.exists() || status != "available") {
-                return Result.failure(IllegalStateException("Kode aktivasi tidak valid atau sudah pernah digunakan."))
-            }
+            val isAvailable = codeSnap.exists() && status == "available"
+            val isOwnedUsedCode = codeSnap.exists() &&
+                (status == "used" || status == "active") &&
+                isCodeOwnedByUser(codeSnap, uid, cleanEmail)
 
-            // Check if this Google account already exists with an active profile
-            val existingUserSnap = userRef.get(Source.SERVER).await()
-            if (existingUserSnap.exists() && existingUserSnap.getBoolean("active") == true) {
-                val rawArrayDevices = extractRawDeviceArray(existingUserSnap)
-                val hasArrayField = existingUserSnap.get("registeredDeviceIds") is List<*>
-                val existingDevices = extractRegisteredDeviceIds(existingUserSnap)
-                val needsLegacyMigration = !hasArrayField || rawArrayDevices != existingDevices
-                val existingCode = existingUserSnap.getString("licenseCode").orEmpty().ifBlank { code }
-                val existingBiz = existingUserSnap.getString("businessName").orEmpty().ifBlank { cleanBusinessName }
-
-                if (cleanDeviceId in existingDevices) {
-                    if (needsLegacyMigration) {
-                        runCatching {
-                            userRef.update(
-                                mapOf(
-                                    "registeredDeviceId" to existingDevices.first(),
-                                    "registeredDeviceIds" to existingDevices,
-                                    "updatedAt" to FieldValue.serverTimestamp()
-                                )
-                            ).await()
-                        }
-                        syncActivationCodeDevices(existingCode, existingDevices)
-                    }
-                    syncDeviceRegistry(deviceRef, uid, cleanEmail, existingBiz, existingCode)
-                    return Result.success(
-                        UserProfileDoc(
-                            userId = uid,
-                            email = cleanEmail,
-                            businessName = existingBiz,
-                            licenseCode = existingCode,
-                            registeredDeviceId = existingDevices.firstOrNull().orEmpty(),
-                            registeredDeviceIds = existingDevices,
-                            active = true
-                        )
-                    )
-                } else if (existingDevices.size < MAX_REGISTERED_DEVICES) {
-                    val updatedDevices = (existingDevices + cleanDeviceId).distinct().take(MAX_REGISTERED_DEVICES)
-                    userRef.update(
-                        mapOf(
-                            "registeredDeviceId" to updatedDevices.first(),
-                            "registeredDeviceIds" to updatedDevices,
-                            "businessName" to existingBiz,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
-                    syncActivationCodeDevices(existingCode, updatedDevices)
-                    syncDeviceRegistry(deviceRef, uid, cleanEmail, existingBiz, existingCode)
-                    return Result.success(
-                        UserProfileDoc(
-                            userId = uid,
-                            email = cleanEmail,
-                            businessName = existingBiz,
-                            licenseCode = existingCode,
-                            registeredDeviceId = updatedDevices.first(),
-                            registeredDeviceIds = updatedDevices,
-                            active = true
-                        )
-                    )
-                } else {
-                    return Result.failure(IllegalStateException(MAX_DEVICES_LOCK_MESSAGE))
+            if (!isAvailable && !isOwnedUsedCode) {
+                val reason = when {
+                    !codeSnap.exists() ->
+                        "Kode aktivasi $code tidak ditemukan di server saat ini."
+                    status == "used" || status == "active" ->
+                        "Kode aktivasi $code sudah terdaftar pada akun Google lain."
+                    else ->
+                        "Kode aktivasi $code tidak valid atau sudah pernah digunakan."
                 }
+                return Result.failure(IllegalStateException(reason))
             }
 
+            // Check if this Google account already has a users/{uid} doc
+            val existingUserSnap = userRef.get(Source.SERVER).await()
+
+            // Case 1: Code is already "used" by THIS exact Google account -> restore & reactivate seamlessly!
+            if (isOwnedUsedCode) {
+                val restoredBiz = codeSnap.getString("usedByBusinessName")?.trim().orEmpty()
+                    .ifBlank { existingUserSnap.getString("businessName")?.trim().orEmpty() }
+                    .ifBlank { cleanBusinessName }
+                val mergedDevices = linkedSetOf<String>().apply {
+                    addAll(extractRegisteredDeviceIds(codeSnap))
+                    if (existingUserSnap.exists()) {
+                        addAll(extractRegisteredDeviceIds(existingUserSnap))
+                    }
+                }.toList()
+
+                val finalDevices = when {
+                    cleanDeviceId in mergedDevices -> mergedDevices.take(MAX_REGISTERED_DEVICES)
+                    mergedDevices.size < MAX_REGISTERED_DEVICES -> (mergedDevices + cleanDeviceId).distinct()
+                    else -> return Result.failure(IllegalStateException(MAX_DEVICES_LOCK_MESSAGE))
+                }
+
+                restoreOrUpdateUserProfile(
+                    userRef = userRef,
+                    existingUserSnap = existingUserSnap,
+                    uid = uid,
+                    email = cleanEmail,
+                    businessName = restoredBiz,
+                    licenseCode = code,
+                    devices = finalDevices
+                )
+                syncActivationCodeOwnershipAndDevices(
+                    codeRef = codeRef,
+                    codeSnap = codeSnap,
+                    uid = uid,
+                    updatedDevices = finalDevices
+                )
+                runCatching {
+                    syncDeviceRegistry(deviceRef, uid, cleanEmail, restoredBiz, code)
+                }
+
+                return Result.success(
+                    UserProfileDoc(
+                        userId = uid,
+                        email = cleanEmail,
+                        businessName = restoredBiz,
+                        licenseCode = code,
+                        registeredDeviceId = finalDevices.firstOrNull().orEmpty(),
+                        registeredDeviceIds = finalDevices,
+                        active = true
+                    )
+                )
+            }
+
+            // Case 2: Account already has an active users/{uid} profile (avoid burning a brand new code)
+            if (existingUserSnap.exists() && isUserDocMarkedActive(existingUserSnap)) {
+                val existingDevices = extractRegisteredDeviceIds(existingUserSnap)
+                val existingCode = existingUserSnap.getString("licenseCode")?.trim()?.uppercase().orEmpty().ifBlank { code }
+                val existingBiz = existingUserSnap.getString("businessName")?.trim().orEmpty().ifBlank { cleanBusinessName }
+
+                val finalDevices = when {
+                    cleanDeviceId in existingDevices -> existingDevices
+                    existingDevices.size < MAX_REGISTERED_DEVICES -> (existingDevices + cleanDeviceId).distinct()
+                    else -> return Result.failure(IllegalStateException(MAX_DEVICES_LOCK_MESSAGE))
+                }
+
+                restoreOrUpdateUserProfile(
+                    userRef = userRef,
+                    existingUserSnap = existingUserSnap,
+                    uid = uid,
+                    email = cleanEmail,
+                    businessName = existingBiz,
+                    licenseCode = existingCode,
+                    devices = finalDevices
+                )
+                syncActivationCodeDevices(existingCode, finalDevices)
+                runCatching {
+                    syncDeviceRegistry(deviceRef, uid, cleanEmail, existingBiz, existingCode)
+                }
+
+                return Result.success(
+                    UserProfileDoc(
+                        userId = uid,
+                        email = cleanEmail,
+                        businessName = existingBiz,
+                        licenseCode = existingCode,
+                        registeredDeviceId = finalDevices.firstOrNull().orEmpty(),
+                        registeredDeviceIds = finalDevices,
+                        active = true
+                    )
+                )
+            }
+
+            // Case 3: Fresh first-time activation with an "available" code
             val initialDevices = listOf(cleanDeviceId)
 
-            // Write atomically in a batch:
-            // 1. Update activation_codes/{code} -> status: "used" + registeredDeviceIds
-            // 2. Create users/{uid} with registeredDeviceIds (max 2 devices)
             val batch = db.batch()
             batch.update(
                 codeRef,
@@ -286,13 +386,13 @@ class ActivationAuthRepository(
                     "registeredDeviceId" to cleanDeviceId,
                     "registeredDeviceIds" to initialDevices,
                     "active" to true,
+                    "isActivated" to true,
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             )
             batch.commit().await()
 
-            // Best-effort device registry update for reinstall auto-restore
             runCatching {
                 syncDeviceRegistry(deviceRef, uid, cleanEmail, cleanBusinessName, code)
             }
@@ -314,12 +414,12 @@ class ActivationAuthRepository(
             Log.e(TAG, "Registration batch failed: ${e.code} ${e.message}", e)
             val msg = when (e.code) {
                 FirebaseFirestoreException.Code.PERMISSION_DENIED ->
-                    "Kode aktivasi tidak valid atau sudah pernah digunakan."
+                    "Izin aktivasi ditolak oleh server (pastikan kode belum dipakai akun lain dan masih dalam batas 2 perangkat)."
                 FirebaseFirestoreException.Code.UNAVAILABLE,
                 FirebaseFirestoreException.Code.DEADLINE_EXCEEDED ->
                     "Koneksi internet terputus saat mengaktifkan akun. Coba lagi."
                 else ->
-                    "Gagal mendaftarkan akun. Silakan coba lagi."
+                    "Gagal mendaftarkan akun (${e.code.name}). Silakan coba lagi."
             }
             Result.failure(IllegalStateException(msg))
         } catch (e: Exception) {
@@ -328,14 +428,184 @@ class ActivationAuthRepository(
         }
     }
 
+    private fun isUserDocMarkedActive(snap: DocumentSnapshot): Boolean {
+        if (!snap.exists()) return false
+        val explicitActive = snap.getBoolean("active")
+        val explicitIsActivated = snap.getBoolean("isActivated")
+        val licenseCode = snap.getString("licenseCode")?.trim().orEmpty()
+        if (explicitActive == false && explicitIsActivated != true) return false
+        return explicitActive == true || explicitIsActivated == true || licenseCode.isNotBlank()
+    }
+
     /**
-     * Enforces Multi-Device Lock (Max 2 Devices = HP Kasir + HP Owner) with automatic legacy migration:
-     * 1. Build `existingDevices` from `registeredDeviceIds` array (or empty list if missing).
-     * 2. If legacy `registeredDeviceId` is non-empty and not in `existingDevices`, add it first so HP #1 stays device #1.
-     * 3. If `currentDeviceId` is already in `existingDevices` -> auto-migrate array if needed and allow immediately.
-     * 4. If `existingDevices.size < 2` -> append `currentDeviceId` (as device #2), save `registeredDeviceIds` to
-     *    `users/{uid}` and `activation_codes/{licenseCode}`, then allow into Dashboard.
-     * 5. If `existingDevices.size >= 2` and `currentDeviceId` is not among them -> reject login with max-2-devices error.
+     * Checks if `users/{uid}` already owns operational subcollections (vendors, transactions,
+     * expenses, or settlements), indicating this account was previously active on Lapak Kita.
+     */
+    private suspend fun hasUserOperationalSubData(uid: String): Boolean {
+        val userDoc = usersCollection.document(uid)
+        val subcollections = listOf("vendors", "transactions", "expenses", "settlements")
+        for (sub in subcollections) {
+            val found = runCatching {
+                !userDoc.collection(sub).limit(1).get(Source.SERVER).await().isEmpty
+            }.getOrDefault(false)
+            if (found) return true
+        }
+        return false
+    }
+
+    /**
+     * Queries `activation_codes` for any `"used"` code already bound to this Google account
+     * via `usedByUid == uid` or `usedByEmail == email`.
+     */
+    private suspend fun findClaimedActivationCodeForUser(
+        uid: String,
+        email: String
+    ): ClaimedActivationCodeMatch? {
+        val cleanUid = uid.trim()
+        val cleanEmail = email.trim()
+
+        // 1. Primary lookup by usedByUid
+        if (cleanUid.isNotEmpty()) {
+            val byUidSnap = runCatching {
+                activationCodesCollection
+                    .whereEqualTo("usedByUid", cleanUid)
+                    .limit(5)
+                    .get(Source.SERVER)
+                    .await()
+            }.onFailure { err ->
+                Log.w(TAG, "Query activation_codes by usedByUid skipped: ${err.message}")
+            }.getOrNull()
+
+            val matchedDoc = byUidSnap?.documents?.firstOrNull { doc ->
+                doc.getString("status")?.trim()?.lowercase() == "used"
+            }
+            if (matchedDoc != null) {
+                return matchedDoc.toClaimedMatch()
+            }
+        }
+
+        // 2. Secondary lookup by usedByEmail (exact & lowercase)
+        if (cleanEmail.isNotEmpty()) {
+            val emailCandidates = linkedSetOf(cleanEmail, cleanEmail.lowercase())
+            for (candidateEmail in emailCandidates) {
+                val byEmailSnap = runCatching {
+                    activationCodesCollection
+                        .whereEqualTo("usedByEmail", candidateEmail)
+                        .limit(5)
+                        .get(Source.SERVER)
+                        .await()
+                }.onFailure { err ->
+                    Log.w(TAG, "Query activation_codes by usedByEmail skipped: ${err.message}")
+                }.getOrNull()
+
+                val matchedDoc = byEmailSnap?.documents?.firstOrNull { doc ->
+                    doc.getString("status")?.trim()?.lowercase() == "used"
+                }
+                if (matchedDoc != null) {
+                    return matchedDoc.toClaimedMatch()
+                }
+            }
+        }
+
+        return null
+    }
+
+    private fun DocumentSnapshot.toClaimedMatch(): ClaimedActivationCodeMatch {
+        val docCode = normalizeCode(getString("code").orEmpty().ifBlank { id })
+        return ClaimedActivationCodeMatch(
+            code = docCode,
+            usedByUid = getString("usedByUid")?.trim().orEmpty(),
+            usedByEmail = getString("usedByEmail")?.trim().orEmpty(),
+            businessName = getString("usedByBusinessName")?.trim().orEmpty(),
+            registeredDeviceIds = extractRegisteredDeviceIds(this)
+        )
+    }
+
+    private suspend fun restoreOrUpdateUserProfile(
+        userRef: DocumentReference,
+        existingUserSnap: DocumentSnapshot?,
+        uid: String,
+        email: String,
+        businessName: String,
+        licenseCode: String,
+        devices: List<String>
+    ) {
+        val safeCode = normalizeCode(licenseCode).ifBlank { "RESTORED-ACTIVE" }
+        val safeBiz = businessName.trim().ifEmpty { "Lapak Kita" }.take(120)
+        val safeEmail = email.trim().ifEmpty { "$uid@lapakkita.local" }.take(160)
+        val safeDevices = devices.distinct().take(MAX_REGISTERED_DEVICES)
+        val primaryDevice = safeDevices.firstOrNull().orEmpty()
+
+        if (existingUserSnap == null || !existingUserSnap.exists()) {
+            userRef.set(
+                mapOf(
+                    "userId" to uid,
+                    "email" to safeEmail,
+                    "businessName" to safeBiz,
+                    "licenseCode" to safeCode,
+                    "registeredDeviceId" to primaryDevice,
+                    "registeredDeviceIds" to safeDevices,
+                    "active" to true,
+                    "isActivated" to true,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        } else {
+            val updates = mutableMapOf<String, Any>(
+                "email" to safeEmail,
+                "businessName" to safeBiz,
+                "registeredDeviceId" to primaryDevice,
+                "registeredDeviceIds" to safeDevices,
+                "isActivated" to true,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (existingUserSnap.getString("userId").isNullOrBlank()) {
+                updates["userId"] = uid
+            }
+            val existingCode = existingUserSnap.getString("licenseCode")?.trim().orEmpty()
+            if (existingCode.isBlank() || existingCode == "RESTORED-ACTIVE") {
+                updates["licenseCode"] = safeCode
+            }
+            if (existingUserSnap.getBoolean("active") == null) {
+                updates["active"] = true
+            }
+            userRef.update(updates).await()
+        }
+    }
+
+    private suspend fun syncActivationCodeOwnershipAndDevices(
+        codeRef: DocumentReference,
+        codeSnap: DocumentSnapshot?,
+        uid: String,
+        updatedDevices: List<String>
+    ) {
+        if (updatedDevices.isEmpty()) return
+        runCatching {
+            val updates = mutableMapOf<String, Any>(
+                "registeredDeviceId" to updatedDevices.first(),
+                "registeredDeviceIds" to updatedDevices,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            val existingUid = codeSnap?.getString("usedByUid")?.trim().orEmpty()
+            if (existingUid.isBlank() && uid.isNotBlank()) {
+                updates["usedByUid"] = uid
+            }
+            codeRef.update(updates).await()
+        }.onFailure { err ->
+            Log.w(TAG, "syncActivationCodeOwnershipAndDevices(${codeRef.id}) skipped: ${err.message}")
+        }
+    }
+
+    /**
+     * Dual-check login verification + Multi-Device Lock (Max 2 Devices = HP Kasir + HP Owner):
+     * 1. Checks `users/{uid}` first: if document exists and has `licenseCode`, `isActivated == true`,
+     *    `active == true`, or existing operational sub-data -> treats account as ALREADY ACTIVE.
+     * 2. If `users/{uid}` is missing or lacks activation flags, queries `activation_codes` for
+     *    `usedByUid == uid` or `usedByEmail == email` (`status == "used"`). If found, automatically
+     *    restores `users/{uid}` with that license code and grants Dashboard access immediately.
+     * 3. Only returns [LoginDeviceCheckResult.NotRegistered] (routing to "Lengkapi Aktivasi Akun")
+     *    when BOTH checks genuinely find no license or operational data linked to this Google account.
      */
     suspend fun verifySingleDeviceOnLogin(
         uid: String,
@@ -349,93 +619,239 @@ class ActivationAuthRepository(
 
         return try {
             val snap = userRef.get(Source.SERVER).await()
-            if (!snap.exists()) {
-                return LoginDeviceCheckResult.NotRegistered
-            }
 
-            val active = snap.getBoolean("active") ?: false
-            val rawArrayDevices = extractRawDeviceArray(snap)
-            val hasArrayField = snap.get("registeredDeviceIds") is List<*>
-            // Steps 1 & 2: build existingDevices from registeredDeviceIds + legacy registeredDeviceId
-            val existingDevices = extractRegisteredDeviceIds(snap)
-            val needsLegacyMigration = !hasArrayField || rawArrayDevices != existingDevices
-            val licenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty()
-            val businessName = snap.getString("businessName")?.trim().orEmpty().ifBlank { "Lapak Kita" }
-            val profileEmail = snap.getString("email")?.trim().orEmpty().ifBlank { cleanEmail }
+            // Step 1: Evaluate users/{uid} if present
+            if (snap.exists()) {
+                val explicitActive = snap.getBoolean("active")
+                val explicitIsActivated = snap.getBoolean("isActivated")
+                val existingLicenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty()
 
-            if (!active) {
-                return LoginDeviceCheckResult.InactiveAccount(
-                    "Akun Anda saat ini tidak aktif. Silakan hubungi admin Lapak Kita."
-                )
-            }
-
-            // Step 3: Current device is already in existingDevices -> allow immediately (and backfill array if legacy)
-            if (cleanDeviceId in existingDevices) {
-                if (needsLegacyMigration) {
-                    runCatching {
-                        userRef.update(
-                            mapOf(
-                                "registeredDeviceId" to existingDevices.first(),
-                                "registeredDeviceIds" to existingDevices,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        ).await()
-                    }
-                    syncActivationCodeDevices(licenseCode, existingDevices)
+                // Explicitly suspended/deactivated by developer admin
+                if (explicitActive == false && explicitIsActivated != true) {
+                    return LoginDeviceCheckResult.InactiveAccount(
+                        "Akun Anda saat ini tidak aktif. Silakan hubungi admin Lapak Kita."
+                    )
                 }
 
+                val hasDocActivation = explicitActive == true ||
+                    explicitIsActivated == true ||
+                    existingLicenseCode.isNotBlank()
+
+                val claimedMatch = if (!hasDocActivation || existingLicenseCode.isBlank()) {
+                    findClaimedActivationCodeForUser(uid, cleanEmail)
+                } else {
+                    null
+                }
+                val hasOperationalData = if (!hasDocActivation && claimedMatch == null) {
+                    hasUserOperationalSubData(uid)
+                } else {
+                    false
+                }
+
+                if (hasDocActivation || claimedMatch != null || hasOperationalData) {
+                    val resolvedCode = existingLicenseCode
+                        .ifBlank { claimedMatch?.code.orEmpty() }
+                        .ifBlank { "RESTORED-ACTIVE" }
+                    val resolvedBiz = snap.getString("businessName")?.trim().orEmpty()
+                        .ifBlank { claimedMatch?.businessName.orEmpty() }
+                        .ifBlank { "Lapak Kita" }
+                    val resolvedEmail = snap.getString("email")?.trim().orEmpty()
+                        .ifBlank { claimedMatch?.usedByEmail.orEmpty() }
+                        .ifBlank { cleanEmail }
+
+                    val rawArrayDevices = extractRawDeviceArray(snap)
+                    val hasArrayField = snap.get("registeredDeviceIds") is List<*>
+                    val existingDevices = linkedSetOf<String>().apply {
+                        addAll(extractRegisteredDeviceIds(snap))
+                        if (claimedMatch != null) addAll(claimedMatch.registeredDeviceIds)
+                    }.toList()
+                    val needsBackfill = !hasArrayField ||
+                        rawArrayDevices != existingDevices ||
+                        explicitIsActivated != true ||
+                        explicitActive == null ||
+                        existingLicenseCode.isBlank()
+
+                    if (cleanDeviceId in existingDevices) {
+                        if (needsBackfill) {
+                            runCatching {
+                                restoreOrUpdateUserProfile(
+                                    userRef = userRef,
+                                    existingUserSnap = snap,
+                                    uid = uid,
+                                    email = resolvedEmail,
+                                    businessName = resolvedBiz,
+                                    licenseCode = resolvedCode,
+                                    devices = existingDevices
+                                )
+                            }
+                            syncActivationCodeDevices(resolvedCode, existingDevices)
+                        }
+                        runCatching {
+                            syncDeviceRegistry(deviceRef, uid, resolvedEmail, resolvedBiz, resolvedCode)
+                        }
+                        return LoginDeviceCheckResult.Allowed(
+                            profile = UserProfileDoc(
+                                userId = uid,
+                                email = resolvedEmail,
+                                businessName = resolvedBiz,
+                                licenseCode = resolvedCode,
+                                registeredDeviceId = existingDevices.firstOrNull().orEmpty(),
+                                registeredDeviceIds = existingDevices,
+                                active = true
+                            ),
+                            wasRebound = false
+                        )
+                    }
+
+                    if (existingDevices.size < MAX_REGISTERED_DEVICES) {
+                        val updatedDevices = (existingDevices + cleanDeviceId).distinct().take(MAX_REGISTERED_DEVICES)
+                        restoreOrUpdateUserProfile(
+                            userRef = userRef,
+                            existingUserSnap = snap,
+                            uid = uid,
+                            email = resolvedEmail,
+                            businessName = resolvedBiz,
+                            licenseCode = resolvedCode,
+                            devices = updatedDevices
+                        )
+                        syncActivationCodeDevices(resolvedCode, updatedDevices)
+                        runCatching {
+                            syncDeviceRegistry(deviceRef, uid, resolvedEmail, resolvedBiz, resolvedCode)
+                        }
+                        return LoginDeviceCheckResult.Allowed(
+                            profile = UserProfileDoc(
+                                userId = uid,
+                                email = resolvedEmail,
+                                businessName = resolvedBiz,
+                                licenseCode = resolvedCode,
+                                registeredDeviceId = updatedDevices.first(),
+                                registeredDeviceIds = updatedDevices,
+                                active = true
+                            ),
+                            wasRebound = true
+                        )
+                    }
+
+                    return LoginDeviceCheckResult.BlockedOtherDevice(MAX_DEVICES_LOCK_MESSAGE)
+                }
+            }
+
+            // Step 2: users/{uid} does not exist (or had no activation flag) ->
+            // Dual-check `activation_codes` by usedByUid / usedByEmail AND existing operational sub-data!
+            val claimedMatch = findClaimedActivationCodeForUser(uid, cleanEmail)
+            if (claimedMatch != null) {
+                val existingDevices = claimedMatch.registeredDeviceIds
+                val finalDevices = when {
+                    cleanDeviceId in existingDevices -> existingDevices.take(MAX_REGISTERED_DEVICES)
+                    existingDevices.size < MAX_REGISTERED_DEVICES -> (existingDevices + cleanDeviceId).distinct()
+                    else -> return LoginDeviceCheckResult.BlockedOtherDevice(MAX_DEVICES_LOCK_MESSAGE)
+                }
+                val restoredBiz = claimedMatch.businessName.ifBlank { "Lapak Kita" }
+                val restoredEmail = cleanEmail.ifBlank { claimedMatch.usedByEmail }.ifBlank { "$uid@lapakkita.local" }
+
                 runCatching {
-                    syncDeviceRegistry(deviceRef, uid, profileEmail, businessName, licenseCode)
+                    restoreOrUpdateUserProfile(
+                        userRef = userRef,
+                        existingUserSnap = snap.takeIf { it.exists() },
+                        uid = uid,
+                        email = restoredEmail,
+                        businessName = restoredBiz,
+                        licenseCode = claimedMatch.code,
+                        devices = finalDevices
+                    )
+                }.onFailure { err ->
+                    Log.w(TAG, "Auto-restore users/$uid warning: ${err.message}")
+                }
+                syncActivationCodeDevices(claimedMatch.code, finalDevices)
+                runCatching {
+                    syncDeviceRegistry(deviceRef, uid, restoredEmail, restoredBiz, claimedMatch.code)
                 }
 
                 return LoginDeviceCheckResult.Allowed(
                     profile = UserProfileDoc(
                         userId = uid,
-                        email = profileEmail,
-                        businessName = businessName,
-                        licenseCode = licenseCode,
-                        registeredDeviceId = existingDevices.firstOrNull().orEmpty(),
-                        registeredDeviceIds = existingDevices,
+                        email = restoredEmail,
+                        businessName = restoredBiz,
+                        licenseCode = claimedMatch.code,
+                        registeredDeviceId = finalDevices.firstOrNull().orEmpty(),
+                        registeredDeviceIds = finalDevices,
                         active = true
                     ),
-                    wasRebound = false
+                    wasRebound = cleanDeviceId !in existingDevices
                 )
             }
 
-            // Step 4: existingDevices.size < 2 -> append currentDeviceId (preserves legacy HP #1 as index 0),
-            // save registeredDeviceIds to users/{uid} and activation_codes/{code}, then allow into Dashboard.
-            if (existingDevices.size < MAX_REGISTERED_DEVICES) {
-                val updatedDevices = (existingDevices + cleanDeviceId).distinct().take(MAX_REGISTERED_DEVICES)
-                userRef.update(
-                    mapOf(
-                        "registeredDeviceId" to updatedDevices.first(),
-                        "registeredDeviceIds" to updatedDevices,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
-
-                syncActivationCodeDevices(licenseCode, updatedDevices)
-
+            // Step 2b: Check if users/{uid} already has operational lapak sub-data (vendors/transactions/etc.)
+            if (hasUserOperationalSubData(uid)) {
+                val restoredCode = "RESTORED-ACTIVE"
+                val restoredDevices = listOf(cleanDeviceId)
+                val restoredEmail = cleanEmail.ifBlank { "$uid@lapakkita.local" }
                 runCatching {
-                    syncDeviceRegistry(deviceRef, uid, profileEmail, businessName, licenseCode)
+                    restoreOrUpdateUserProfile(
+                        userRef = userRef,
+                        existingUserSnap = snap.takeIf { it.exists() },
+                        uid = uid,
+                        email = restoredEmail,
+                        businessName = "Lapak Kita",
+                        licenseCode = restoredCode,
+                        devices = restoredDevices
+                    )
                 }
-
+                runCatching {
+                    syncDeviceRegistry(deviceRef, uid, restoredEmail, "Lapak Kita", restoredCode)
+                }
                 return LoginDeviceCheckResult.Allowed(
                     profile = UserProfileDoc(
                         userId = uid,
-                        email = profileEmail,
-                        businessName = businessName,
-                        licenseCode = licenseCode,
-                        registeredDeviceId = updatedDevices.first(),
-                        registeredDeviceIds = updatedDevices,
+                        email = restoredEmail,
+                        businessName = "Lapak Kita",
+                        licenseCode = restoredCode,
+                        registeredDeviceId = cleanDeviceId,
+                        registeredDeviceIds = restoredDevices,
                         active = true
                     ),
                     wasRebound = true
                 )
             }
 
-            // Step 5: existingDevices.size >= 2 and currentDeviceId is not one of them -> block 3rd device!
-            LoginDeviceCheckResult.BlockedOtherDevice(MAX_DEVICES_LOCK_MESSAGE)
+            // Step 2c: Check if this exact device is already registered to this Google account in device_registry
+            val deviceHint = lookupDeviceRegistration(cleanDeviceId)
+            val deviceMatchesUser = deviceHint != null && deviceHint.active && (
+                deviceHint.ownerUid == uid ||
+                    (cleanEmail.isNotEmpty() && deviceHint.emailHint.equals(cleanEmail, ignoreCase = true))
+                )
+            if (deviceMatchesUser && deviceHint != null) {
+                val restoredCode = normalizeCode(deviceHint.licenseCode).ifBlank { "RESTORED-ACTIVE" }
+                val restoredBiz = deviceHint.businessName.ifBlank { "Lapak Kita" }
+                val restoredEmail = cleanEmail.ifBlank { deviceHint.emailHint }.ifBlank { "$uid@lapakkita.local" }
+                val restoredDevices = listOf(cleanDeviceId)
+                runCatching {
+                    restoreOrUpdateUserProfile(
+                        userRef = userRef,
+                        existingUserSnap = snap.takeIf { it.exists() },
+                        uid = uid,
+                        email = restoredEmail,
+                        businessName = restoredBiz,
+                        licenseCode = restoredCode,
+                        devices = restoredDevices
+                    )
+                }
+                return LoginDeviceCheckResult.Allowed(
+                    profile = UserProfileDoc(
+                        userId = uid,
+                        email = restoredEmail,
+                        businessName = restoredBiz,
+                        licenseCode = restoredCode,
+                        registeredDeviceId = cleanDeviceId,
+                        registeredDeviceIds = restoredDevices,
+                        active = true
+                    ),
+                    wasRebound = false
+                )
+            }
+
+            // Step 3: Neither users/{uid} nor activation_codes nor sub-data nor device_registry found -> new account
+            LoginDeviceCheckResult.NotRegistered
         } catch (e: CancellationException) {
             throw e
         } catch (e: FirebaseFirestoreException) {
@@ -455,7 +871,7 @@ class ActivationAuthRepository(
 
     private suspend fun syncActivationCodeDevices(licenseCode: String, updatedDevices: List<String>) {
         val code = normalizeCode(licenseCode)
-        if (code.length < 4 || updatedDevices.isEmpty()) return
+        if (code.length < 4 || code == "RESTORED-ACTIVE" || updatedDevices.isEmpty()) return
         runCatching {
             activationCodesCollection.document(code).update(
                 mapOf(
@@ -502,7 +918,7 @@ class ActivationAuthRepository(
     }
 
     private suspend fun syncDeviceRegistry(
-        deviceRef: com.google.firebase.firestore.DocumentReference,
+        deviceRef: DocumentReference,
         uid: String,
         email: String,
         businessName: String,

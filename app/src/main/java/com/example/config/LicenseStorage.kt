@@ -126,6 +126,7 @@ class LicenseStorage(context: Context) {
             .putString(uidKey(cleanUid, "device_id"), deviceId.trim())
             .putInt(uidKey(cleanUid, "connected_devices_count"), connectedDevicesCount.coerceIn(1, 2))
             .putBoolean(uidKey(cleanUid, "session_active"), active)
+            .putBoolean(uidKey(cleanUid, "is_activated"), active)
             .putString(uidKey(cleanUid, "integrity_seal"), seal)
             .putLong(uidKey(cleanUid, "activated_at"), syncedAtMillis)
             .apply()

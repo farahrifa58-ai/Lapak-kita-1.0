@@ -631,3 +631,67 @@ test("Legacy user auto-migration: single registeredDeviceId migrates cleanly to 
   );
 });
 
+test("Dual activation recovery: owner can query own activation_codes by usedByUid/usedByEmail and restore users/{uid}; other users denied", async () => {
+  const buyer1Db = testEnv
+    .authenticatedContext(ADMIN_A, {
+      email: "owner.lapak@gmail.com",
+      email_verified: true,
+    })
+    .firestore();
+  const buyer2Db = testEnv
+    .authenticatedContext(ADMIN_B, {
+      email: "orang.lain@gmail.com",
+      email_verified: true,
+    })
+    .firestore();
+  const code = "RAFDEV-RECOVER-01";
+  const now = new Date(Date.now() - 4000);
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("activation_codes").doc(code).set({
+      code,
+      status: "used",
+      usedByUid: ADMIN_A,
+      usedByEmail: "owner.lapak@gmail.com",
+      usedByBusinessName: "Lapak Owner",
+      registeredDeviceId: "AND-OLD-HP1",
+      registeredDeviceIds: ["AND-OLD-HP1"],
+      updatedAt: now,
+    });
+  });
+
+  // Owner queries own claimed code by usedByUid and usedByEmail -> SUCCEEDS
+  await assertSucceeds(
+    buyer1Db.collection("activation_codes").where("usedByUid", "==", ADMIN_A).get()
+  );
+  await assertSucceeds(
+    buyer1Db.collection("activation_codes").where("usedByEmail", "==", "owner.lapak@gmail.com").get()
+  );
+
+  // Another buyer trying to query Owner's codes or list all codes -> BLOCKED
+  await assertFails(
+    buyer2Db.collection("activation_codes").where("usedByUid", "==", ADMIN_A).get()
+  );
+  await assertFails(
+    buyer2Db.collection("activation_codes").where("usedByEmail", "==", "owner.lapak@gmail.com").get()
+  );
+  await assertFails(buyer2Db.collection("activation_codes").get());
+
+  // Owner restores missing users/{uid} doc with isActivated: true and 2 devices (HP1 + HP2) -> SUCCEEDS
+  await assertSucceeds(
+    buyer1Db.collection("users").doc(ADMIN_A).set({
+      userId: ADMIN_A,
+      email: "owner.lapak@gmail.com",
+      businessName: "Lapak Owner",
+      licenseCode: code,
+      registeredDeviceId: "AND-OLD-HP1",
+      registeredDeviceIds: ["AND-OLD-HP1", "AND-NEW-HP2"],
+      active: true,
+      isActivated: true,
+      createdAt: now,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+});
+
+

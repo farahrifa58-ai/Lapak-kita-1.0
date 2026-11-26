@@ -130,7 +130,8 @@ service cloud.firestore {
              data.registeredDeviceId is string &&
              (data.registeredDeviceId == '' || isValidDeviceId(data.registeredDeviceId)) &&
              (!('registeredDeviceIds' in data) || isValidDeviceIdList(data.registeredDeviceIds)) &&
-             data.active is bool;
+             data.active is bool &&
+             (!('isActivated' in data) || data.isActivated is bool);
     }
 
     function isValidDeviceRegistration(data) {
@@ -334,12 +335,21 @@ service cloud.firestore {
     // --- 4. ACTIVATION CODES (100% Synced with License Admin, Max 2 Devices) ---
     match /activation_codes/{codeId} {
       allow get: if isValidActivationCodeId(codeId);
-      allow list: if isLicenseDeveloper();
+      allow list: if isLicenseDeveloper() ||
+                     (isSignedIn() && (
+                       existing().usedByUid == request.auth.uid ||
+                       ('email_verified' in request.auth.token &&
+                        request.auth.token.email_verified == true &&
+                        'email' in request.auth.token &&
+                        'usedByEmail' in existing() &&
+                        existing().usedByEmail is string &&
+                        existing().usedByEmail.lower() == request.auth.token.email.lower())
+                     ));
       allow create: if isLicenseDeveloper() && isValidActivationCodeId(codeId);
       allow delete: if isLicenseDeveloper() && isValidActivationCodeId(codeId);
 
       // Case A: One-time claim 'available' -> 'used' with 1st device
-      // Case B: Same owner adding 2nd authorized device (max 2 items in registeredDeviceIds)
+      // Case B: Same owner adding 2nd authorized device or restoring/backfilling own UID (max 2 devices)
       allow update: if isLicenseDeveloper() ||
                        (isSignedIn() &&
                         isValidActivationCodeId(codeId) &&
@@ -364,20 +374,24 @@ service cloud.firestore {
                         ])) ||
                        (isSignedIn() &&
                         isValidActivationCodeId(codeId) &&
-                        existing().status in ['used', 'USED', 'Used'] &&
+                        existing().status in ['used', 'USED', 'Used', 'active', 'ACTIVE'] &&
                         (('usedByUid' in existing() && existing().usedByUid == request.auth.uid) ||
-                         (!('usedByUid' in existing()) &&
-                          'usedByEmail' in existing() &&
+                         ('usedByEmail' in existing() &&
+                          existing().usedByEmail is string &&
+                          'email_verified' in request.auth.token &&
+                          request.auth.token.email_verified == true &&
                           'email' in request.auth.token &&
-                          existing().usedByEmail == request.auth.token.email)) &&
+                          existing().usedByEmail.lower() == request.auth.token.email.lower())) &&
                         incoming().status == existing().status &&
-                        (!('usedByUid' in existing()) || incoming().usedByUid == existing().usedByUid) &&
+                        ((!('usedByUid' in existing()) || existing().usedByUid == '')
+                          ? (!('usedByUid' in incoming()) || incoming().usedByUid == request.auth.uid)
+                          : incoming().usedByUid == existing().usedByUid) &&
                         isValidDeviceListGrowth(existingDeviceList(existing()), incoming().registeredDeviceIds) &&
                         incoming().registeredDeviceId is string &&
                         (incoming().registeredDeviceId == '' || incoming().registeredDeviceId in incoming().registeredDeviceIds) &&
                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                         incoming().diff(existing()).affectedKeys().hasOnly([
-                          'registeredDeviceId', 'registeredDeviceIds', 'updatedAt'
+                          'usedByUid', 'registeredDeviceId', 'registeredDeviceIds', 'updatedAt'
                         ]));
     }
 
@@ -396,13 +410,15 @@ service cloud.firestore {
                        ]) &&
                        incoming().keys().hasOnly([
                          'userId', 'email', 'businessName', 'licenseCode',
-                         'registeredDeviceId', 'registeredDeviceIds', 'active', 'createdAt', 'updatedAt'
+                         'registeredDeviceId', 'registeredDeviceIds', 'active', 'isActivated',
+                         'createdAt', 'updatedAt'
                        ]) &&
                        isValidUserProfile(incoming()) &&
                        isValidDeviceId(incoming().registeredDeviceId) &&
                        isValidDeviceIdList(incoming().registeredDeviceIds) &&
-                       incoming().registeredDeviceIds.size() == 1 &&
-                       incoming().registeredDeviceIds[0] == incoming().registeredDeviceId &&
+                       incoming().registeredDeviceIds.size() >= 1 &&
+                       incoming().registeredDeviceIds.size() <= 2 &&
+                       incoming().registeredDeviceId in incoming().registeredDeviceIds &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
 
@@ -414,12 +430,13 @@ service cloud.firestore {
                         request.auth.uid == userId &&
                         isValidUserProfile(incoming()) &&
                         (!('userId' in existing()) || incoming().userId == existing().userId) &&
-                        incoming().licenseCode == existing().licenseCode &&
-                        incoming().active == existing().active &&
+                        (!('licenseCode' in existing()) || existing().licenseCode == '' || existing().licenseCode == 'RESTORED-ACTIVE' || incoming().licenseCode == existing().licenseCode) &&
+                        (!('active' in existing()) || incoming().active == existing().active) &&
                         (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                         incoming().diff(existing()).affectedKeys().hasOnly([
-                          'businessName', 'email', 'registeredDeviceId', 'registeredDeviceIds', 'updatedAt'
+                          'userId', 'businessName', 'email', 'licenseCode',
+                          'registeredDeviceId', 'registeredDeviceIds', 'active', 'isActivated', 'updatedAt'
                         ]) &&
                         ('registeredDeviceIds' in incoming()) &&
                         isValidDeviceListGrowth(existingDeviceList(existing()), incoming().registeredDeviceIds) &&

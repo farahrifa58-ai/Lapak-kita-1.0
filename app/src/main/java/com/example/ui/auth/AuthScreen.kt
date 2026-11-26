@@ -479,8 +479,14 @@ fun CompleteActivationScreen(
             onAuthFlowRunningChange(true)
 
             try {
-                // Step 1: Verify activation_codes/{code} has status == "available"
-                when (val codeCheck = activationAuthRepository.checkActivationCodeAvailable(cleanCode)) {
+                // Step 1: Verify activation_codes/{code} is either "available" OR already bound to this same Google account
+                when (
+                    val codeCheck = activationAuthRepository.checkActivationCodeAvailable(
+                        rawCode = cleanCode,
+                        currentUid = uid,
+                        currentEmail = email
+                    )
+                ) {
                     is CodeAvailabilityResult.InvalidOrUsed -> {
                         onSetAuthError(codeCheck.message)
                         return@launch
@@ -489,14 +495,31 @@ fun CompleteActivationScreen(
                         onSetAuthError(codeCheck.message)
                         return@launch
                     }
-                    is CodeAvailabilityResult.Available -> {
-                        // Step 2: Create users/{uid} & mark activation_codes/{code} -> "used"
-                        statusStep = "Mengaktifkan lisensi & mengunci perangkat..."
+                    is CodeAvailabilityResult.Available,
+                    is CodeAvailabilityResult.OwnedByCurrentUser -> {
+                        val isReactivation = codeCheck is CodeAvailabilityResult.OwnedByCurrentUser
+                        val resolvedCode = when (codeCheck) {
+                            is CodeAvailabilityResult.Available -> codeCheck.normalizedCode
+                            is CodeAvailabilityResult.OwnedByCurrentUser -> codeCheck.normalizedCode
+                            else -> cleanCode
+                        }
+                        val resolvedBiz = if (codeCheck is CodeAvailabilityResult.OwnedByCurrentUser && codeCheck.businessName.isNotBlank()) {
+                            codeCheck.businessName
+                        } else {
+                            cleanBiz
+                        }
+
+                        // Step 2: Create/restore users/{uid} & link activation_codes/{code}
+                        statusStep = if (isReactivation) {
+                            "Memulihkan aktivasi akun Anda..."
+                        } else {
+                            "Mengaktifkan lisensi & mengunci perangkat..."
+                        }
                         val regResult = activationAuthRepository.completeRegistrationWithCode(
                             uid = uid,
                             email = email,
-                            businessName = cleanBiz,
-                            rawCode = codeCheck.normalizedCode,
+                            businessName = resolvedBiz,
+                            rawCode = resolvedCode,
                             deviceId = currentDeviceId
                         )
 
@@ -514,7 +537,11 @@ fun CompleteActivationScreen(
                                 onSetAuthError(null)
                                 Toast.makeText(
                                     context,
-                                    "Aktivasi berhasil! Selamat datang di Lapak Kita.",
+                                    if (isReactivation) {
+                                        "Aktivasi akun berhasil dipulihkan! Selamat datang kembali."
+                                    } else {
+                                        "Aktivasi berhasil! Selamat datang di Lapak Kita."
+                                    },
                                     Toast.LENGTH_SHORT
                                 ).show()
                                 onActivated(profile)
