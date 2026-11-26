@@ -74,6 +74,7 @@ class LapakViewModel(
     private val listenerJobs = mutableListOf<Job>()
     private val backgroundJobs = mutableListOf<Job>()
     private val sellerSyncMutexes = ConcurrentHashMap<Long, Mutex>()
+    private val activeVendorsSyncInProgress = AtomicBoolean(false)
 
     private fun isActiveAuthenticatedSession(): Boolean {
         return sessionActiveFlag.get() &&
@@ -587,6 +588,12 @@ class LapakViewModel(
                     existingCloudPaymentKeys = cloudPaymentKeys
                 )
             }
+
+            // Step 5: Safeguard — refresh public Web Portal docs (`lapak_vendors/{kodePenyetor}`)
+            // for all active sellers so previously edited prices, basePrice, and commissions are live
+            if (isActiveAuthenticatedSession()) {
+                syncActiveVendorsToCloudSilently()
+            }
         }
         trackBackgroundJob(startupJob)
     }
@@ -1024,6 +1031,43 @@ class LapakViewModel(
                 onComplete?.invoke(false)
             } finally {
                 _isSyncingCloud.value = false
+            }
+        }
+        trackBackgroundJob(job)
+    }
+
+    /**
+     * Background safeguard triggered when opening the Daftar Penjual / Penyetor tab or on app startup:
+     * re-synchronizes every active seller's latest local products (`sellingPrice`, `basePrice`,
+     * `commission`, `stock`) to both `users/{uid}/vendors/{kode}` and `lapak_vendors/{kode}`.
+     */
+    fun syncActiveVendorsToCloudSilently() {
+        if (!isActiveAuthenticatedSession()) return
+        if (!activeVendorsSyncInProgress.compareAndSet(false, true)) return
+        val job = viewModelScope.launch {
+            try {
+                if (!isActiveAuthenticatedSession()) return@launch
+                repository.ensureAllSellersHaveVendorCodes()
+                val activeSellers = repository.allSellers.first()
+                    .filter { it.status == SellerStatus.AKTIF }
+                if (activeSellers.isEmpty()) return@launch
+
+                var syncedAny = false
+                for (seller in activeSellers) {
+                    if (!isActiveAuthenticatedSession()) return@launch
+                    val snapshot = repository.getSellerSyncSnapshotDirect(seller.id) ?: continue
+                    val res = syncSellerSnapshotConcurrently(snapshot)
+                    if (res.isSuccess) syncedAny = true
+                }
+                if (syncedAny) {
+                    _lastCloudSyncAt.value = System.currentTimeMillis()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("LapakViewModel", "Silent active vendors sync warning: ${e.message}")
+            } finally {
+                activeVendorsSyncInProgress.set(false)
             }
         }
         trackBackgroundJob(job)

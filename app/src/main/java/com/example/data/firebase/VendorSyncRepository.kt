@@ -15,6 +15,7 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.MetadataChanges
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -170,7 +171,7 @@ class VendorSyncRepository(
                     "lastProcessedSubmissionId" to preservedSubmissionId,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                vendorRef.update(updateData).await()
+                vendorRef.set(updateData, SetOptions.merge()).await()
             }
 
             // Guarantee private writeToken document exists & is 100% identical to seller.writeToken

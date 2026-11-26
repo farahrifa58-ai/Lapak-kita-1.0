@@ -18,6 +18,7 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.MetadataChanges
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -240,7 +241,7 @@ class FinancialSyncRepository(
                     "products" to productMaps,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.update(updatePayload).await()
+                docRef.set(updatePayload, SetOptions.merge()).await()
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -638,9 +639,13 @@ class FinancialSyncRepository(
             val name = (m["name"] as? String)?.trim().orEmpty()
             if (name.isEmpty()) return@mapNotNull null
             val price = (m["sellingPrice"] as? Number)?.toDouble()?.coerceAtLeast(0.0) ?: 0.0
-            val share = (m["sellerShare"] as? Number)?.toDouble()?.coerceIn(0.0, price) ?: 0.0
-            val profit = (m["adminProfitPerUnit"] as? Number)?.toDouble()?.coerceAtLeast(0.0)
+            val share = ((m["basePrice"] as? Number) ?: (m["sellerShare"] as? Number))
+                ?.toDouble()?.coerceIn(0.0, price) ?: 0.0
+            val profit = ((m["commission"] as? Number) ?: (m["adminProfitPerUnit"] as? Number))
+                ?.toDouble()?.coerceIn(0.0, price)
                 ?: (price - share).coerceAtLeast(0.0)
+            val stock = ((m["stock"] as? Number) ?: (m["currentStock"] as? Number))
+                ?.toInt()?.coerceAtLeast(0) ?: 0
             CloudVendorProductRecord(
                 name = name,
                 category = (m["category"] as? String)?.trim().orEmpty().ifEmpty { "Makanan" },
@@ -648,7 +653,7 @@ class FinancialSyncRepository(
                 sellingPrice = price,
                 sellerShare = share,
                 adminProfitPerUnit = profit,
-                currentStock = (m["currentStock"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0,
+                currentStock = stock,
                 isActive = (m["isActive"] as? Boolean) ?: true
             )
         }

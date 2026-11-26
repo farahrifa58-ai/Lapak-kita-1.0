@@ -49,6 +49,12 @@ fun SellersScreen(
     val payoutReceiptState by viewModel.lastSellerPaymentReceipt.collectAsState()
     val isSyncingCloud by viewModel.isSyncingCloud.collectAsState()
 
+    // Safeguard: whenever Admin opens Daftar Penjual / Penyetor, re-sync all active sellers'
+    // latest product prices, net shares, and commissions to `lapak_vendors/{kodePenyetor}`.
+    LaunchedEffect(Unit) {
+        viewModel.syncActiveVendorsToCloudSilently()
+    }
+
     var searchQuery by remember { mutableStateOf("") }
     var statusFilter by remember { mutableStateOf("Semua") }
 

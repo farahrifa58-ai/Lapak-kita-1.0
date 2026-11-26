@@ -1170,6 +1170,14 @@
       return { price, feeType, feeVal, adminFee, sellerNet };
     }
 
+    function getVendorProductsList(data) {
+      if (!data) return [];
+      if (Array.isArray(data.products)) return data.products;
+      if (Array.isArray(data.items)) return data.items;
+      if (Array.isArray(data.menu)) return data.menu;
+      return [];
+    }
+
     function getProductId(p) {
       return Number(p?.id ?? p?.localProductId ?? 0);
     }
@@ -1179,18 +1187,19 @@
     }
 
     /**
-     * Resolves Harga Jual, Uang Bersih Penjual (basePrice / sellerShare), and Komisi Admin
-     * (commission / adminProfitPerUnit) directly from each product item so custom per-item
-     * commissions configured by Admin are NEVER overwritten by the vendor's global tariff.
+     * Reads Harga Jual (`sellingPrice`), Hak Bersih Penjual (`basePrice` / `sellerShare`),
+     * and Komisi Admin (`commission` / `adminProfitPerUnit`) DIRECTLY from each item in
+     * `lapak_vendors/{kodePenyetor}.products`.
+     * NEVER recalculates `sellingPrice = basePrice + adminFee` and NEVER overwrites
+     * explicit per-item values with the vendor's global root tariff.
      */
     function resolveItemPricing(p) {
       const price = Math.max(0, Math.round(Number(p?.sellingPrice) || 0));
-      const globalSplit = calculateSplit(price);
 
-      const hasBasePrice = p?.basePrice !== undefined && p?.basePrice !== null && !Number.isNaN(Number(p.basePrice));
-      const hasSellerShare = p?.sellerShare !== undefined && p?.sellerShare !== null && !Number.isNaN(Number(p.sellerShare));
-      const hasCommission = p?.commission !== undefined && p?.commission !== null && !Number.isNaN(Number(p.commission));
-      const hasAdminProfit = p?.adminProfitPerUnit !== undefined && p?.adminProfitPerUnit !== null && !Number.isNaN(Number(p.adminProfitPerUnit));
+      const hasBasePrice = p?.basePrice !== undefined && p?.basePrice !== null && p?.basePrice !== "" && !Number.isNaN(Number(p.basePrice));
+      const hasSellerShare = p?.sellerShare !== undefined && p?.sellerShare !== null && p?.sellerShare !== "" && !Number.isNaN(Number(p.sellerShare));
+      const hasCommission = p?.commission !== undefined && p?.commission !== null && p?.commission !== "" && !Number.isNaN(Number(p.commission));
+      const hasAdminProfit = p?.adminProfitPerUnit !== undefined && p?.adminProfitPerUnit !== null && p?.adminProfitPerUnit !== "" && !Number.isNaN(Number(p.adminProfitPerUnit));
 
       let sellerNet;
       let adminFee;
@@ -1199,23 +1208,22 @@
         const rawBase = Number(hasBasePrice ? p.basePrice : p.sellerShare);
         sellerNet = Math.max(0, Math.min(price, Math.round(rawBase)));
         if (hasCommission || hasAdminProfit) {
-          const rawComm = Math.round(Number(hasCommission ? p.commission : p.adminProfitPerUnit));
-          adminFee = Math.max(0, Math.min(price, rawComm));
-          if (Math.abs((sellerNet + adminFee) - price) > 1) {
-            adminFee = Math.max(0, price - sellerNet);
-          }
+          const rawComm = Number(hasCommission ? p.commission : p.adminProfitPerUnit);
+          adminFee = Math.max(0, Math.min(price, Math.round(rawComm)));
         } else {
           adminFee = Math.max(0, price - sellerNet);
         }
       } else if (hasCommission || hasAdminProfit) {
-        const rawComm = Math.round(Number(hasCommission ? p.commission : p.adminProfitPerUnit));
-        adminFee = Math.max(0, Math.min(price, rawComm));
+        const rawComm = Number(hasCommission ? p.commission : p.adminProfitPerUnit);
+        adminFee = Math.max(0, Math.min(price, Math.round(rawComm)));
         sellerNet = Math.max(0, price - adminFee);
       } else {
-        sellerNet = globalSplit.sellerNet;
-        adminFee = globalSplit.adminFee;
+        const fallbackSplit = calculateSplit(price);
+        sellerNet = fallbackSplit.sellerNet;
+        adminFee = fallbackSplit.adminFee;
       }
 
+      const globalSplit = calculateSplit(price);
       const isCustomCommission = Math.abs(adminFee - globalSplit.adminFee) > 0;
       return { price, sellerNet, adminFee, isCustomCommission };
     }
@@ -1345,7 +1353,7 @@
     }
 
     function renderExistingProducts() {
-      const products = Array.isArray(vendorData?.products) ? vendorData.products : [];
+      const products = getVendorProductsList(vendorData);
       if (products.length === 0) {
         productsContainer.innerHTML = `
           <div class="card empty-state">
@@ -1483,7 +1491,7 @@
 
       if (modalMode === "editExisting") {
         const numId = Number(modalTargetId);
-        const existing = (vendorData?.products || []).find((p) => getProductId(p) === numId);
+        const existing = getVendorProductsList(vendorData).find((p) => getProductId(p) === numId);
         if (existing) {
           const itemPricing = resolveItemPricing(existing);
           if (price === itemPricing.price || itemPricing.isCustomCommission) {
@@ -1533,7 +1541,7 @@
         initialStockGroup.classList.remove("hidden");
       } else if (mode === "editExisting") {
         const numId = Number(targetId);
-        const existing = (vendorData?.products || []).find((p) => getProductId(p) === numId);
+        const existing = getVendorProductsList(vendorData).find((p) => getProductId(p) === numId);
         if (!existing) return;
         const draft = draftEditedProducts[numId];
         modalTitle.textContent = "Edit Produk";
@@ -1608,7 +1616,7 @@
         ensureBatchSubmissionId();
       } else if (modalMode === "editExisting") {
         const numId = Number(modalTargetId);
-        const existing = (vendorData?.products || []).find((p) => getProductId(p) === numId);
+        const existing = getVendorProductsList(vendorData).find((p) => getProductId(p) === numId);
         const isUnchanged = existing &&
           String(existing.name || "").trim() === name &&
           String(existing.category || "Makanan").trim() === category &&
@@ -1861,21 +1869,21 @@
           activeDb = targetDb;
           loadingCard.classList.add("hidden");
           const incomingData = snap.data();
-          const incomingProducts = Array.isArray(incomingData?.products) ? incomingData.products : [];
+          const incomingProducts = getVendorProductsList(incomingData);
           const validIds = new Set(incomingProducts.map((p) => getProductId(p)));
-
-          // Prune draft stock/edit entries if Admin deleted a product
-          Object.keys(draftStockAdditions).forEach((k) => {
-            if (!validIds.has(Number(k))) delete draftStockAdditions[k];
-          });
-          Object.keys(draftEditedProducts).forEach((k) => {
-            if (!validIds.has(Number(k))) delete draftEditedProducts[k];
-          });
 
           const nextSignature = buildProductsPriceSignature(incomingProducts);
           const hadPreviousData = vendorData !== null;
           const pricingChanged = hadPreviousData && lastProductsPriceSignature !== null && nextSignature !== lastProductsPriceSignature;
           lastProductsPriceSignature = nextSignature;
+
+          // Prune draft stock/edit entries if Admin deleted a product or pushed newer pricing
+          Object.keys(draftStockAdditions).forEach((k) => {
+            if (!validIds.has(Number(k))) delete draftStockAdditions[k];
+          });
+          Object.keys(draftEditedProducts).forEach((k) => {
+            if (!validIds.has(Number(k)) || pricingChanged) delete draftEditedProducts[k];
+          });
 
           vendorData = incomingData;
           portalContent.classList.remove("hidden");
