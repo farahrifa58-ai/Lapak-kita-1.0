@@ -14,6 +14,7 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -228,7 +229,7 @@ class VendorSyncRepository(
         val path = "lapak_vendor_submissions"
         return submissionsCollection
             .whereEqualTo("ownerUid", ownerUid)
-            .snapshots()
+            .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
                 snapshot.documents.mapNotNull { doc ->
                     val status = doc.getString("status") ?: return@mapNotNull null

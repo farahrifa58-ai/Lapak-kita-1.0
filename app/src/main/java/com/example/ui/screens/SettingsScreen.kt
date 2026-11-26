@@ -82,6 +82,7 @@ fun SettingsScreen(
     val products by viewModel.productsWithDetails.collectAsState()
     val isSyncingCloud by viewModel.isSyncingCloud.collectAsState()
     val lastCloudSyncAt by viewModel.lastCloudSyncAt.collectAsState()
+    val connectedDevicesCount by viewModel.connectedDevicesCount.collectAsState()
 
     // Accordion state: null means all collapsed initially for ultra-clean scannability
     var expandedSection by remember { mutableStateOf<String?>(null) }
@@ -1384,35 +1385,84 @@ fun SettingsScreen(
                     blurRadius = 10.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(14.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text("Akun Admin Terhubung", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Text(
-                                text = signedInEmail,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                Firebase.auth.signOut()
-                                onSignedOut()
-                            },
-                            shape = RoundedCornerShape(10.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                            modifier = Modifier.testTag("sign_out_button")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Keluar", maxLines = 1)
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("Akun Admin Terhubung", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = signedInEmail,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        GoogleAuthHelper.signOut(context)
+                                        onSignedOut()
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                modifier = Modifier.testTag("sign_out_button")
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Keluar", maxLines = 1)
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+
+                        // Connected Devices Status Pill ("Perangkat Terhubung: X / 2 HP")
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(lapakColors.omzetCardBg)
+                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                                .testTag("connected_devices_status_badge")
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Devices,
+                                        contentDescription = "Perangkat Terhubung",
+                                        tint = lapakColors.omzetCardAccent,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = "Perangkat Terhubung: $connectedDevicesCount / 2 HP",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = lapakColors.omzetCardAccent
+                                    )
+                                }
+                                Text(
+                                    text = "Real-Time",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = lapakColors.omzetCardAccent.copy(alpha = 0.85f)
+                                )
+                            }
                         }
                     }
                 }
@@ -1506,6 +1556,12 @@ fun SettingsScreen(
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "Perangkat Terhubung: $connectedDevicesCount / 2 HP",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = lapakColors.omzetCardAccent
                                 )
                             }
                         }

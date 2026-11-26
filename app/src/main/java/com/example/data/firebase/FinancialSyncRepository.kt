@@ -6,6 +6,9 @@ import com.example.data.model.OperatingExpense
 import com.example.data.model.Seller
 import com.example.data.model.SellerPayment
 import com.example.data.model.TransactionItem
+import com.example.data.model.VendorCodeGenerator
+import com.example.data.repository.ProductDetailItem
+import com.example.data.repository.SellerDetailItem
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
@@ -14,12 +17,39 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+
+data class CloudVendorProductRecord(
+    val name: String,
+    val category: String,
+    val unit: String,
+    val sellingPrice: Double,
+    val sellerShare: Double,
+    val adminProfitPerUnit: Double,
+    val currentStock: Int,
+    val isActive: Boolean
+)
+
+data class CloudVendorCatalogRecord(
+    val vendorCode: String,
+    val sellerName: String,
+    val whatsappNumber: String,
+    val address: String,
+    val notes: String,
+    val sellerStatus: String,
+    val writeToken: String,
+    val customAdminFeeType: String?,
+    val customAdminFeeValue: Double?,
+    val sourceDeviceId: String,
+    val products: List<CloudVendorProductRecord>,
+    val updatedAtMillis: Long
+)
 
 data class CloudTransactionItemRecord(
     val productName: String,
@@ -79,16 +109,21 @@ data class CloudFinancialBundle(
 )
 
 /**
- * Syncs Lapak Kita financial ledger directly under user-scoped subcollections:
+ * Syncs all Lapak Kita operational & financial data in real time under user-scoped subcollections
+ * so up to 2 authorized devices (HP Kasir + HP Owner) stay live-synced via `onSnapshot`
+ * with `MetadataChanges.INCLUDE`:
+ * - `users/{uid}/vendors` (sellers, products & live consignment stock)
  * - `users/{uid}/transactions`
  * - `users/{uid}/expenses`
  * - `users/{uid}/settlements`
- * Works offline-first via Firestore persistent local cache + Room local DB.
  */
 class FinancialSyncRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth
 ) {
+    private fun vendorsCatalogCollection(uid: String): CollectionReference =
+        db.collection("users").document(uid).collection("vendors")
+
     private fun transactionsCollection(uid: String): CollectionReference =
         db.collection("users").document(uid).collection("transactions")
 
@@ -115,6 +150,115 @@ class FinancialSyncRepository(
 
     fun buildSettlementDocId(payment: SellerPayment): String =
         sanitizeDocId("${payment.paymentDate}_${payment.id}", "pay")
+
+    suspend fun syncVendorCatalogToUserCloud(
+        sellerDetail: SellerDetailItem,
+        sellerProducts: List<ProductDetailItem>,
+        sourceDeviceId: String
+    ): Result<Unit> {
+        val seller = sellerDetail.seller
+        val vendorCode = seller.vendorCode.trim().uppercase()
+        val writeToken = seller.writeToken.trim()
+        if (!VendorCodeGenerator.isValidVendorCode(vendorCode) || !VendorCodeGenerator.isValidWriteToken(writeToken)) {
+            return Result.failure(IllegalArgumentException("Kode penyetor atau token tidak valid"))
+        }
+
+        val uid = try {
+            requireUserId()
+        } catch (e: Exception) {
+            return Result.failure(e)
+        }
+
+        val safeStatus = seller.status.name.takeIf { it in setOf("AKTIF", "LIBUR", "NONAKTIF") } ?: "AKTIF"
+        val customFeeType = seller.customAdminFeeType?.takeIf { it in setOf("FIXED", "PERCENTAGE") }.orEmpty()
+        val customFeeVal = (seller.customAdminFeeValue ?: 0.0).coerceIn(0.0, 10_000_000.0)
+
+        val productMaps = sellerProducts.take(100).map { detail ->
+            val p = detail.product
+            val safePrice = p.sellingPrice.coerceAtLeast(0.0)
+            val safeShare = p.sellerShare.coerceIn(0.0, safePrice)
+            val safeProfit = (safePrice - safeShare).coerceAtLeast(0.0)
+            mapOf(
+                "name" to p.name.trim().ifEmpty { "Produk" }.take(100),
+                "category" to p.category.trim().ifEmpty { "Makanan" }.take(50),
+                "unit" to p.unit.trim().ifEmpty { "pcs" }.take(20),
+                "sellingPrice" to safePrice,
+                "sellerShare" to safeShare,
+                "adminProfitPerUnit" to safeProfit,
+                "currentStock" to detail.currentStock.coerceAtLeast(0),
+                "isActive" to p.isActive
+            )
+        }
+
+        val path = "users/$uid/vendors/$vendorCode"
+        val docRef = vendorsCatalogCollection(uid).document(vendorCode)
+
+        return try {
+            val existing = docRef.get().await()
+            if (!existing.exists()) {
+                val createPayload = mapOf(
+                    "ownerUid" to uid,
+                    "vendorCode" to vendorCode,
+                    "sellerName" to seller.name.trim().ifEmpty { "Penyetor" }.take(100),
+                    "whatsappNumber" to seller.whatsappNumber.trim().take(40),
+                    "address" to seller.address.trim().take(250),
+                    "notes" to seller.notes.trim().take(300),
+                    "sellerStatus" to safeStatus,
+                    "writeToken" to writeToken,
+                    "customAdminFeeType" to customFeeType,
+                    "customAdminFeeValue" to customFeeVal,
+                    "sourceDeviceId" to sourceDeviceId.trim().take(128),
+                    "products" to productMaps,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(createPayload).await()
+            } else {
+                val updatePayload = mapOf(
+                    "sellerName" to seller.name.trim().ifEmpty { "Penyetor" }.take(100),
+                    "whatsappNumber" to seller.whatsappNumber.trim().take(40),
+                    "address" to seller.address.trim().take(250),
+                    "notes" to seller.notes.trim().take(300),
+                    "sellerStatus" to safeStatus,
+                    "writeToken" to writeToken,
+                    "customAdminFeeType" to customFeeType,
+                    "customAdminFeeValue" to customFeeVal,
+                    "sourceDeviceId" to sourceDeviceId.trim().take(128),
+                    "products" to productMaps,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.update(updatePayload).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: FirebaseFirestoreException) {
+            try {
+                handleFirestoreError(e, OperationType.WRITE, path)
+            } catch (wrapped: IllegalStateException) {
+                Result.failure(wrapped)
+            }
+        } catch (e: Exception) {
+            Log.e("FinancialSyncRepo", "Failed syncing $path", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteVendorCatalogFromUserCloud(vendorCode: String): Result<Unit> {
+        val cleanCode = vendorCode.trim().uppercase()
+        if (!VendorCodeGenerator.isValidVendorCode(cleanCode)) return Result.success(Unit)
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val path = "users/$uid/vendors/$cleanCode"
+        return try {
+            vendorsCatalogCollection(uid).document(cleanCode).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("FinancialSyncRepo", "Delete $path ignored/failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
 
     suspend fun syncTransactionToFirestore(
         transaction: LapakTransaction,
@@ -359,10 +503,26 @@ class FinancialSyncRepository(
         }
     }
 
+    // --- REAL-TIME SNAPSHOT LISTENERS (MetadataChanges.INCLUDE) FOR 2-HP SYNC ---
+
+    fun observeVendorsCatalogRealtime(ownerUid: String): Flow<List<CloudVendorCatalogRecord>> {
+        val path = "users/$ownerUid/vendors"
+        return vendorsCatalogCollection(ownerUid)
+            .snapshots(MetadataChanges.INCLUDE)
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { parseVendorCatalog(it) }
+            }
+            .catch { cause ->
+                if (cause is CancellationException && cause.cause == null) throw cause
+                val rootError = (cause as? CancellationException)?.cause ?: cause
+                handleFirestoreError(rootError, OperationType.LIST, path)
+            }
+    }
+
     fun observeTransactionsChronological(ownerUid: String): Flow<List<CloudTransactionRecord>> {
         val path = "users/$ownerUid/transactions"
         return transactionsCollection(ownerUid)
-            .snapshots()
+            .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
                 snapshot.documents.mapNotNull { parseTransaction(it) }
                     .sortedBy { it.timestampMillis }
@@ -372,6 +532,82 @@ class FinancialSyncRepository(
                 val rootError = (cause as? CancellationException)?.cause ?: cause
                 handleFirestoreError(rootError, OperationType.LIST, path)
             }
+    }
+
+    fun observeExpensesRealtime(ownerUid: String): Flow<List<CloudExpenseRecord>> {
+        val path = "users/$ownerUid/expenses"
+        return expensesCollection(ownerUid)
+            .snapshots(MetadataChanges.INCLUDE)
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { parseExpense(it) }
+                    .sortedBy { it.expenseDateMillis }
+            }
+            .catch { cause ->
+                if (cause is CancellationException && cause.cause == null) throw cause
+                val rootError = (cause as? CancellationException)?.cause ?: cause
+                handleFirestoreError(rootError, OperationType.LIST, path)
+            }
+    }
+
+    fun observeSettlementsRealtime(ownerUid: String): Flow<List<CloudSettlementRecord>> {
+        val path = "users/$ownerUid/settlements"
+        return settlementsCollection(ownerUid)
+            .snapshots(MetadataChanges.INCLUDE)
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { parseSettlement(it) }
+                    .sortedBy { it.paymentDateMillis }
+            }
+            .catch { cause ->
+                if (cause is CancellationException && cause.cause == null) throw cause
+                val rootError = (cause as? CancellationException)?.cause ?: cause
+                handleFirestoreError(rootError, OperationType.LIST, path)
+            }
+    }
+
+    private fun parseVendorCatalog(doc: DocumentSnapshot): CloudVendorCatalogRecord? {
+        val vendorCode = doc.getString("vendorCode")?.trim()?.uppercase().orEmpty()
+        val sellerName = doc.getString("sellerName")?.trim().orEmpty()
+        if (vendorCode.isBlank() || sellerName.isBlank()) return null
+
+        val rawProducts = doc.get("products") as? List<*> ?: emptyList<Any>()
+        val products = rawProducts.mapNotNull { entry ->
+            val m = entry as? Map<*, *> ?: return@mapNotNull null
+            val name = (m["name"] as? String)?.trim().orEmpty()
+            if (name.isEmpty()) return@mapNotNull null
+            val price = (m["sellingPrice"] as? Number)?.toDouble()?.coerceAtLeast(0.0) ?: 0.0
+            val share = (m["sellerShare"] as? Number)?.toDouble()?.coerceIn(0.0, price) ?: 0.0
+            val profit = (m["adminProfitPerUnit"] as? Number)?.toDouble()?.coerceAtLeast(0.0)
+                ?: (price - share).coerceAtLeast(0.0)
+            CloudVendorProductRecord(
+                name = name,
+                category = (m["category"] as? String)?.trim().orEmpty().ifEmpty { "Makanan" },
+                unit = (m["unit"] as? String)?.trim().orEmpty().ifEmpty { "pcs" },
+                sellingPrice = price,
+                sellerShare = share,
+                adminProfitPerUnit = profit,
+                currentStock = (m["currentStock"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0,
+                isActive = (m["isActive"] as? Boolean) ?: true
+            )
+        }
+
+        val rawFeeType = doc.getString("customAdminFeeType")?.trim().orEmpty()
+        val rawFeeVal = (doc.get("customAdminFeeValue") as? Number)?.toDouble()
+
+        return CloudVendorCatalogRecord(
+            vendorCode = vendorCode,
+            sellerName = sellerName,
+            whatsappNumber = doc.getString("whatsappNumber").orEmpty(),
+            address = doc.getString("address").orEmpty(),
+            notes = doc.getString("notes").orEmpty(),
+            sellerStatus = doc.getString("sellerStatus").orEmpty().ifEmpty { "AKTIF" },
+            writeToken = doc.getString("writeToken").orEmpty(),
+            customAdminFeeType = rawFeeType.takeIf { it in setOf("FIXED", "PERCENTAGE") },
+            customAdminFeeValue = if (rawFeeType in setOf("FIXED", "PERCENTAGE")) rawFeeVal else null,
+            sourceDeviceId = doc.getString("sourceDeviceId").orEmpty(),
+            products = products,
+            updatedAtMillis = doc.getTimestamp("updatedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                ?.toDate()?.time ?: System.currentTimeMillis()
+        )
     }
 
     private fun parseTransaction(doc: DocumentSnapshot): CloudTransactionRecord? {

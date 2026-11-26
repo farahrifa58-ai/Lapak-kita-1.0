@@ -9,6 +9,8 @@ import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.config.LicenseStorage
+import com.example.data.firebase.ActivationAuthRepository
 import com.example.data.firebase.FinancialSyncRepository
 import com.example.data.firebase.VendorSubmissionRemote
 import com.example.data.firebase.VendorSyncRepository
@@ -46,7 +48,10 @@ class LapakViewModel(
     private val repository: LapakRepository,
     private val vendorSyncRepository: VendorSyncRepository,
     private val financialSyncRepository: FinancialSyncRepository,
-    val currentUserId: String
+    private val activationAuthRepository: ActivationAuthRepository,
+    private val licenseStorage: LicenseStorage,
+    val currentUserId: String,
+    private val currentDeviceId: String = licenseStorage.getDeviceId()
 ) : ViewModel() {
 
     // Navigation
@@ -56,6 +61,10 @@ class LapakViewModel(
     fun navigateTo(screen: AppScreen) {
         _currentScreen.value = screen
     }
+
+    // Multi-Device Real-Time Sync Status ("Perangkat Terhubung: X / 2 HP")
+    private val _connectedDevicesCount = MutableStateFlow(licenseStorage.getCachedConnectedDevicesCount())
+    val connectedDevicesCount: StateFlow<Int> = _connectedDevicesCount.asStateFlow()
 
     // Real-time Web Penyetor Sync Status & Notification Banner
     private val _webSyncNotification = MutableStateFlow<String?>(null)
@@ -403,8 +412,92 @@ class LapakViewModel(
         }
         // 2. Start real-time Firestore listener for incoming Web Penyetor submissions
         startWebSubmissionsListener()
-        // 3. Start operational cycle watcher (checks every 60 seconds for 17:00 WIB rollover)
+        // 3. Start real-time Firestore listeners (MetadataChanges.INCLUDE) for 2-HP live sync
+        startMultiDeviceRealtimeListeners()
+        // 4. Start operational cycle watcher (checks every 60 seconds for 17:00 WIB rollover)
         startOperationalCycleWatcher()
+    }
+
+    /**
+     * Live real-time `onSnapshot` listeners (with MetadataChanges.INCLUDE) under `users/{uid}`
+     * so transactions, products, consignment stocks, settlements, expenses, and connected device count
+     * stay synchronized instantly between HP Kasir and HP Owner without manual refresh.
+     */
+    private fun startMultiDeviceRealtimeListeners() {
+        // 1. Live connected devices counter ("Perangkat Terhubung: X / 2 HP")
+        viewModelScope.launch {
+            activationAuthRepository.observeUserProfile(currentUserId).collect { profile ->
+                if (profile != null) {
+                    val count = profile.connectedDevicesCount.coerceIn(1, ActivationAuthRepository.MAX_REGISTERED_DEVICES)
+                    _connectedDevicesCount.value = count
+                    licenseStorage.updateConnectedDevicesCount(count)
+                }
+            }
+        }
+
+        // 2. Real-time sellers, products & consignment stock catalog
+        viewModelScope.launch {
+            try {
+                financialSyncRepository.observeVendorsCatalogRealtime(currentUserId).collect { remoteVendors ->
+                    val changed = repository.mergeCloudVendorsCatalog(remoteVendors, currentDeviceId)
+                    if (changed > 0) {
+                        _lastCloudSyncAt.value = System.currentTimeMillis()
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("LapakViewModel", "Realtime vendors catalog listener error: ${e.message}")
+            }
+        }
+
+        // 3. Real-time cashier transactions
+        viewModelScope.launch {
+            try {
+                financialSyncRepository.observeTransactionsChronological(currentUserId).collect { remoteTrxs ->
+                    val changed = repository.mergeCloudTransactions(remoteTrxs)
+                    if (changed > 0) {
+                        _lastCloudSyncAt.value = System.currentTimeMillis()
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("LapakViewModel", "Realtime transactions listener error: ${e.message}")
+            }
+        }
+
+        // 4. Real-time operating expenses
+        viewModelScope.launch {
+            try {
+                financialSyncRepository.observeExpensesRealtime(currentUserId).collect { remoteExps ->
+                    val changed = repository.mergeCloudExpenses(remoteExps)
+                    if (changed > 0) {
+                        _lastCloudSyncAt.value = System.currentTimeMillis()
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("LapakViewModel", "Realtime expenses listener error: ${e.message}")
+            }
+        }
+
+        // 5. Real-time seller payout settlements
+        viewModelScope.launch {
+            try {
+                financialSyncRepository.observeSettlementsRealtime(currentUserId).collect { remoteSettlements ->
+                    val changed = repository.mergeCloudSettlements(remoteSettlements)
+                    if (changed > 0) {
+                        _lastCloudSyncAt.value = System.currentTimeMillis()
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("LapakViewModel", "Realtime settlements listener error: ${e.message}")
+            }
+        }
     }
 
     private fun startOperationalCycleWatcher() {
@@ -481,6 +574,11 @@ class LapakViewModel(
                         sellerProducts = sellerProds,
                         shopProfile = profile,
                         appSettings = settings
+                    )
+                    financialSyncRepository.syncVendorCatalogToUserCloud(
+                        sellerDetail = sellerDetail,
+                        sellerProducts = sellerProds,
+                        sourceDeviceId = currentDeviceId
                     )
                     if (res.isSuccess) {
                         successCount++
@@ -588,6 +686,11 @@ class LapakViewModel(
                     shopProfile = profile,
                     appSettings = settings
                 )
+                financialSyncRepository.syncVendorCatalogToUserCloud(
+                    sellerDetail = target,
+                    sellerProducts = products,
+                    sourceDeviceId = currentDeviceId
+                )
                 if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
                 onComplete?.invoke(res.isSuccess)
             } catch (e: CancellationException) {
@@ -613,6 +716,11 @@ class LapakViewModel(
             shopProfile = profile,
             appSettings = settings,
             lastProcessedSubmissionId = lastProcessedSubmissionId
+        )
+        financialSyncRepository.syncVendorCatalogToUserCloud(
+            sellerDetail = target,
+            sellerProducts = products,
+            sourceDeviceId = currentDeviceId
         )
         if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
     }
@@ -711,6 +819,7 @@ class LapakViewModel(
         viewModelScope.launch {
             repository.deleteSeller(seller)
             vendorSyncRepository.deleteVendorFromFirestore(seller.vendorCode)
+            financialSyncRepository.deleteVendorCatalogFromUserCloud(seller.vendorCode)
             onDone()
         }
     }

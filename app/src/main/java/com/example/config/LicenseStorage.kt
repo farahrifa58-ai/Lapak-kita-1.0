@@ -12,13 +12,14 @@ data class CachedUserSession(
     val businessName: String,
     val licenseCode: String,
     val registeredDeviceId: String,
+    val connectedDevicesCount: Int = 1,
     val active: Boolean,
     val lastSyncedAtMillis: Long
 )
 
 /**
  * Manages stable device identity and offline-first cached activation/session state
- * so licensed users can continue running Lapak Kita smoothly offline.
+ * so licensed users can continue running Lapak Kita smoothly offline (up to 2 devices).
  */
 class LicenseStorage(context: Context) {
 
@@ -50,6 +51,7 @@ class LicenseStorage(context: Context) {
         businessName: String,
         licenseCode: String,
         deviceId: String = getDeviceId(),
+        connectedDevicesCount: Int = 1,
         active: Boolean = true,
         syncedAtMillis: Long = System.currentTimeMillis()
     ) {
@@ -61,10 +63,19 @@ class LicenseStorage(context: Context) {
             .putString(KEY_SESSION_BUSINESS_NAME, businessName.trim())
             .putString(KEY_LICENSE_CODE, normalizedCode)
             .putString(KEY_DEVICE_ID, deviceId.trim())
+            .putInt(KEY_CONNECTED_DEVICES_COUNT, connectedDevicesCount.coerceIn(1, 2))
             .putBoolean(KEY_SESSION_ACTIVE, active)
             .putString(KEY_INTEGRITY_SEAL, seal)
             .putLong(KEY_ACTIVATED_AT, syncedAtMillis)
             .apply()
+    }
+
+    fun updateConnectedDevicesCount(count: Int) {
+        prefs.edit().putInt(KEY_CONNECTED_DEVICES_COUNT, count.coerceIn(0, 2)).apply()
+    }
+
+    fun getCachedConnectedDevicesCount(): Int {
+        return prefs.getInt(KEY_CONNECTED_DEVICES_COUNT, 1).coerceIn(1, 2)
     }
 
     fun getOfflineSession(): CachedUserSession? {
@@ -73,6 +84,7 @@ class LicenseStorage(context: Context) {
         val businessName = prefs.getString(KEY_SESSION_BUSINESS_NAME, null)?.trim().orEmpty()
         val code = prefs.getString(KEY_LICENSE_CODE, null)?.trim()?.uppercase().orEmpty()
         val boundDeviceId = prefs.getString(KEY_DEVICE_ID, null)?.trim().orEmpty()
+        val connectedCount = prefs.getInt(KEY_CONNECTED_DEVICES_COUNT, 1).coerceIn(1, 2)
         val active = prefs.getBoolean(KEY_SESSION_ACTIVE, false)
         val savedSeal = prefs.getString(KEY_INTEGRITY_SEAL, null).orEmpty()
         val syncedAt = prefs.getLong(KEY_ACTIVATED_AT, 0L)
@@ -89,6 +101,7 @@ class LicenseStorage(context: Context) {
             businessName = businessName,
             licenseCode = code,
             registeredDeviceId = boundDeviceId,
+            connectedDevicesCount = connectedCount,
             active = active,
             lastSyncedAtMillis = syncedAt
         )
@@ -110,6 +123,7 @@ class LicenseStorage(context: Context) {
             .remove(KEY_SESSION_BUSINESS_NAME)
             .remove(KEY_LICENSE_CODE)
             .remove(KEY_DEVICE_ID)
+            .remove(KEY_CONNECTED_DEVICES_COUNT)
             .remove(KEY_SESSION_ACTIVE)
             .remove(KEY_INTEGRITY_SEAL)
             .remove(KEY_ACTIVATED_AT)
@@ -123,6 +137,7 @@ class LicenseStorage(context: Context) {
         private const val KEY_SESSION_BUSINESS_NAME = "session_business_name"
         private const val KEY_LICENSE_CODE = "active_license_code"
         private const val KEY_DEVICE_ID = "bound_device_id"
+        private const val KEY_CONNECTED_DEVICES_COUNT = "connected_devices_count"
         private const val KEY_SESSION_ACTIVE = "session_active"
         private const val KEY_INTEGRITY_SEAL = "license_integrity_seal"
         private const val KEY_ACTIVATED_AT = "license_activated_at"

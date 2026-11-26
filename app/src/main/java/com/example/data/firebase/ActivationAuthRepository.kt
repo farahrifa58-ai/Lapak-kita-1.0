@@ -1,11 +1,17 @@
 package com.example.data.firebase
 
 import android.util.Log
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.Source
+import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
 data class UserProfileDoc(
@@ -14,8 +20,12 @@ data class UserProfileDoc(
     val businessName: String,
     val licenseCode: String,
     val registeredDeviceId: String,
+    val registeredDeviceIds: List<String> = listOfNotNull(registeredDeviceId.takeIf { it.isNotBlank() }),
     val active: Boolean
-)
+) {
+    val connectedDevicesCount: Int
+        get() = registeredDeviceIds.distinct().size
+}
 
 data class DeviceAutoRestoreHint(
     val ownerUid: String,
@@ -42,7 +52,8 @@ sealed class LoginDeviceCheckResult {
 /**
  * 100% synced with the external "License Admin" Firestore database:
  * - Reads & claims activation codes from `activation_codes/{code}` verifying `status == "available"`.
- * - Stores user profiles & enforces 1 Account = 1 Device (`registeredDeviceId`) in `users/{uid}`.
+ * - Stores user profiles & enforces Multi-Device Lock (up to 2 devices via `registeredDeviceIds` array,
+ *   while maintaining full backward compatibility with legacy single-string `registeredDeviceId`).
  * - Maintains exact-ID `device_registry/{deviceId}` for seamless same-HP auto-restore after reinstall.
  */
 class ActivationAuthRepository(
@@ -56,8 +67,63 @@ class ActivationAuthRepository(
         raw.trim().uppercase().replace(Regex("[^A-Z0-9_\\-]"), "")
 
     /**
+     * Step 1 helper: reads raw `registeredDeviceIds` array if present (or empty list).
+     */
+    private fun extractRawDeviceArray(snap: DocumentSnapshot): List<String> {
+        val rawList = snap.get("registeredDeviceIds") as? List<*> ?: return emptyList()
+        val result = linkedSetOf<String>()
+        rawList.forEach { entry ->
+            val id = (entry as? String)?.trim().orEmpty()
+            if (id.isNotEmpty()) result.add(id)
+        }
+        return result.toList()
+    }
+
+    /**
+     * Legacy auto-migration Steps 1 & 2:
+     * 1. Build initial `existingDevices` from `registeredDeviceIds` array (or empty list).
+     * 2. If legacy `registeredDeviceId` is non-empty and not yet in `existingDevices`,
+     *    add it so the original HP #1 stays recorded as device #1.
+     */
+    private fun extractRegisteredDeviceIds(snap: DocumentSnapshot): List<String> {
+        val existingDevices = extractRawDeviceArray(snap).toMutableList()
+        val legacySingle = snap.getString("registeredDeviceId")?.trim().orEmpty()
+        if (legacySingle.isNotEmpty() && legacySingle !in existingDevices) {
+            existingDevices.add(legacySingle)
+        }
+        return existingDevices
+    }
+
+    /**
+     * Real-time listener on `users/{uid}` with MetadataChanges.INCLUDE so both devices
+     * see live connected device count ("Perangkat Terhubung: X / 2 HP") immediately.
+     */
+    fun observeUserProfile(uid: String): Flow<UserProfileDoc?> {
+        val path = "users/$uid"
+        return usersCollection.document(uid)
+            .snapshots(MetadataChanges.INCLUDE)
+            .map { snap ->
+                if (!snap.exists()) return@map null
+                val deviceIds = extractRegisteredDeviceIds(snap)
+                UserProfileDoc(
+                    userId = snap.getString("userId")?.trim().orEmpty().ifBlank { uid },
+                    email = snap.getString("email")?.trim().orEmpty(),
+                    businessName = snap.getString("businessName")?.trim().orEmpty().ifBlank { "Lapak Kita" },
+                    licenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty(),
+                    registeredDeviceId = deviceIds.firstOrNull().orEmpty(),
+                    registeredDeviceIds = deviceIds,
+                    active = snap.getBoolean("active") ?: false
+                )
+            }
+            .catch { cause ->
+                if (cause is CancellationException && cause.cause == null) throw cause
+                val rootError = (cause as? CancellationException)?.cause ?: cause
+                Log.w(TAG, "observeUserProfile($path) warning: ${rootError.message}")
+            }
+    }
+
+    /**
      * Checks `activation_codes/{code}` against server to verify `status == "available"`.
-     * Prevents false "used on another device" errors on freshly issued License Admin codes.
      */
     suspend fun checkActivationCodeAvailable(rawCode: String): CodeAvailabilityResult {
         val code = normalizeCode(rawCode)
@@ -97,7 +163,7 @@ class ActivationAuthRepository(
     /**
      * Completes new account activation after Google Sign-In succeeds:
      * 1. Re-verifies `activation_codes/{code}` has `status == "available"`.
-     * 2. Atomically updates `activation_codes/{code}` -> `status: "used"` + metadata
+     * 2. Atomically updates `activation_codes/{code}` -> `status: "used"` + `registeredDeviceIds: [deviceId]`
      *    and writes `users/{uid}` + `device_registry/{deviceId}`.
      */
     suspend fun completeRegistrationWithCode(
@@ -131,41 +197,71 @@ class ActivationAuthRepository(
             // Check if this Google account already exists with an active profile
             val existingUserSnap = userRef.get(Source.SERVER).await()
             if (existingUserSnap.exists() && existingUserSnap.getBoolean("active") == true) {
-                val existingDevice = existingUserSnap.getString("registeredDeviceId").orEmpty()
-                val existingCode = existingUserSnap.getString("licenseCode").orEmpty()
+                val rawArrayDevices = extractRawDeviceArray(existingUserSnap)
+                val hasArrayField = existingUserSnap.get("registeredDeviceIds") is List<*>
+                val existingDevices = extractRegisteredDeviceIds(existingUserSnap)
+                val needsLegacyMigration = !hasArrayField || rawArrayDevices != existingDevices
+                val existingCode = existingUserSnap.getString("licenseCode").orEmpty().ifBlank { code }
                 val existingBiz = existingUserSnap.getString("businessName").orEmpty().ifBlank { cleanBusinessName }
-                if (existingDevice == cleanDeviceId || existingDevice.isBlank()) {
-                    if (existingDevice.isBlank()) {
-                        userRef.update(
-                            mapOf(
-                                "registeredDeviceId" to cleanDeviceId,
-                                "businessName" to cleanBusinessName,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        ).await()
+
+                if (cleanDeviceId in existingDevices) {
+                    if (needsLegacyMigration) {
+                        runCatching {
+                            userRef.update(
+                                mapOf(
+                                    "registeredDeviceId" to existingDevices.first(),
+                                    "registeredDeviceIds" to existingDevices,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
+                        syncActivationCodeDevices(existingCode, existingDevices)
                     }
-                    syncDeviceRegistry(deviceRef, uid, cleanEmail, existingBiz, existingCode.ifBlank { code })
+                    syncDeviceRegistry(deviceRef, uid, cleanEmail, existingBiz, existingCode)
                     return Result.success(
                         UserProfileDoc(
                             userId = uid,
                             email = cleanEmail,
                             businessName = existingBiz,
-                            licenseCode = existingCode.ifBlank { code },
-                            registeredDeviceId = cleanDeviceId,
+                            licenseCode = existingCode,
+                            registeredDeviceId = existingDevices.firstOrNull().orEmpty(),
+                            registeredDeviceIds = existingDevices,
+                            active = true
+                        )
+                    )
+                } else if (existingDevices.size < MAX_REGISTERED_DEVICES) {
+                    val updatedDevices = (existingDevices + cleanDeviceId).distinct().take(MAX_REGISTERED_DEVICES)
+                    userRef.update(
+                        mapOf(
+                            "registeredDeviceId" to updatedDevices.first(),
+                            "registeredDeviceIds" to updatedDevices,
+                            "businessName" to existingBiz,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                    syncActivationCodeDevices(existingCode, updatedDevices)
+                    syncDeviceRegistry(deviceRef, uid, cleanEmail, existingBiz, existingCode)
+                    return Result.success(
+                        UserProfileDoc(
+                            userId = uid,
+                            email = cleanEmail,
+                            businessName = existingBiz,
+                            licenseCode = existingCode,
+                            registeredDeviceId = updatedDevices.first(),
+                            registeredDeviceIds = updatedDevices,
                             active = true
                         )
                     )
                 } else {
-                    return Result.failure(
-                        IllegalStateException(SINGLE_DEVICE_LOCK_MESSAGE)
-                    )
+                    return Result.failure(IllegalStateException(MAX_DEVICES_LOCK_MESSAGE))
                 }
             }
 
+            val initialDevices = listOf(cleanDeviceId)
+
             // Write atomically in a batch:
-            // 1. Update activation_codes/{code} -> status: "used"
-            // 2. Create users/{uid}
-            // 3. Upsert device_registry/{deviceId}
+            // 1. Update activation_codes/{code} -> status: "used" + registeredDeviceIds
+            // 2. Create users/{uid} with registeredDeviceIds (max 2 devices)
             val batch = db.batch()
             batch.update(
                 codeRef,
@@ -175,6 +271,7 @@ class ActivationAuthRepository(
                     "usedByEmail" to cleanEmail,
                     "usedByBusinessName" to cleanBusinessName,
                     "registeredDeviceId" to cleanDeviceId,
+                    "registeredDeviceIds" to initialDevices,
                     "usedAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -187,6 +284,7 @@ class ActivationAuthRepository(
                     "businessName" to cleanBusinessName,
                     "licenseCode" to code,
                     "registeredDeviceId" to cleanDeviceId,
+                    "registeredDeviceIds" to initialDevices,
                     "active" to true,
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -206,6 +304,7 @@ class ActivationAuthRepository(
                     businessName = cleanBusinessName,
                     licenseCode = code,
                     registeredDeviceId = cleanDeviceId,
+                    registeredDeviceIds = initialDevices,
                     active = true
                 )
             )
@@ -230,10 +329,13 @@ class ActivationAuthRepository(
     }
 
     /**
-     * Enforces Single Device Lock (1 Account = 1 Device) on Login and startup online verification.
-     * - If `registeredDeviceId` is empty `""` (reset by admin), automatically binds current device.
-     * - If `registeredDeviceId == currentDeviceId`, grants access.
-     * - If `registeredDeviceId != currentDeviceId`, blocks login with exact warning message.
+     * Enforces Multi-Device Lock (Max 2 Devices = HP Kasir + HP Owner) with automatic legacy migration:
+     * 1. Build `existingDevices` from `registeredDeviceIds` array (or empty list if missing).
+     * 2. If legacy `registeredDeviceId` is non-empty and not in `existingDevices`, add it first so HP #1 stays device #1.
+     * 3. If `currentDeviceId` is already in `existingDevices` -> auto-migrate array if needed and allow immediately.
+     * 4. If `existingDevices.size < 2` -> append `currentDeviceId` (as device #2), save `registeredDeviceIds` to
+     *    `users/{uid}` and `activation_codes/{licenseCode}`, then allow into Dashboard.
+     * 5. If `existingDevices.size >= 2` and `currentDeviceId` is not among them -> reject login with max-2-devices error.
      */
     suspend fun verifySingleDeviceOnLogin(
         uid: String,
@@ -241,7 +343,8 @@ class ActivationAuthRepository(
         currentDeviceId: String
     ): LoginDeviceCheckResult {
         val userRef = usersCollection.document(uid)
-        val deviceRef = deviceRegistryCollection.document(currentDeviceId)
+        val cleanDeviceId = currentDeviceId.trim()
+        val deviceRef = deviceRegistryCollection.document(cleanDeviceId)
         val cleanEmail = email.trim()
 
         return try {
@@ -251,7 +354,11 @@ class ActivationAuthRepository(
             }
 
             val active = snap.getBoolean("active") ?: false
-            val registeredDeviceId = snap.getString("registeredDeviceId")?.trim().orEmpty()
+            val rawArrayDevices = extractRawDeviceArray(snap)
+            val hasArrayField = snap.get("registeredDeviceIds") is List<*>
+            // Steps 1 & 2: build existingDevices from registeredDeviceIds + legacy registeredDeviceId
+            val existingDevices = extractRegisteredDeviceIds(snap)
+            val needsLegacyMigration = !hasArrayField || rawArrayDevices != existingDevices
             val licenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty()
             val businessName = snap.getString("businessName")?.trim().orEmpty().ifBlank { "Lapak Kita" }
             val profileEmail = snap.getString("email")?.trim().orEmpty().ifBlank { cleanEmail }
@@ -262,14 +369,20 @@ class ActivationAuthRepository(
                 )
             }
 
-            if (registeredDeviceId.isBlank()) {
-                // Admin cleared registeredDeviceId -> auto-bind to this new device!
-                userRef.update(
-                    mapOf(
-                        "registeredDeviceId" to currentDeviceId,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
+            // Step 3: Current device is already in existingDevices -> allow immediately (and backfill array if legacy)
+            if (cleanDeviceId in existingDevices) {
+                if (needsLegacyMigration) {
+                    runCatching {
+                        userRef.update(
+                            mapOf(
+                                "registeredDeviceId" to existingDevices.first(),
+                                "registeredDeviceIds" to existingDevices,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                    syncActivationCodeDevices(licenseCode, existingDevices)
+                }
 
                 runCatching {
                     syncDeviceRegistry(deviceRef, uid, profileEmail, businessName, licenseCode)
@@ -281,31 +394,48 @@ class ActivationAuthRepository(
                         email = profileEmail,
                         businessName = businessName,
                         licenseCode = licenseCode,
-                        registeredDeviceId = currentDeviceId,
-                        active = true
-                    ),
-                    wasRebound = true
-                )
-            }
-
-            if (registeredDeviceId == currentDeviceId) {
-                runCatching {
-                    syncDeviceRegistry(deviceRef, uid, profileEmail, businessName, licenseCode)
-                }
-                return LoginDeviceCheckResult.Allowed(
-                    profile = UserProfileDoc(
-                        userId = uid,
-                        email = profileEmail,
-                        businessName = businessName,
-                        licenseCode = licenseCode,
-                        registeredDeviceId = currentDeviceId,
+                        registeredDeviceId = existingDevices.firstOrNull().orEmpty(),
+                        registeredDeviceIds = existingDevices,
                         active = true
                     ),
                     wasRebound = false
                 )
             }
 
-            LoginDeviceCheckResult.BlockedOtherDevice(SINGLE_DEVICE_LOCK_MESSAGE)
+            // Step 4: existingDevices.size < 2 -> append currentDeviceId (preserves legacy HP #1 as index 0),
+            // save registeredDeviceIds to users/{uid} and activation_codes/{code}, then allow into Dashboard.
+            if (existingDevices.size < MAX_REGISTERED_DEVICES) {
+                val updatedDevices = (existingDevices + cleanDeviceId).distinct().take(MAX_REGISTERED_DEVICES)
+                userRef.update(
+                    mapOf(
+                        "registeredDeviceId" to updatedDevices.first(),
+                        "registeredDeviceIds" to updatedDevices,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+
+                syncActivationCodeDevices(licenseCode, updatedDevices)
+
+                runCatching {
+                    syncDeviceRegistry(deviceRef, uid, profileEmail, businessName, licenseCode)
+                }
+
+                return LoginDeviceCheckResult.Allowed(
+                    profile = UserProfileDoc(
+                        userId = uid,
+                        email = profileEmail,
+                        businessName = businessName,
+                        licenseCode = licenseCode,
+                        registeredDeviceId = updatedDevices.first(),
+                        registeredDeviceIds = updatedDevices,
+                        active = true
+                    ),
+                    wasRebound = true
+                )
+            }
+
+            // Step 5: existingDevices.size >= 2 and currentDeviceId is not one of them -> block 3rd device!
+            LoginDeviceCheckResult.BlockedOtherDevice(MAX_DEVICES_LOCK_MESSAGE)
         } catch (e: CancellationException) {
             throw e
         } catch (e: FirebaseFirestoreException) {
@@ -320,6 +450,22 @@ class ActivationAuthRepository(
         } catch (e: Exception) {
             Log.w(TAG, "Online login check exception: ${e.message}")
             LoginDeviceCheckResult.OfflineFallback("Mode Offline: menggunakan sesi lokal perangkat.")
+        }
+    }
+
+    private suspend fun syncActivationCodeDevices(licenseCode: String, updatedDevices: List<String>) {
+        val code = normalizeCode(licenseCode)
+        if (code.length < 4 || updatedDevices.isEmpty()) return
+        runCatching {
+            activationCodesCollection.document(code).update(
+                mapOf(
+                    "registeredDeviceId" to updatedDevices.first(),
+                    "registeredDeviceIds" to updatedDevices,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }.onFailure { err ->
+            Log.w(TAG, "syncActivationCodeDevices($code) skipped: ${err.message}")
         }
     }
 
@@ -391,7 +537,8 @@ class ActivationAuthRepository(
 
     companion object {
         private const val TAG = "ActivationAuthRepo"
-        const val SINGLE_DEVICE_LOCK_MESSAGE =
-            "Akun ini sudah terhubung dengan perangkat lain. Satu akun hanya dapat digunakan di 1 HP."
+        const val MAX_REGISTERED_DEVICES = 2
+        const val MAX_DEVICES_LOCK_MESSAGE =
+            "Batas maksimal 2 perangkat telah tercapai untuk akun ini. Hubungi admin jika ingin mereset perangkat."
     }
 }

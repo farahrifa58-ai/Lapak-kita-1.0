@@ -37,9 +37,38 @@ service cloud.firestore {
 
     function isValidDeviceId(deviceId) {
       return deviceId is string &&
-             deviceId.size() >= 6 &&
+             deviceId.size() >= 4 &&
              deviceId.size() <= 128 &&
-             deviceId.matches('^[a-zA-Z0-9_\\-]+$');
+             deviceId.matches('^[a-zA-Z0-9_\\-:.]+$');
+    }
+
+    function isValidDeviceIdList(ids) {
+      return ids is list &&
+             ids.size() <= 2 &&
+             (ids.size() == 0 || isValidDeviceId(ids[0])) &&
+             (ids.size() < 2 || (isValidDeviceId(ids[1]) && ids[1] != ids[0]));
+    }
+
+    function existingDeviceList(data) {
+      let arr = ('registeredDeviceIds' in data && data.registeredDeviceIds is list)
+        ? data.registeredDeviceIds
+        : [];
+      let hasLegacy = ('registeredDeviceId' in data &&
+                       data.registeredDeviceId is string &&
+                       data.registeredDeviceId != '');
+      return (hasLegacy && !(data.registeredDeviceId in arr))
+        ? arr.concat([data.registeredDeviceId])
+        : arr;
+    }
+
+    function isValidDeviceListGrowth(oldList, newList) {
+      return isValidDeviceIdList(newList) &&
+             (
+               newList == oldList ||
+               (oldList.size() < 2 &&
+                newList.size() == oldList.size() + 1 &&
+                newList.hasAll(oldList))
+             );
     }
 
     function isLicenseDeveloper() {
@@ -94,12 +123,13 @@ service cloud.firestore {
     }
 
     function isValidUserProfile(data) {
-      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+      return (!('userId' in data) || (data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128)) &&
              data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
              data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 120 &&
              isValidActivationCodeId(data.licenseCode) &&
              data.registeredDeviceId is string &&
              (data.registeredDeviceId == '' || isValidDeviceId(data.registeredDeviceId)) &&
+             (!('registeredDeviceIds' in data) || isValidDeviceIdList(data.registeredDeviceIds)) &&
              data.active is bool;
     }
 
@@ -109,6 +139,23 @@ service cloud.firestore {
              data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 120 &&
              isValidActivationCodeId(data.licenseCode) &&
              data.active is bool;
+    }
+
+    function isValidUserVendorCatalog(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             isValidVendorCode(data.vendorCode) &&
+             data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 100 &&
+             data.whatsappNumber is string && data.whatsappNumber.size() <= 40 &&
+             data.address is string && data.address.size() <= 250 &&
+             data.notes is string && data.notes.size() <= 300 &&
+             data.sellerStatus is string && data.sellerStatus in ['AKTIF', 'LIBUR', 'NONAKTIF'] &&
+             data.writeToken is string && data.writeToken.size() >= 12 && data.writeToken.size() <= 64 &&
+             data.writeToken.matches('^[a-zA-Z0-9_\\-]+$') &&
+             (!('customAdminFeeType' in data) || (data.customAdminFeeType is string && data.customAdminFeeType in ['', 'FIXED', 'PERCENTAGE'])) &&
+             (!('customAdminFeeValue' in data) || (data.customAdminFeeValue is number && data.customAdminFeeValue >= 0 && data.customAdminFeeValue <= 10000000)) &&
+             data.sourceDeviceId is string && data.sourceDeviceId.size() <= 128 &&
+             data.products is list && data.products.size() <= 100 &&
+             (data.products.size() == 0 || data.products[0] is map);
     }
 
     function isValidLapakTransaction(data) {
@@ -277,18 +324,15 @@ service cloud.firestore {
                        existing().ownerUid == request.auth.uid;
     }
 
-    // --- 4. ACTIVATION CODES (100% Synced with License Admin) ---
+    // --- 4. ACTIVATION CODES (100% Synced with License Admin, Max 2 Devices) ---
     match /activation_codes/{codeId} {
-      // Exact-ID lookup for registration validation (no wildcard list by buyers/public)
       allow get: if isValidActivationCodeId(codeId);
-
-      // Only Developer Admin (License Admin) can list, create, or delete activation codes
       allow list: if isLicenseDeveloper();
       allow create: if isLicenseDeveloper() && isValidActivationCodeId(codeId);
       allow delete: if isLicenseDeveloper() && isValidActivationCodeId(codeId);
 
-      // Atomic one-time claim: transitions status 'available' -> 'used' by signed-in user.
-      // Preserves any additional fields added by the separate License Admin app.
+      // Case A: One-time claim 'available' -> 'used' with 1st device
+      // Case B: Same owner adding 2nd authorized device (max 2 items in registeredDeviceIds)
       allow update: if isLicenseDeveloper() ||
                        (isSignedIn() &&
                         isValidActivationCodeId(codeId) &&
@@ -302,15 +346,35 @@ service cloud.firestore {
                         incoming().usedByBusinessName.size() >= 1 &&
                         incoming().usedByBusinessName.size() <= 120 &&
                         isValidDeviceId(incoming().registeredDeviceId) &&
+                        isValidDeviceIdList(incoming().registeredDeviceIds) &&
+                        incoming().registeredDeviceIds.size() == 1 &&
+                        incoming().registeredDeviceIds[0] == incoming().registeredDeviceId &&
                         incoming().usedAt is timestamp && incoming().usedAt <= request.time &&
                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                         incoming().diff(existing()).affectedKeys().hasOnly([
                           'status', 'usedByUid', 'usedByEmail', 'usedByBusinessName',
-                          'registeredDeviceId', 'usedAt', 'updatedAt'
+                          'registeredDeviceId', 'registeredDeviceIds', 'usedAt', 'updatedAt'
+                        ])) ||
+                       (isSignedIn() &&
+                        isValidActivationCodeId(codeId) &&
+                        existing().status in ['used', 'USED', 'Used'] &&
+                        (('usedByUid' in existing() && existing().usedByUid == request.auth.uid) ||
+                         (!('usedByUid' in existing()) &&
+                          'usedByEmail' in existing() &&
+                          'email' in request.auth.token &&
+                          existing().usedByEmail == request.auth.token.email)) &&
+                        incoming().status == existing().status &&
+                        (!('usedByUid' in existing()) || incoming().usedByUid == existing().usedByUid) &&
+                        isValidDeviceListGrowth(existingDeviceList(existing()), incoming().registeredDeviceIds) &&
+                        incoming().registeredDeviceId is string &&
+                        (incoming().registeredDeviceId == '' || incoming().registeredDeviceId in incoming().registeredDeviceIds) &&
+                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                        incoming().diff(existing()).affectedKeys().hasOnly([
+                          'registeredDeviceId', 'registeredDeviceIds', 'updatedAt'
                         ]));
     }
 
-    // --- 5. USERS & USER-SCOPED FINANCIAL SUBCOLLECTIONS ---
+    // --- 5. USERS & USER-SCOPED REAL-TIME SUBCOLLECTIONS (MAX 2 DEVICES) ---
     match /users/{userId} {
       allow get: if (isSignedIn() && request.auth.uid == userId) || isLicenseDeveloper();
       allow list: if isLicenseDeveloper();
@@ -321,36 +385,86 @@ service cloud.firestore {
                        incoming().active == true &&
                        incoming().keys().hasAll([
                          'userId', 'email', 'businessName', 'licenseCode',
-                         'registeredDeviceId', 'active', 'createdAt', 'updatedAt'
+                         'registeredDeviceId', 'registeredDeviceIds', 'active', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
                          'userId', 'email', 'businessName', 'licenseCode',
-                         'registeredDeviceId', 'active', 'createdAt', 'updatedAt'
+                         'registeredDeviceId', 'registeredDeviceIds', 'active', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidUserProfile(incoming()) &&
                        isValidDeviceId(incoming().registeredDeviceId) &&
+                       isValidDeviceIdList(incoming().registeredDeviceIds) &&
+                       incoming().registeredDeviceIds.size() == 1 &&
+                       incoming().registeredDeviceIds[0] == incoming().registeredDeviceId &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
 
-      // Single Device Lock enforced server-side: user can bind registeredDeviceId only if empty (admin reset)
+      // Multi-Device Lock (Max 2 HP) enforced server-side:
+      // User can append up to 2 unique devices, never remove/overwrite existing ones or add a 3rd.
+      // License Developer can freely reset registeredDeviceIds to [] / registeredDeviceId to "".
       allow update: if isLicenseDeveloper() ||
                        (isSignedIn() &&
                         request.auth.uid == userId &&
                         isValidUserProfile(incoming()) &&
-                        incoming().userId == existing().userId &&
+                        (!('userId' in existing()) || incoming().userId == existing().userId) &&
                         incoming().licenseCode == existing().licenseCode &&
                         incoming().active == existing().active &&
-                        incoming().createdAt == existing().createdAt &&
+                        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                         incoming().diff(existing()).affectedKeys().hasOnly([
-                          'businessName', 'email', 'registeredDeviceId', 'updatedAt'
+                          'businessName', 'email', 'registeredDeviceId', 'registeredDeviceIds', 'updatedAt'
                         ]) &&
-                        (existing().registeredDeviceId == '' ||
-                         incoming().registeredDeviceId == existing().registeredDeviceId));
+                        ('registeredDeviceIds' in incoming()) &&
+                        isValidDeviceListGrowth(existingDeviceList(existing()), incoming().registeredDeviceIds) &&
+                        (incoming().registeredDeviceId == '' || incoming().registeredDeviceId in incoming().registeredDeviceIds));
 
       allow delete: if isLicenseDeveloper();
 
-      // 5a. User Transactions Subcollection
+      // 5a. User Vendors, Products & Live Stock Catalog (Real-time 2-HP sync)
+      match /vendors/{vendorCode} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidVendorCode(vendorCode) &&
+                         incoming().ownerUid == request.auth.uid &&
+                         incoming().vendorCode == vendorCode &&
+                         incoming().keys().hasAll([
+                           'ownerUid', 'vendorCode', 'sellerName', 'whatsappNumber', 'address',
+                           'notes', 'sellerStatus', 'writeToken', 'sourceDeviceId', 'products',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'ownerUid', 'vendorCode', 'sellerName', 'whatsappNumber', 'address',
+                           'notes', 'sellerStatus', 'writeToken', 'customAdminFeeType',
+                           'customAdminFeeValue', 'sourceDeviceId', 'products',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidUserVendorCatalog(incoming()) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+        allow update: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidVendorCode(vendorCode) &&
+                         existing().ownerUid == request.auth.uid &&
+                         isValidUserVendorCatalog(incoming()) &&
+                         incoming().ownerUid == existing().ownerUid &&
+                         incoming().vendorCode == existing().vendorCode &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'sellerName', 'whatsappNumber', 'address', 'notes', 'sellerStatus',
+                           'writeToken', 'customAdminFeeType', 'customAdminFeeValue',
+                           'sourceDeviceId', 'products', 'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidVendorCode(vendorCode);
+      }
+
+      // 5b. User Transactions Subcollection
       match /transactions/{transactionDocId} {
         allow get, list: if isSignedIn() && request.auth.uid == userId;
 
@@ -394,7 +508,7 @@ service cloud.firestore {
                          isValidId(transactionDocId);
       }
 
-      // 5b. User Operating Expenses Subcollection
+      // 5c. User Operating Expenses Subcollection
       match /expenses/{expenseDocId} {
         allow get, list: if isSignedIn() && request.auth.uid == userId;
 
@@ -431,7 +545,7 @@ service cloud.firestore {
                          isValidId(expenseDocId);
       }
 
-      // 5c. User Seller Settlements Subcollection
+      // 5d. User Seller Settlements Subcollection
       match /settlements/{settlementDocId} {
         allow get, list: if isSignedIn() && request.auth.uid == userId;
 

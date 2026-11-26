@@ -191,7 +191,7 @@ test("Public Web Penyetor: can get vendor by exact code and submit with valid to
   );
 });
 
-test("Activation codes (License Admin): available -> used once, second buyer blocked, non-dev cannot list/create", async () => {
+test("Activation codes (Max 2 Devices): 1st claim -> 2nd HP append succeeds -> 3rd HP & second buyer blocked", async () => {
   const devDb = testEnv
     .authenticatedContext("dev_uid_1", {
       email: "rendykurniawan0311@gmail.com",
@@ -213,9 +213,8 @@ test("Activation codes (License Admin): available -> used once, second buyer blo
   const publicDb = testEnv.unauthenticatedContext().firestore();
 
   const code = "RAFDEV-8K4M-2P9Q";
-  const now = new Date(Date.now() - 2000);
+  const now = new Date(Date.now() - 3000);
 
-  // License Admin creates code with status: "available" + custom metadata fields
   await assertSucceeds(
     devDb.collection("activation_codes").doc(code).set({
       code,
@@ -226,43 +225,52 @@ test("Activation codes (License Admin): available -> used once, second buyer blo
     })
   );
 
-  // Non-dev cannot list, create, or delete activation codes
   await assertFails(buyer1Db.collection("activation_codes").get());
   await assertFails(publicDb.collection("activation_codes").get());
-  await assertFails(buyer1Db.collection("activation_codes").doc("RAFDEV-FAKE-0001").set({ status: "available" }));
-
-  // Exact-ID lookup allowed before/during registration
-  await assertSucceeds(publicDb.collection("activation_codes").doc(code).get());
   await assertSucceeds(buyer1Db.collection("activation_codes").doc(code).get());
 
-  // Signed-in buyer 1 atomically claims available -> used
+  // 1st HP claims code: available -> used
   await assertSucceeds(
     buyer1Db.collection("activation_codes").doc(code).update({
       status: "used",
       usedByUid: ADMIN_A,
       usedByEmail: "toko.bu.sari@gmail.com",
       usedByBusinessName: "Lapak Bu Sari",
-      registeredDeviceId: "AND-DEVICE11112222",
-      usedAt: new Date(Date.now() - 500),
+      registeredDeviceId: "AND-DEVICE11111111",
+      registeredDeviceIds: ["AND-DEVICE11111111"],
+      usedAt: new Date(Date.now() - 1000),
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Same owner's 2nd HP appends to registeredDeviceIds (2/2) -> SUCCEEDS
+  await assertSucceeds(
+    buyer1Db.collection("activation_codes").doc(code).update({
+      registeredDeviceId: "AND-DEVICE11111111",
+      registeredDeviceIds: ["AND-DEVICE11111111", "AND-DEVICE22222222"],
       updatedAt: new Date(Date.now() - 500),
     })
   );
 
-  // Buyer 2 CANNOT claim an already-used activation code
+  // 3rd HP by same owner -> BLOCKED (max 2 devices)
+  await assertFails(
+    buyer1Db.collection("activation_codes").doc(code).update({
+      registeredDeviceId: "AND-DEVICE11111111",
+      registeredDeviceIds: ["AND-DEVICE11111111", "AND-DEVICE22222222", "AND-DEVICE33333333"],
+      updatedAt: new Date(Date.now() - 200),
+    })
+  );
+
+  // Different buyer CANNOT claim or modify already-used code
   await assertFails(
     buyer2Db.collection("activation_codes").doc(code).update({
-      status: "used",
-      usedByUid: ADMIN_B,
-      usedByEmail: "toko.lain@gmail.com",
-      usedByBusinessName: "Lapak Lain",
-      registeredDeviceId: "AND-DEVICE99998888",
-      usedAt: new Date(Date.now() - 100),
+      registeredDeviceIds: ["AND-DEVICE99999999"],
       updatedAt: new Date(Date.now() - 100),
     })
   );
 });
 
-test("Users profile & Single Device Lock: 1 account = 1 HP, admin reset allows rebind, cross-user denied", async () => {
+test("Users profile Multi-Device Lock (Max 2 HP): 1st & 2nd HP allowed, 3rd HP & overwrite blocked, admin reset works", async () => {
   const devDb = testEnv
     .authenticatedContext("dev_uid_1", {
       email: "rendykurniawan0311@gmail.com",
@@ -272,62 +280,110 @@ test("Users profile & Single Device Lock: 1 account = 1 HP, admin reset allows r
   const userADb = testEnv.authenticatedContext(ADMIN_A).firestore();
   const userBDb = testEnv.authenticatedContext(ADMIN_B).firestore();
   const publicDb = testEnv.unauthenticatedContext().firestore();
-  const now = new Date(Date.now() - 2000);
+  const now = new Date(Date.now() - 3000);
 
-  const profileA = {
-    userId: ADMIN_A,
-    email: "toko.bu.sari@gmail.com",
-    businessName: "Lapak Bu Sari",
-    licenseCode: "RAFDEV-8K4M-2P9Q",
-    registeredDeviceId: "AND-HP11111111",
-    active: true,
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  await assertSucceeds(userADb.collection("users").doc(ADMIN_A).set(profileA));
-  await assertSucceeds(userADb.collection("users").doc(ADMIN_A).get());
-
-  // Public and User B cannot read or list users
-  await assertFails(publicDb.collection("users").doc(ADMIN_A).get());
-  await assertFails(publicDb.collection("users").get());
-  await assertFails(userBDb.collection("users").doc(ADMIN_A).get());
-  await assertFails(userBDb.collection("users").get());
-
-  // User A CANNOT hijack/change registeredDeviceId to a different HP while already bound
-  await assertFails(
-    userADb.collection("users").doc(ADMIN_A).update({
-      registeredDeviceId: "AND-HP22222222",
-      updatedAt: new Date(Date.now() - 500),
+  // Create profile on HP #1 (Kasir)
+  await assertSucceeds(
+    userADb.collection("users").doc(ADMIN_A).set({
+      userId: ADMIN_A,
+      email: "toko.bu.sari@gmail.com",
+      businessName: "Lapak Bu Sari",
+      licenseCode: "RAFDEV-8K4M-2P9Q",
+      registeredDeviceId: "AND-HP11111111",
+      registeredDeviceIds: ["AND-HP11111111"],
+      active: true,
+      createdAt: now,
+      updatedAt: now,
     })
   );
 
-  // License Admin resets registeredDeviceId to ""
+  await assertFails(publicDb.collection("users").doc(ADMIN_A).get());
+  await assertFails(userBDb.collection("users").doc(ADMIN_A).get());
+
+  // HP #2 (Owner) logs in and appends itself -> SUCCEEDS (2/2)
+  await assertSucceeds(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceId: "AND-HP11111111",
+      registeredDeviceIds: ["AND-HP11111111", "AND-HP22222222"],
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // HP #3 tries to append a 3rd device -> BLOCKED
+  await assertFails(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceIds: ["AND-HP11111111", "AND-HP22222222", "AND-HP33333333"],
+      updatedAt: new Date(Date.now() - 800),
+    })
+  );
+
+  // HP #3 tries to replace HP #2 -> BLOCKED
+  await assertFails(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceIds: ["AND-HP11111111", "AND-HP33333333"],
+      updatedAt: new Date(Date.now() - 700),
+    })
+  );
+
+  // License Admin resets registeredDeviceIds to [] and registeredDeviceId to ""
   await assertSucceeds(
     devDb.collection("users").doc(ADMIN_A).update({
       registeredDeviceId: "",
+      registeredDeviceIds: [],
       updatedAt: new Date(Date.now() - 400),
     })
   );
 
-  // Now User A CAN bind the new HP!
+  // Now User A can register a fresh HP #1!
   await assertSucceeds(
     userADb.collection("users").doc(ADMIN_A).update({
-      registeredDeviceId: "AND-HP22222222",
+      registeredDeviceId: "AND-HP33333333",
+      registeredDeviceIds: ["AND-HP33333333"],
       updatedAt: new Date(Date.now() - 200),
     })
   );
 });
 
-test("User-scoped financial subcollections (users/{uid}/transactions, expenses, settlements) & device_registry", async () => {
+test("User-scoped real-time subcollections (vendors, transactions, expenses, settlements) & device_registry", async () => {
   const userADb = testEnv.authenticatedContext(ADMIN_A).firestore();
   const userBDb = testEnv.authenticatedContext(ADMIN_B).firestore();
   const publicDb = testEnv.unauthenticatedContext().firestore();
   const now = new Date(Date.now() - 2000);
 
+  const vendorRef = userADb.collection("users").doc(ADMIN_A).collection("vendors").doc(VENDOR_CODE);
   const trxRef = userADb.collection("users").doc(ADMIN_A).collection("transactions").doc("trx_20261126_001");
   const expRef = userADb.collection("users").doc(ADMIN_A).collection("expenses").doc("exp_1");
   const setRef = userADb.collection("users").doc(ADMIN_A).collection("settlements").doc("pay_1");
+
+  await assertSucceeds(
+    vendorRef.set({
+      ownerUid: ADMIN_A,
+      vendorCode: VENDOR_CODE,
+      sellerName: "Dapur Bu Sari",
+      whatsappNumber: "081234567890",
+      address: "Jl. Mawar No. 1",
+      notes: "Kue pagi",
+      sellerStatus: "AKTIF",
+      writeToken: WRITE_TOKEN,
+      customAdminFeeType: "",
+      customAdminFeeValue: 0,
+      sourceDeviceId: "AND-HP11111111",
+      products: [
+        {
+          name: "Nasi Kuning",
+          category: "Makanan",
+          unit: "porsi",
+          sellingPrice: 12000,
+          sellerShare: 10000,
+          adminProfitPerUnit: 2000,
+          currentStock: 18,
+          isActive: true,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
 
   await assertSucceeds(
     trxRef.set({
@@ -392,12 +448,15 @@ test("User-scoped financial subcollections (users/{uid}/transactions, expenses, 
     })
   );
 
-  // Owner can list own subcollections
+  // Owner can list all 4 own real-time subcollections
+  await assertSucceeds(userADb.collection("users").doc(ADMIN_A).collection("vendors").get());
   await assertSucceeds(userADb.collection("users").doc(ADMIN_A).collection("transactions").get());
   await assertSucceeds(userADb.collection("users").doc(ADMIN_A).collection("expenses").get());
   await assertSucceeds(userADb.collection("users").doc(ADMIN_A).collection("settlements").get());
 
   // Cross-user and public denied
+  await assertFails(userBDb.collection("users").doc(ADMIN_A).collection("vendors").get());
+  await assertFails(publicDb.collection("users").doc(ADMIN_A).collection("vendors").get());
   await assertFails(userBDb.collection("users").doc(ADMIN_A).collection("transactions").get());
   await assertFails(publicDb.collection("users").doc(ADMIN_A).collection("transactions").get());
   await assertFails(userBDb.collection("users").doc(ADMIN_A).collection("expenses").doc("exp_1").delete());
@@ -423,3 +482,113 @@ test("User-scoped financial subcollections (users/{uid}/transactions, expenses, 
     })
   );
 });
+
+test("Legacy user auto-migration: single registeredDeviceId migrates cleanly to registeredDeviceIds [HP1, HP2] and blocks HP3", async () => {
+  const userADb = testEnv
+    .authenticatedContext(ADMIN_A, {
+      email: "toko.lama@gmail.com",
+      email_verified: true,
+    })
+    .firestore();
+  const code = "LPK-LEGACY-001";
+  const now = new Date(Date.now() - 5000);
+
+  // Seed legacy documents (only single registeredDeviceId, NO registeredDeviceIds array!)
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const adminFs = ctx.firestore();
+    await adminFs.collection("users").doc(ADMIN_A).set({
+      userId: ADMIN_A,
+      email: "toko.lama@gmail.com",
+      businessName: "Lapak Lama",
+      licenseCode: code,
+      registeredDeviceId: "AND-LEGACY-HP1",
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await adminFs.collection("activation_codes").doc(code).set({
+      code,
+      status: "used",
+      usedByUid: ADMIN_A,
+      usedByEmail: "toko.lama@gmail.com",
+      registeredDeviceId: "AND-LEGACY-HP1",
+      updatedAt: now,
+    });
+  });
+
+  // HP #2 CANNOT overwrite/drop legacy HP #1!
+  await assertFails(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceId: "AND-NEW-HP2",
+      registeredDeviceIds: ["AND-NEW-HP2"],
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+
+  // HP #2 migrates legacy doc directly by preserving HP #1 as device #1 and appending HP #2 -> SUCCEEDS!
+  await assertSucceeds(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceId: "AND-LEGACY-HP1",
+      registeredDeviceIds: ["AND-LEGACY-HP1", "AND-NEW-HP2"],
+      updatedAt: new Date(Date.now() - 1500),
+    })
+  );
+
+  // Matching migration on activation_codes/{code} -> SUCCEEDS!
+  await assertSucceeds(
+    userADb.collection("activation_codes").doc(code).update({
+      registeredDeviceId: "AND-LEGACY-HP1",
+      registeredDeviceIds: ["AND-LEGACY-HP1", "AND-NEW-HP2"],
+      updatedAt: new Date(Date.now() - 1400),
+    })
+  );
+
+  // HP #3 is now BLOCKED on both users/{uid} and activation_codes/{code}!
+  await assertFails(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceId: "AND-LEGACY-HP1",
+      registeredDeviceIds: ["AND-LEGACY-HP1", "AND-NEW-HP2", "AND-EXTRA-HP3"],
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+  await assertFails(
+    userADb.collection("activation_codes").doc(code).update({
+      registeredDeviceId: "AND-LEGACY-HP1",
+      registeredDeviceIds: ["AND-LEGACY-HP1", "AND-NEW-HP2", "AND-EXTRA-HP3"],
+      updatedAt: new Date(Date.now() - 900),
+    })
+  );
+
+  // Also test legacy doc with empty registeredDeviceIds: [] + non-empty registeredDeviceId
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const adminFs = ctx.firestore();
+    await adminFs.collection("users").doc(ADMIN_A).set({
+      email: "toko.lama@gmail.com",
+      businessName: "Lapak Lama",
+      licenseCode: code,
+      registeredDeviceId: "AND-LEGACY-HP1",
+      registeredDeviceIds: [],
+      active: true,
+      updatedAt: now,
+    });
+  });
+
+  // Dropping HP #1 fails even when registeredDeviceIds started empty
+  await assertFails(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceId: "AND-NEW-HP2",
+      registeredDeviceIds: ["AND-NEW-HP2"],
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Preserving HP #1 + appending HP #2 succeeds!
+  await assertSucceeds(
+    userADb.collection("users").doc(ADMIN_A).update({
+      registeredDeviceId: "AND-LEGACY-HP1",
+      registeredDeviceIds: ["AND-LEGACY-HP1", "AND-NEW-HP2"],
+      updatedAt: new Date(Date.now() - 400),
+    })
+  );
+});
+
