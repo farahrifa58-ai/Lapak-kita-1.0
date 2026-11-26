@@ -49,10 +49,10 @@ fun SellersScreen(
     val payoutReceiptState by viewModel.lastSellerPaymentReceipt.collectAsState()
     val isSyncingCloud by viewModel.isSyncingCloud.collectAsState()
 
-    // Safeguard: whenever Admin opens Daftar Penjual / Penyetor, re-sync all active sellers'
-    // latest product prices, net shares, and commissions to `lapak_vendors/{kodePenyetor}`.
+    // Auto-sync ALL sellers in Admin's list whenever Admin opens the Penyetor tab so legacy docs
+    // (such as LPK-NGL67G / LPK-F356HZ) immediately get fresh sellingPrice, basePrice & commission.
     LaunchedEffect(Unit) {
-        viewModel.syncActiveVendorsToCloudSilently()
+        viewModel.syncAllSellersToWebPortal(notifyOnSuccess = true)
     }
 
     var searchQuery by remember { mutableStateOf("") }
@@ -438,13 +438,13 @@ fun SellersScreen(
         var isSyncedOk by remember(freshSeller.id) { mutableStateOf(false) }
 
         LaunchedEffect(freshSeller.id, freshSeller.vendorCode, freshSeller.writeToken) {
-            syncStatusLabel = "Menyinkronkan data & token ke cloud..."
-            viewModel.syncSingleSellerToCloud(freshSeller.id) { ok ->
+            syncStatusLabel = "Menyinkronkan data & token ke Web Portal..."
+            viewModel.syncSingleSellerToCloud(freshSeller.id, showSuccessFeedback = true) { ok, msg ->
                 isSyncedOk = ok
                 syncStatusLabel = if (ok) {
-                    "Data & Token Kirim tersinkron di Cloud"
+                    "Tersinkron ke Web Portal"
                 } else {
-                    "Belum tersinkron (cek internet lalu tekan Sinkronkan)"
+                    "Gagal sinkron: $msg"
                 }
             }
         }
@@ -458,19 +458,14 @@ fun SellersScreen(
             syncStatusText = syncStatusLabel,
             isSyncedOk = isSyncedOk,
             onSyncNow = {
-                syncStatusLabel = "Menyinkronkan data & token ke cloud..."
-                viewModel.syncSingleSellerToCloud(freshSeller.id) { ok ->
+                syncStatusLabel = "Menyinkronkan data & token ke Web Portal..."
+                viewModel.syncSingleSellerToCloud(freshSeller.id, showSuccessFeedback = true) { ok, msg ->
                     isSyncedOk = ok
                     syncStatusLabel = if (ok) {
-                        "Data & Token Kirim tersinkron di Cloud"
+                        "Tersinkron ke Web Portal"
                     } else {
-                        "Gagal menyinkronkan ke cloud"
+                        "Gagal sinkron: $msg"
                     }
-                    Toast.makeText(
-                        context,
-                        if (ok) "Data & token ${freshSeller.name} tersinkron ke Web Penyetor!" else "Gagal menyinkronkan ke cloud",
-                        Toast.LENGTH_SHORT
-                    ).show()
                 }
             },
             onCopyLink = {
@@ -668,7 +663,6 @@ fun SellersScreen(
             onConfirm = { sellerId, name, cat, unit, sp, ss, initStock ->
                 viewModel.addProduct(sellerId, name, cat, unit, sp, ss, initStock) {
                     addProductTargetSellerId = null
-                    Toast.makeText(context, "Produk '$name' ditambahkan & disinkronkan ke Web Penyetor", Toast.LENGTH_SHORT).show()
                 }
             },
             onDismiss = { addProductTargetSellerId = null }
@@ -685,7 +679,6 @@ fun SellersScreen(
             onConfirm = { updated ->
                 viewModel.updateProduct(updated) {
                     editTargetProduct = null
-                    Toast.makeText(context, "Harga & komisi '${updated.name}' diperbarui ke Web Penyetor", Toast.LENGTH_SHORT).show()
                 }
             },
             onDismiss = { editTargetProduct = null }
@@ -696,11 +689,10 @@ fun SellersScreen(
     deleteTargetProduct?.let { prodDetail ->
         DeleteConfirmDialog(
             title = "Hapus Produk",
-            message = "Apakah Anda yakin ingin menghapus produk '${prodDetail.product.name}' milik ${prodDetail.seller.name}? Perubahan akan langsung disinkronkan ke Web Penyetor.",
+            message = "Apakah Anda yakin ingin menghapus produk '${prodDetail.product.name}' milik ${prodDetail.seller.name}? Perubahan akan langsung disinkronkan ke Web Portal.",
             onConfirm = {
                 viewModel.deleteProduct(prodDetail.product) {
                     deleteTargetProduct = null
-                    Toast.makeText(context, "Produk '${prodDetail.product.name}' dihapus & disinkronkan", Toast.LENGTH_SHORT).show()
                 }
             },
             onDismiss = { deleteTargetProduct = null }

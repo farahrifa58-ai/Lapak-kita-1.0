@@ -152,6 +152,45 @@ test("Admin A can create, update, query, and delete own vendor + private auth se
       updatedAt: new Date(Date.now() - 1000),
     })
   );
+
+  // Full clean set() overwrite replaces legacy root fields & refreshes per-item sellingPrice/basePrice/commission
+  const adminBDb = testEnv.authenticatedContext(ADMIN_B).firestore();
+  const legacyCode = "LPK-NGL67G";
+  const legacyCreated = new Date(Date.now() - 10000);
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("lapak_vendors").doc(legacyCode).set({
+      ...validVendorPayload(ADMIN_A, legacyCode, legacyCreated),
+      legacyStaleFee: 9999,
+    });
+  });
+
+  const cleanReplacement = {
+    ...validVendorPayload(ADMIN_A, legacyCode, legacyCreated),
+    products: [
+      {
+        id: 1,
+        localProductId: 1,
+        name: "Risol Mayo",
+        category: "Gorengan",
+        unit: "pcs",
+        sellingPrice: 5000,
+        basePrice: 3500,
+        sellerShare: 3500,
+        commission: 1500,
+        adminProfitPerUnit: 1500,
+        stock: 20,
+        currentStock: 20,
+        isActive: true,
+      },
+    ],
+    updatedAt: new Date(Date.now() - 500),
+  };
+
+  await assertSucceeds(adminADb.collection("lapak_vendors").doc(legacyCode).set(cleanReplacement));
+  await assertFails(adminBDb.collection("lapak_vendors").doc(legacyCode).set({
+    ...cleanReplacement,
+    ownerUid: ADMIN_B,
+  }));
 });
 
 test("Public Web Penyetor: can get vendor by exact code and submit with valid token without login", async () => {

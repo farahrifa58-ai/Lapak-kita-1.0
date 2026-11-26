@@ -54,6 +54,12 @@ data class SellerPayoutReceiptState(
     val soldItems: List<SoldItemSummary> = emptyList()
 )
 
+data class WebPortalSyncFeedback(
+    val id: Long = System.nanoTime(),
+    val isSuccess: Boolean,
+    val message: String
+)
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class LapakViewModel(
     private val repository: LapakRepository,
@@ -124,6 +130,7 @@ class LapakViewModel(
         _currentScreen.value = AppScreen.DASHBOARD
         _connectedDevicesCount.value = 1
         _webSyncNotification.value = null
+        _webPortalSyncFeedback.value = null
         _isSyncingCloud.value = false
         _lastCloudSyncAt.value = null
         _cartWarningMessage.value = null
@@ -160,6 +167,9 @@ class LapakViewModel(
     private val _webSyncNotification = MutableStateFlow<String?>(null)
     val webSyncNotification: StateFlow<String?> = _webSyncNotification.asStateFlow()
 
+    private val _webPortalSyncFeedback = MutableStateFlow<WebPortalSyncFeedback?>(null)
+    val webPortalSyncFeedback: StateFlow<WebPortalSyncFeedback?> = _webPortalSyncFeedback.asStateFlow()
+
     private val _isSyncingCloud = MutableStateFlow(false)
     val isSyncingCloud: StateFlow<Boolean> = _isSyncingCloud.asStateFlow()
 
@@ -173,6 +183,19 @@ class LapakViewModel(
 
     fun dismissWebSyncNotification() {
         _webSyncNotification.value = null
+    }
+
+    fun dismissWebPortalSyncFeedback() {
+        _webPortalSyncFeedback.value = null
+    }
+
+    private fun emitWebPortalSyncFeedback(isSuccess: Boolean, message: String) {
+        if (!sessionActiveFlag.get()) return
+        _webPortalSyncFeedback.value = WebPortalSyncFeedback(
+            id = System.nanoTime(),
+            isSuccess = isSuccess,
+            message = message
+        )
     }
 
     fun clearCartWarning() {
@@ -1008,9 +1031,15 @@ class LapakViewModel(
         }
     }
 
-    fun syncSingleSellerToCloud(sellerId: Long, onComplete: ((Boolean) -> Unit)? = null) {
+    fun syncSingleSellerToCloud(
+        sellerId: Long,
+        showSuccessFeedback: Boolean = false,
+        onComplete: ((Boolean, String) -> Unit)? = null
+    ) {
         if (!isActiveAuthenticatedSession()) {
-            onComplete?.invoke(false)
+            val err = "Sesi akun tidak aktif. Silakan login Google terlebih dahulu."
+            emitWebPortalSyncFeedback(false, "Gagal sinkron ke Web Portal: $err")
+            onComplete?.invoke(false, err)
             return
         }
         val job = viewModelScope.launch {
@@ -1018,17 +1047,32 @@ class LapakViewModel(
             try {
                 if (!isActiveAuthenticatedSession()) return@launch
                 val snapshot = repository.getSellerSyncSnapshotDirect(sellerId) ?: run {
-                    onComplete?.invoke(false)
+                    val err = "Data penyetor tidak ditemukan."
+                    emitWebPortalSyncFeedback(false, "Gagal sinkron ke Web Portal: $err")
+                    onComplete?.invoke(false, err)
                     return@launch
                 }
+                val vendorCode = snapshot.sellerDetail.seller.vendorCode.trim().uppercase()
                 val res = syncSellerSnapshotConcurrently(snapshot)
-                if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
-                onComplete?.invoke(res.isSuccess)
+                if (res.isSuccess) {
+                    _lastCloudSyncAt.value = System.currentTimeMillis()
+                    val okMsg = "Tersinkron ke Web Portal ($vendorCode)"
+                    if (showSuccessFeedback) {
+                        emitWebPortalSyncFeedback(true, okMsg)
+                    }
+                    onComplete?.invoke(true, okMsg)
+                } else {
+                    val errMsg = res.exceptionOrNull()?.message ?: "Gagal menyimpan ke Firestore."
+                    emitWebPortalSyncFeedback(false, "Gagal sinkron ke Web Portal ($vendorCode): $errMsg")
+                    onComplete?.invoke(false, errMsg)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("LapakViewModel", "Single seller sync error", e)
-                onComplete?.invoke(false)
+                val errMsg = e.message ?: "Gagal menyinkronkan ke Web Portal."
+                emitWebPortalSyncFeedback(false, "Gagal sinkron ke Web Portal: $errMsg")
+                onComplete?.invoke(false, errMsg)
             } finally {
                 _isSyncingCloud.value = false
             }
@@ -1038,39 +1082,65 @@ class LapakViewModel(
 
     /**
      * Background safeguard triggered when opening the Daftar Penjual / Penyetor tab or on app startup:
-     * re-synchronizes every active seller's latest local products (`sellingPrice`, `basePrice`,
-     * `commission`, `stock`) to both `users/{uid}/vendors/{kode}` and `lapak_vendors/{kode}`.
+     * re-synchronizes ALL sellers in Admin's list (including legacy docs like LPK-NGL67G / LPK-F356HZ)
+     * with their latest products (`sellingPrice`, `basePrice`, `commission`, `stock`) to both
+     * `users/{uid}/vendors/{kode}` and `lapak_vendors/{kode}`.
      */
-    fun syncActiveVendorsToCloudSilently() {
+    fun syncAllSellersToWebPortal(notifyOnSuccess: Boolean = false) {
         if (!isActiveAuthenticatedSession()) return
         if (!activeVendorsSyncInProgress.compareAndSet(false, true)) return
         val job = viewModelScope.launch {
             try {
                 if (!isActiveAuthenticatedSession()) return@launch
                 repository.ensureAllSellersHaveVendorCodes()
-                val activeSellers = repository.allSellers.first()
-                    .filter { it.status == SellerStatus.AKTIF }
-                if (activeSellers.isEmpty()) return@launch
+                val allSellersList = repository.allSellers.first()
+                if (allSellersList.isEmpty()) return@launch
 
-                var syncedAny = false
-                for (seller in activeSellers) {
+                var syncedCount = 0
+                val failedCodes = mutableListOf<String>()
+                var lastError: String? = null
+                for (seller in allSellersList) {
                     if (!isActiveAuthenticatedSession()) return@launch
                     val snapshot = repository.getSellerSyncSnapshotDirect(seller.id) ?: continue
                     val res = syncSellerSnapshotConcurrently(snapshot)
-                    if (res.isSuccess) syncedAny = true
+                    if (res.isSuccess) {
+                        syncedCount++
+                    } else {
+                        failedCodes.add(seller.vendorCode.ifBlank { seller.name })
+                        lastError = res.exceptionOrNull()?.message
+                    }
                 }
-                if (syncedAny) {
+                if (syncedCount > 0) {
                     _lastCloudSyncAt.value = System.currentTimeMillis()
+                }
+                if (failedCodes.isNotEmpty()) {
+                    emitWebPortalSyncFeedback(
+                        isSuccess = false,
+                        message = "Gagal sinkron ke Web Portal (${failedCodes.take(3).joinToString(", ")}): ${lastError ?: "Periksa koneksi / izin Firestore"}"
+                    )
+                } else if (notifyOnSuccess && syncedCount > 0) {
+                    emitWebPortalSyncFeedback(
+                        isSuccess = true,
+                        message = "Tersinkron ke Web Portal ($syncedCount penyetor)"
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w("LapakViewModel", "Silent active vendors sync warning: ${e.message}")
+                Log.w("LapakViewModel", "Auto sync all sellers warning: ${e.message}")
+                emitWebPortalSyncFeedback(
+                    isSuccess = false,
+                    message = "Gagal sinkron ke Web Portal: ${e.message ?: "Koneksi bermasalah"}"
+                )
             } finally {
                 activeVendorsSyncInProgress.set(false)
             }
         }
         trackBackgroundJob(job)
+    }
+
+    fun syncActiveVendorsToCloudSilently() {
+        syncAllSellersToWebPortal(notifyOnSuccess = false)
     }
 
     private suspend fun syncVendorByCodeToCloud(vendorCode: String, lastProcessedSubmissionId: String) {
@@ -1151,7 +1221,7 @@ class LapakViewModel(
                     customAdminFeeValue = customFeeValue
                 )
             )
-            syncSingleSellerToCloud(newId)
+            syncSingleSellerToCloud(newId, showSuccessFeedback = true)
             onDone()
         }
     }
@@ -1165,7 +1235,7 @@ class LapakViewModel(
                     ?: VendorCodeGenerator.generateWriteToken()
             )
             repository.updateSeller(safeSeller)
-            syncSingleSellerToCloud(safeSeller.id)
+            syncSingleSellerToCloud(safeSeller.id, showSuccessFeedback = true)
             onDone()
         }
     }
@@ -1192,7 +1262,7 @@ class LapakViewModel(
     fun updateProduct(product: Product, onDone: () -> Unit) {
         viewModelScope.launch {
             repository.updateProduct(product)
-            syncSingleSellerToCloud(product.sellerId)
+            syncSingleSellerToCloud(product.sellerId, showSuccessFeedback = true)
             onDone()
         }
     }
@@ -1200,7 +1270,7 @@ class LapakViewModel(
     fun deleteProduct(product: Product, onDone: () -> Unit) {
         viewModelScope.launch {
             repository.deleteProduct(product)
-            syncSingleSellerToCloud(product.sellerId)
+            syncSingleSellerToCloud(product.sellerId, showSuccessFeedback = true)
             onDone()
         }
     }
@@ -1214,14 +1284,14 @@ class LapakViewModel(
     ) {
         viewModelScope.launch {
             repository.updateSellerStatus(sellerId, newStatus, startDate, endDate, reason)
-            syncSingleSellerToCloud(sellerId)
+            syncSingleSellerToCloud(sellerId, showSuccessFeedback = true)
         }
     }
 
     fun reactivateSeller(sellerId: Long) {
         viewModelScope.launch {
             repository.updateSellerStatus(sellerId, SellerStatus.AKTIF, null, null, "Diaktifkan kembali oleh admin")
-            syncSingleSellerToCloud(sellerId)
+            syncSingleSellerToCloud(sellerId, showSuccessFeedback = true)
         }
     }
 
@@ -1259,7 +1329,7 @@ class LapakViewModel(
                     notes = "Setoran awal produk"
                 )
             }
-            syncSingleSellerToCloud(sellerId)
+            syncSingleSellerToCloud(sellerId, showSuccessFeedback = true)
             onDone()
         }
     }
@@ -1287,7 +1357,7 @@ class LapakViewModel(
                 notes = notes
             )
             if (result.isSuccess) {
-                syncSingleSellerToCloud(sellerId)
+                syncSingleSellerToCloud(sellerId, showSuccessFeedback = true)
                 onSuccess()
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Gagal menambah setoran stok")

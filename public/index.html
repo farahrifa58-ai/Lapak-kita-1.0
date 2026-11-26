@@ -427,7 +427,7 @@
 
     .price-row {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(3, 1fr);
       gap: 8px;
       margin: 10px 0;
       padding: 10px;
@@ -441,8 +441,12 @@
     }
 
     .price-val {
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 800;
+    }
+
+    .price-val.commission {
+      color: var(--amber-accent);
     }
 
     .price-val.net {
@@ -1190,42 +1194,39 @@
      * Reads Harga Jual (`sellingPrice`), Hak Bersih Penjual (`basePrice` / `sellerShare`),
      * and Komisi Admin (`commission` / `adminProfitPerUnit`) DIRECTLY from each item in
      * `lapak_vendors/{kodePenyetor}.products`.
-     * NEVER recalculates `sellingPrice = basePrice + adminFee` and NEVER overwrites
-     * explicit per-item values with the vendor's global root tariff.
+     * Never recalculates existing item pricing from the vendor's global root `adminFee`.
      */
     function resolveItemPricing(p) {
       const price = Math.max(0, Math.round(Number(p?.sellingPrice) || 0));
 
-      const hasBasePrice = p?.basePrice !== undefined && p?.basePrice !== null && p?.basePrice !== "" && !Number.isNaN(Number(p.basePrice));
-      const hasSellerShare = p?.sellerShare !== undefined && p?.sellerShare !== null && p?.sellerShare !== "" && !Number.isNaN(Number(p.sellerShare));
-      const hasCommission = p?.commission !== undefined && p?.commission !== null && p?.commission !== "" && !Number.isNaN(Number(p.commission));
-      const hasAdminProfit = p?.adminProfitPerUnit !== undefined && p?.adminProfitPerUnit !== null && p?.adminProfitPerUnit !== "" && !Number.isNaN(Number(p.adminProfitPerUnit));
+      const rawBase = p?.basePrice !== undefined && p?.basePrice !== null && p?.basePrice !== ""
+        ? p.basePrice
+        : p?.sellerShare;
+      const rawCommission = p?.commission !== undefined && p?.commission !== null && p?.commission !== ""
+        ? p.commission
+        : p?.adminProfitPerUnit;
 
-      let sellerNet;
-      let adminFee;
+      const hasBase = rawBase !== undefined && rawBase !== null && rawBase !== "" && !Number.isNaN(Number(rawBase));
+      const hasCommission = rawCommission !== undefined && rawCommission !== null && rawCommission !== "" && !Number.isNaN(Number(rawCommission));
 
-      if (hasBasePrice || hasSellerShare) {
-        const rawBase = Number(hasBasePrice ? p.basePrice : p.sellerShare);
-        sellerNet = Math.max(0, Math.min(price, Math.round(rawBase)));
-        if (hasCommission || hasAdminProfit) {
-          const rawComm = Number(hasCommission ? p.commission : p.adminProfitPerUnit);
-          adminFee = Math.max(0, Math.min(price, Math.round(rawComm)));
-        } else {
-          adminFee = Math.max(0, price - sellerNet);
-        }
-      } else if (hasCommission || hasAdminProfit) {
-        const rawComm = Number(hasCommission ? p.commission : p.adminProfitPerUnit);
-        adminFee = Math.max(0, Math.min(price, Math.round(rawComm)));
+      let sellerNet = 0;
+      let adminFee = 0;
+
+      if (hasBase && hasCommission) {
+        sellerNet = Math.max(0, Math.min(price, Math.round(Number(rawBase))));
+        adminFee = Math.max(0, Math.min(price, Math.round(Number(rawCommission))));
+      } else if (hasBase) {
+        sellerNet = Math.max(0, Math.min(price, Math.round(Number(rawBase))));
+        adminFee = Math.max(0, price - sellerNet);
+      } else if (hasCommission) {
+        adminFee = Math.max(0, Math.min(price, Math.round(Number(rawCommission))));
         sellerNet = Math.max(0, price - adminFee);
       } else {
-        const fallbackSplit = calculateSplit(price);
-        sellerNet = fallbackSplit.sellerNet;
-        adminFee = fallbackSplit.adminFee;
+        sellerNet = price;
+        adminFee = 0;
       }
 
-      const globalSplit = calculateSplit(price);
-      const isCustomCommission = Math.abs(adminFee - globalSplit.adminFee) > 0;
-      return { price, sellerNet, adminFee, isCustomCommission };
+      return { price, sellerNet, adminFee };
     }
 
     function buildProductsPriceSignature(products) {
@@ -1343,8 +1344,12 @@
                 <div class="price-val">${formatRupiah(split.price)}</div>
               </div>
               <div>
-                <div class="price-label">Uang Bersih Penjual</div>
-                <div class="price-val net">${formatRupiah(split.sellerNet)} / ${escapeHtml(item.unit)}</div>
+                <div class="price-label">Komisi Admin</div>
+                <div class="price-val commission">${formatRupiah(split.adminFee)}</div>
+              </div>
+              <div>
+                <div class="price-label">Hak Penjual</div>
+                <div class="price-val net">${formatRupiah(split.sellerNet)}</div>
               </div>
             </div>
           </div>
@@ -1374,19 +1379,13 @@
 
         let displayNet;
         let displayCommission;
-        let isCustomCommission = basePricing.isCustomCommission;
 
         if (!editDraft || displayPrice === basePricing.price) {
           displayNet = basePricing.sellerNet;
           displayCommission = basePricing.adminFee;
-        } else if (basePricing.isCustomCommission) {
+        } else {
           displayCommission = Math.min(displayPrice, basePricing.adminFee);
           displayNet = Math.max(0, displayPrice - displayCommission);
-        } else {
-          const recalculated = calculateSplit(displayPrice);
-          displayNet = recalculated.sellerNet;
-          displayCommission = recalculated.adminFee;
-          isCustomCommission = false;
         }
 
         const stock = getProductStock(p);
@@ -1409,9 +1408,8 @@
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px;">
                   <h4 class="product-name">${escapeHtml(displayName)}</h4>
                   ${editDraft ? `<span class="badge badge-warn">Diedit</span>` : ""}
-                  ${isCustomCommission ? `<span class="badge badge-primary">Komisi Khusus</span>` : ""}
                 </div>
-                <div class="product-meta">${escapeHtml(displayCat || "Makanan")} • Satuan: ${escapeHtml(displayUnit)} • Komisi Admin: ${formatRupiah(displayCommission)}</div>
+                <div class="product-meta">${escapeHtml(displayCat || "Makanan")} • Satuan: ${escapeHtml(displayUnit)}</div>
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
                 <span class="badge ${stockBadgeClass}">${stockLabel}</span>
@@ -1425,8 +1423,12 @@
                 <div class="price-val">${formatRupiah(displayPrice)}</div>
               </div>
               <div>
-                <div class="price-label">Uang Bersih Penjual</div>
-                <div class="price-val net">${formatRupiah(displayNet)} / ${escapeHtml(displayUnit)}</div>
+                <div class="price-label">Komisi Admin</div>
+                <div class="price-val commission">${formatRupiah(displayCommission)}</div>
+              </div>
+              <div>
+                <div class="price-label">Hak Penjual</div>
+                <div class="price-val net">${formatRupiah(displayNet)}</div>
               </div>
             </div>
 
@@ -1494,17 +1496,13 @@
         const existing = getVendorProductsList(vendorData).find((p) => getProductId(p) === numId);
         if (existing) {
           const itemPricing = resolveItemPricing(existing);
-          if (price === itemPricing.price || itemPricing.isCustomCommission) {
-            const adminFee = Math.min(price, itemPricing.adminFee);
-            const sellerNet = Math.max(0, price - adminFee);
-            splitSellingPrice.textContent = formatRupiah(price);
-            splitFeeLabel.textContent = itemPricing.isCustomCommission
-              ? "Komisi Admin Khusus Item"
-              : "Biaya Admin Lapak";
-            splitFeeAmount.textContent = `- ${formatRupiah(adminFee)}`;
-            splitNetReceive.textContent = `${formatRupiah(sellerNet)} / ${unit}`;
-            return;
-          }
+          const adminFee = Math.min(price, itemPricing.adminFee);
+          const sellerNet = Math.max(0, price - adminFee);
+          splitSellingPrice.textContent = formatRupiah(price);
+          splitFeeLabel.textContent = "Komisi Admin Produk Ini";
+          splitFeeAmount.textContent = `- ${formatRupiah(adminFee)}`;
+          splitNetReceive.textContent = `${formatRupiah(sellerNet)} / ${unit}`;
+          return;
         }
       }
 

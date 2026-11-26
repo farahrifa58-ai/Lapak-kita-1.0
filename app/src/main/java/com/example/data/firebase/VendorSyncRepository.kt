@@ -15,14 +15,15 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.MetadataChanges
-import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeout
 
 data class WebNewProductPayload(
     val name: String,
@@ -129,9 +130,28 @@ class VendorSyncRepository(
         val authRef = vendorRef.collection("private").document("auth")
 
         return try {
-            val existingVendor = vendorRef.get().await()
-            if (!existingVendor.exists()) {
-                val createData = mapOf(
+            withTimeout(12_000L) {
+                val existingVendor = vendorRef.get().await()
+                val preservedCreatedAt: Any
+                val preservedSubmissionId: String
+
+                if (existingVendor.exists()) {
+                    val existingOwner = existingVendor.getString("ownerUid")
+                    if (existingOwner != null && existingOwner != uid) {
+                        throw IllegalStateException("Kode penyetor $vendorCode sudah terdaftar di akun lain (izin ditolak).")
+                    }
+                    preservedCreatedAt = existingVendor.getTimestamp("createdAt") ?: FieldValue.serverTimestamp()
+                    preservedSubmissionId = lastProcessedSubmissionId.ifBlank {
+                        existingVendor.getString("lastProcessedSubmissionId").orEmpty()
+                    }.take(128)
+                } else {
+                    preservedCreatedAt = FieldValue.serverTimestamp()
+                    preservedSubmissionId = lastProcessedSubmissionId.take(128)
+                }
+
+                // Full clean set() overwrite (NO merge) so the `products` array and all fields
+                // are replaced cleanly without any leftover legacy fields.
+                val fullPayload = mapOf(
                     "ownerUid" to uid,
                     "vendorCode" to vendorCode,
                     "localSellerId" to seller.id.coerceAtLeast(0L),
@@ -144,71 +164,61 @@ class VendorSyncRepository(
                     "summaryTotalSold" to sellerDetail.totalSoldQty.coerceAtLeast(0),
                     "summaryUnpaidBalance" to sellerDetail.remainingBalance.coerceAtLeast(0.0),
                     "products" to productMaps,
-                    "lastProcessedSubmissionId" to lastProcessedSubmissionId.take(128),
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                vendorRef.set(createData).await()
-            } else {
-                val existingOwner = existingVendor.getString("ownerUid")
-                if (existingOwner != null && existingOwner != uid) {
-                    return Result.failure(IllegalStateException("Kode penyetor $vendorCode dimiliki akun lain"))
-                }
-                val preservedSubmissionId = lastProcessedSubmissionId.ifBlank {
-                    existingVendor.getString("lastProcessedSubmissionId").orEmpty()
-                }.take(128)
-                val updateData = mapOf(
-                    "localSellerId" to seller.id.coerceAtLeast(0L),
-                    "shopName" to safeShopName,
-                    "sellerName" to safeSellerName,
-                    "sellerStatus" to safeStatus,
-                    "adminFeeType" to feeType,
-                    "adminFeeValue" to feeValue,
-                    "summaryTotalStock" to sellerDetail.totalStock.coerceAtLeast(0),
-                    "summaryTotalSold" to sellerDetail.totalSoldQty.coerceAtLeast(0),
-                    "summaryUnpaidBalance" to sellerDetail.remainingBalance.coerceAtLeast(0.0),
-                    "products" to productMaps,
                     "lastProcessedSubmissionId" to preservedSubmissionId,
+                    "createdAt" to preservedCreatedAt,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                vendorRef.set(updateData, SetOptions.merge()).await()
-            }
+                vendorRef.set(fullPayload).await()
 
-            // Guarantee private writeToken document exists & is 100% identical to seller.writeToken
-            val existingAuth = authRef.get().await()
-            if (!existingAuth.exists()) {
-                authRef.set(
-                    mapOf(
-                        "ownerUid" to uid,
-                        "writeToken" to writeToken,
-                        "createdAt" to FieldValue.serverTimestamp(),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
-            } else {
-                val existingAuthOwner = existingAuth.getString("ownerUid")
-                if (existingAuthOwner != null && existingAuthOwner != uid) {
-                    return Result.failure(IllegalStateException("Token akses penyetor $vendorCode dimiliki akun lain"))
-                }
-                if (existingAuth.getString("writeToken") != writeToken) {
-                    authRef.update(
+                // Guarantee private writeToken document exists & is 100% identical to seller.writeToken
+                val existingAuth = authRef.get().await()
+                if (!existingAuth.exists()) {
+                    authRef.set(
                         mapOf(
+                            "ownerUid" to uid,
                             "writeToken" to writeToken,
+                            "createdAt" to FieldValue.serverTimestamp(),
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                     ).await()
+                } else {
+                    val existingAuthOwner = existingAuth.getString("ownerUid")
+                    if (existingAuthOwner != null && existingAuthOwner != uid) {
+                        throw IllegalStateException("Token akses penyetor $vendorCode dimiliki akun lain (izin ditolak).")
+                    }
+                    if (existingAuth.getString("writeToken") != writeToken) {
+                        authRef.update(
+                            mapOf(
+                                "writeToken" to writeToken,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
                 }
             }
 
             Result.success(Unit)
+        } catch (e: TimeoutCancellationException) {
+            Log.w("VendorSyncRepository", "Timeout syncing $vendorPath (offline/slow network)")
+            Result.failure(
+                IllegalStateException("Offline atau koneksi ke server Web Portal lambat. Periksa internet Anda.")
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: FirebaseFirestoreException) {
-            try {
-                handleFirestoreError(e, OperationType.WRITE, vendorPath)
-            } catch (wrapped: IllegalStateException) {
-                Result.failure(wrapped)
+            val friendlyMsg = when (e.code) {
+                FirebaseFirestoreException.Code.PERMISSION_DENIED ->
+                    "Izin Firestore ditolak untuk $vendorCode (PERMISSION_DENIED)."
+                FirebaseFirestoreException.Code.UNAVAILABLE ->
+                    "Server Web Portal tidak terjangkau / perangkat sedang offline."
+                FirebaseFirestoreException.Code.UNAUTHENTICATED ->
+                    "Sesi login Google berakhir. Silakan login ulang."
+                else ->
+                    "Gagal menulis ke Firestore (${e.code.name}): ${e.message.orEmpty()}"
             }
+            Log.e("VendorSyncRepository", "Firestore error syncing $vendorPath: $friendlyMsg", e)
+            runCatching { handleFirestoreError(e, OperationType.WRITE, vendorPath) }
+            Result.failure(IllegalStateException(friendlyMsg, e))
         } catch (e: Exception) {
             Log.e("VendorSyncRepository", "Failed syncing $vendorPath / $authPath", e)
             Result.failure(e)

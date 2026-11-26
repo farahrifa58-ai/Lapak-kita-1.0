@@ -225,17 +225,24 @@ service cloud.firestore {
       allow update: if isSignedIn() &&
                        isValidVendorCode(vendorCode) &&
                        existing().ownerUid == request.auth.uid &&
-                       isValidLapakVendor(incoming()) &&
                        incoming().ownerUid == existing().ownerUid &&
                        incoming().vendorCode == existing().vendorCode &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'localSellerId', 'shopName', 'sellerName', 'sellerStatus',
-                         'adminFeeType', 'adminFeeValue',
+                       incoming().keys().hasAll([
+                         'ownerUid', 'vendorCode', 'localSellerId', 'shopName', 'sellerName',
+                         'sellerStatus', 'adminFeeType', 'adminFeeValue',
                          'summaryTotalStock', 'summaryTotalSold', 'summaryUnpaidBalance',
-                         'products', 'lastProcessedSubmissionId', 'updatedAt'
-                       ]);
+                         'products', 'lastProcessedSubmissionId', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'ownerUid', 'vendorCode', 'localSellerId', 'shopName', 'sellerName',
+                         'sellerStatus', 'adminFeeType', 'adminFeeValue',
+                         'summaryTotalStock', 'summaryTotalSold', 'summaryUnpaidBalance',
+                         'products', 'lastProcessedSubmissionId', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidLapakVendor(incoming()) &&
+                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
 
       allow delete: if isSignedIn() &&
                        isValidVendorCode(vendorCode) &&

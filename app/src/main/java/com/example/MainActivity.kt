@@ -19,9 +19,11 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.widget.Toast
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.HourglassDisabled
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -498,11 +500,13 @@ private fun AuthenticatedAppShell(
     activeLicenseCode: String?,
     onSignedOut: () -> Unit
 ) {
+    val context = LocalContext.current
     val themeMode by viewModel.themeMode.collectAsState()
     val currentScreen by viewModel.currentScreen.collectAsState()
     val lang by viewModel.currentLanguage.collectAsState()
     val cart by viewModel.cart.collectAsState()
     val webSyncNotification by viewModel.webSyncNotification.collectAsState()
+    val webPortalSyncFeedback by viewModel.webPortalSyncFeedback.collectAsState()
 
     val cartItemCount = remember(cart) { cart.sumOf { it.quantity } }
 
@@ -530,6 +534,17 @@ private fun AuthenticatedAppShell(
             delay(6500)
             viewModel.dismissWebSyncNotification()
         }
+    }
+
+    LaunchedEffect(webPortalSyncFeedback?.id) {
+        val fb = webPortalSyncFeedback ?: return@LaunchedEffect
+        Toast.makeText(
+            context,
+            fb.message,
+            if (fb.isSuccess) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+        ).show()
+        delay(if (fb.isSuccess) 4000L else 8500L)
+        viewModel.dismissWebPortalSyncFeedback()
     }
 
     LapakKitaTheme(darkTheme = darkTheme) {
@@ -656,6 +671,89 @@ private fun AuthenticatedAppShell(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp)
                             )
+                        }
+                    }
+                }
+            }
+
+            // Explicit Green / Red Web Portal Sync Status Alert Banner
+            AnimatedVisibility(
+                visible = webPortalSyncFeedback != null,
+                enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                val feedback = webPortalSyncFeedback
+                if (feedback != null) {
+                    val containerColor = if (feedback.isSuccess) {
+                        Color(0xFF1F6E4E)
+                    } else {
+                        Color(0xFFC43B35)
+                    }
+                    Surface(
+                        color = containerColor,
+                        contentColor = Color.White,
+                        shape = RoundedCornerShape(16.dp),
+                        shadowElevation = 8.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 520.dp)
+                            .testTag(
+                                if (feedback.isSuccess) {
+                                    "web_portal_sync_success_banner"
+                                } else {
+                                    "web_portal_sync_error_banner"
+                                }
+                            )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (feedback.isSuccess) Icons.Default.CloudDone else Icons.Default.CloudOff,
+                                contentDescription = if (feedback.isSuccess) {
+                                    "Berhasil Sinkron Web Portal"
+                                } else {
+                                    "Gagal Sinkron Web Portal"
+                                },
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (feedback.isSuccess) {
+                                        "Tersinkron ke Web Portal"
+                                    } else {
+                                        "Gagal Sinkron ke Web Portal"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = feedback.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.92f),
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.dismissWebPortalSyncFeedback() },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Tutup Peringatan Sinkronisasi",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
