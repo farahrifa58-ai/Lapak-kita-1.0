@@ -70,7 +70,7 @@ fun PromoPosterDialog(
     val groupedProducts = remember(readyProducts) {
         PromoPosterGenerator.groupReadyProductsByCategory(readyProducts)
     }
-    val colCount = if (readyProducts.size <= 15) 2 else 3
+    val colCount = PromoPosterGenerator.resolveColumnCount(readyProducts.size)
 
     // Live customizable state initialized from Settings -> Kustomisasi Promosi defaults
     var selectedTemplate by remember(appSettings.posterTemplate) { mutableStateOf(appSettings.posterTemplate) }
@@ -430,7 +430,7 @@ private fun PosterLivePreviewCard(
     val style = remember(config.template, customBgBitmap) {
         if (customBgBitmap != null) PromoPosterStyles.softEmerald else PromoPosterStyles.resolve(config.template)
     }
-    val colCount = if (totalItems <= 15) 2 else 3
+    val colCount = PromoPosterGenerator.resolveColumnCount(totalItems)
 
     Box(
         modifier = Modifier
@@ -660,34 +660,43 @@ private fun PosterLivePreviewCard(
                                 )
                             }
 
-                            // 3-Column Dense Grid (> 15 products) or 2-Column Grid (<= 15 products)
-                            val chunkedRows = remember(group.items, colCount) {
-                                group.items.chunked(colCount)
+                            // Adaptive Grid: 1-col (<=8 items or single-item category), 2-col (9-24), 3-col (>24)
+                            val effectiveCols = if (group.items.size == 1) 1 else colCount
+                            val chunkedRows = remember(group.items, effectiveCols) {
+                                group.items.chunked(effectiveCols)
                             }
                             chunkedRows.forEachIndexed { rowIdx, rowItems ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(vertical = 1.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                        .padding(vertical = if (effectiveCols == 1) 2.5.dp else 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.Top
                                 ) {
-                                    for (c in 0 until colCount) {
+                                    for (c in 0 until effectiveCols) {
                                         val item = rowItems.getOrNull(c)
                                         if (item != null) {
-                                            val number = rowIdx * colCount + c + 1
+                                            val number = rowIdx * effectiveCols + c + 1
                                             PosterCompactMenuCell(
                                                 number = number,
                                                 detail = item,
                                                 style = style,
                                                 showStock = config.showStock,
-                                                compact = colCount == 3,
+                                                colCount = effectiveCols,
                                                 modifier = Modifier.weight(1f)
                                             )
                                         } else {
                                             Spacer(Modifier.weight(1f))
                                         }
                                     }
+                                }
+                                if (rowIdx < chunkedRows.lastIndex) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(0.5.dp)
+                                            .background(Color(style.dividerColor).copy(alpha = 0.25f))
+                                    )
                                 }
                             }
                         }
@@ -727,10 +736,9 @@ private fun PosterLivePreviewCard(
                     Text(
                         text = shopProfile.address,
                         fontSize = 9.sp,
+                        lineHeight = 12.sp,
                         color = Color(style.footerContactColor).copy(alpha = 0.85f),
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        textAlign = TextAlign.Center
                     )
                 }
             }
@@ -744,29 +752,50 @@ private fun PosterCompactMenuCell(
     detail: ProductDetailItem,
     style: PosterStyleSpec,
     showStock: Boolean,
-    compact: Boolean,
+    colCount: Int,
     modifier: Modifier = Modifier
 ) {
-    val fontSize = if (compact) 8.5.sp else 10.sp
+    val fontSize = when (colCount) {
+        1 -> 11.5.sp
+        2 -> 10.sp
+        else -> 8.5.sp
+    }
+    val lineHeight = when (colCount) {
+        1 -> 15.sp
+        2 -> 13.5.sp
+        else -> 11.5.sp
+    }
     val priceStr = PromoPosterGenerator.formatShortPrice(detail.product.sellingPrice)
 
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.Top
     ) {
-        Text(
-            text = "$number. ${detail.product.name}",
-            fontSize = fontSize,
-            lineHeight = if (compact) 11.sp else 13.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color(style.itemNameColor),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        // Hanging-indent number + full wrapped product name (NEVER ellipsized!)
+        Row(
             modifier = Modifier
                 .weight(1f)
-                .padding(end = 3.dp)
-        )
+                .padding(end = if (colCount == 1) 10.dp else 5.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(
+                text = "$number. ",
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                fontWeight = FontWeight.Bold,
+                color = Color(style.itemNameColor)
+            )
+            Text(
+                text = detail.product.name.trim(),
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                fontWeight = FontWeight.Bold,
+                color = Color(style.itemNameColor),
+                softWrap = true,
+                modifier = Modifier.weight(1f)
+            )
+        }
         Text(
             text = buildAnnotatedString {
                 withStyle(
@@ -782,15 +811,19 @@ private fun PosterCompactMenuCell(
                         SpanStyle(
                             color = Color(style.stockColor),
                             fontWeight = FontWeight.Medium,
-                            fontSize = if (compact) 7.5.sp else 8.5.sp
+                            fontSize = when (colCount) {
+                                1 -> 9.5.sp
+                                2 -> 8.5.sp
+                                else -> 7.5.sp
+                            }
                         )
                     ) {
-                        append("(${detail.currentStock})")
+                        append(" (${detail.currentStock})")
                     }
                 }
             },
             fontSize = fontSize,
-            lineHeight = if (compact) 11.sp else 13.sp,
+            lineHeight = lineHeight,
             maxLines = 1
         )
     }
