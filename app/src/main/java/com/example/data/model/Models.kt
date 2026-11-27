@@ -405,6 +405,150 @@ object OperationalCycleHelper {
     }
 }
 
+object AutoClosingLeftoverMode {
+    const val RESET_ZERO = "RESET_ZERO"
+    const val CARRY_OVER = "CARRY_OVER"
+
+    fun label(mode: String): String = when (mode.uppercase()) {
+        CARRY_OVER -> "Bawa Sisa ke Stok Besok (Carry Over)"
+        else -> "Reset Sisa ke 0 (Dikembalikan ke Penyetor)"
+    }
+
+    fun shortLabel(mode: String): String = when (mode.uppercase()) {
+        CARRY_OVER -> "Bawa ke Besok"
+        else -> "Reset ke 0 (Retur)"
+    }
+}
+
+object DailyClosingTriggerType {
+    const val AUTO = "AUTO"
+    const val MANUAL = "MANUAL"
+}
+
+object PrinterPaperSize {
+    const val MM_58 = "58MM"
+    const val MM_80 = "80MM"
+    const val A4 = "A4"
+
+    fun columnsFor(paperSize: String): Int = when (paperSize.uppercase()) {
+        MM_80 -> 48
+        A4 -> 64
+        else -> 32
+    }
+
+    fun labelFor(paperSize: String): String = when (paperSize.uppercase()) {
+        MM_80 -> "80 mm (Thermal Lebar)"
+        A4 -> "A4 (Printer Biasa / PDF)"
+        else -> "58 mm (Thermal Standar)"
+    }
+
+    fun label(paperSize: String): String = labelFor(paperSize)
+}
+
+object DailyClosingHelper {
+    private val wibTimeZone: java.util.TimeZone = java.util.TimeZone.getTimeZone("Asia/Jakarta")
+
+    fun dateStringFromMillis(millis: Long): String {
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+            timeZone = wibTimeZone
+        }
+        return sdf.format(java.util.Date(millis))
+    }
+
+    fun todayDateString(nowMillis: Long = System.currentTimeMillis()): String =
+        dateStringFromMillis(nowMillis)
+
+    fun formatDisplayDate(dateStr: String): String {
+        return runCatching {
+            val parser = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+                timeZone = wibTimeZone
+            }
+            val parsed = parser.parse(dateStr) ?: return dateStr
+            val fmt = java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale("id", "ID")).apply {
+                timeZone = wibTimeZone
+            }
+            fmt.format(parsed)
+        }.getOrDefault(dateStr)
+    }
+
+    fun formatTimeWib(hour: Int, minute: Int): String {
+        return String.format(java.util.Locale.US, "%02d:%02d", hour.coerceIn(0, 23), minute.coerceIn(0, 59))
+    }
+
+    fun formatTime(hour: Int, minute: Int): String = formatTimeWib(hour, minute)
+
+    fun currentWibMinutesOfDay(nowMillis: Long = System.currentTimeMillis()): Int {
+        val cal = java.util.Calendar.getInstance(wibTimeZone).apply {
+            timeInMillis = nowMillis
+        }
+        return cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+    }
+
+    fun hasPassedScheduledTimeToday(
+        scheduledHour: Int,
+        scheduledMinute: Int,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        val scheduledTotal = scheduledHour.coerceIn(0, 23) * 60 + scheduledMinute.coerceIn(0, 59)
+        return currentWibMinutesOfDay(nowMillis) >= scheduledTotal
+    }
+
+    fun dayBoundsWib(dateStr: String): Pair<Long, Long> {
+        val parser = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+            timeZone = wibTimeZone
+        }
+        val startCal = java.util.Calendar.getInstance(wibTimeZone).apply {
+            time = parser.parse(dateStr) ?: java.util.Date()
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val endCal = java.util.Calendar.getInstance(wibTimeZone).apply {
+            timeInMillis = startCal.timeInMillis
+            set(java.util.Calendar.HOUR_OF_DAY, 23)
+            set(java.util.Calendar.MINUTE, 59)
+            set(java.util.Calendar.SECOND, 59)
+            set(java.util.Calendar.MILLISECOND, 999)
+        }
+        return startCal.timeInMillis to endCal.timeInMillis
+    }
+}
+
+data class DailyClosingItemRecord(
+    val sellerId: Long = 0L,
+    val sellerName: String = "",
+    val vendorCode: String = "",
+    val productId: Long = 0L,
+    val productName: String = "",
+    val unit: String = "pcs",
+    val qtyIn: Int = 0,
+    val qtySold: Int = 0,
+    val qtyLeftover: Int = 0,
+    val sellingPrice: Double = 0.0,
+    val omzet: Double = 0.0,
+    val sellerShare: Double = 0.0,
+    val adminProfit: Double = 0.0
+)
+
+@Entity(tableName = "daily_closing_archives")
+data class DailyClosingArchive(
+    @PrimaryKey val closingDate: String, // yyyy-MM-dd in WIB (strictly 1 archive per date)
+    val closedAtMillis: Long = System.currentTimeMillis(),
+    val triggerType: String = DailyClosingTriggerType.AUTO, // AUTO or MANUAL
+    val leftoverMode: String = AutoClosingLeftoverMode.RESET_ZERO, // RESET_ZERO or CARRY_OVER
+    val totalTransactions: Int = 0,
+    val totalItemsIn: Int = 0,
+    val totalItemsSold: Int = 0,
+    val totalItemsLeftover: Int = 0,
+    val totalOmzet: Double = 0.0,
+    val totalSellerShare: Double = 0.0,
+    val totalAdminProfit: Double = 0.0,
+    val totalOperatingExpenses: Double = 0.0,
+    val netProfit: Double = 0.0,
+    val itemsBreakdownJson: String = "[]"
+)
+
 @Entity(tableName = "app_settings")
 data class AppSettings(
     @PrimaryKey val id: Int = 1,
@@ -423,9 +567,23 @@ data class AppSettings(
     val posterShowShopName: Boolean = true,
     val posterShowContact: Boolean = true,
     val posterCustomBgUri: String? = null,
-    val autoResetStockEnabled: Boolean = true,
+    val autoResetStockEnabled: Boolean = false,
     val autoResetHour: Int = 17,
-    val lastStockResetCycleId: String = ""
+    val lastStockResetCycleId: String = "",
+    // Auto Tutup Buku Harian (default ON at 22:00 WIB)
+    val autoClosingEnabled: Boolean = true,
+    val autoClosingHour: Int = 22,
+    val autoClosingMinute: Int = 0,
+    val autoClosingLeftoverMode: String = AutoClosingLeftoverMode.RESET_ZERO,
+    val lastClosedDate: String = "",
+    // Kustomisasi Pengguna (Tampilan HP Kasir / Karyawan)
+    val cashierShowOmzet: Boolean = false,
+    val cashierShowProfit: Boolean = false,
+    val cashierShowExpenses: Boolean = false,
+    // Kustomisasi Print & Printer Bluetooth
+    val printerName: String = "",
+    val printerAddress: String = "",
+    val printerPaperSize: String = PrinterPaperSize.MM_58
 )
 
 data class SoldItemSummary(

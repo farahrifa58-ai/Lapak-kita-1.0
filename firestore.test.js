@@ -694,4 +694,131 @@ test("Dual activation recovery: owner can query own activation_codes by usedByUi
   );
 });
 
+test("User settings (Auto Tutup Buku & Kustomisasi Kasir) and daily_closings archives: owner allowed, invalid payloads & cross-user blocked", async () => {
+  const ownerDb = testEnv
+    .authenticatedContext(ADMIN_A, { email: "owner.lapak@gmail.com", email_verified: true })
+    .firestore();
+  const otherDb = testEnv
+    .authenticatedContext(ADMIN_B, { email: "other.user@gmail.com", email_verified: true })
+    .firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const now = new Date(Date.now() - 5000);
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc(ADMIN_A).set({
+      userId: ADMIN_A,
+      email: "owner.lapak@gmail.com",
+      businessName: "Lapak Owner",
+      licenseCode: "RAFDEV-SETTINGS-01",
+      registeredDeviceId: "AND-HP1",
+      registeredDeviceIds: ["AND-HP1"],
+      active: true,
+      isActivated: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  // Owner updates Auto Tutup Buku & Cashier Customization fields without touching device list -> SUCCEEDS
+  await assertSucceeds(
+    ownerDb.collection("users").doc(ADMIN_A).update({
+      autoClosingEnabled: true,
+      autoClosingHour: 22,
+      autoClosingMinute: 30,
+      autoClosingLeftoverMode: "CARRY_OVER",
+      lastClosedDate: "2026-11-26",
+      cashierShowOmzet: true,
+      cashierShowProfit: false,
+      cashierShowExpenses: true,
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+
+  // Invalid hour (25) or invalid leftover mode -> FAILS
+  await assertFails(
+    ownerDb.collection("users").doc(ADMIN_A).update({
+      autoClosingHour: 25,
+      updatedAt: new Date(Date.now() - 1800),
+    })
+  );
+  await assertFails(
+    ownerDb.collection("users").doc(ADMIN_A).update({
+      autoClosingLeftoverMode: "INVALID_MODE",
+      updatedAt: new Date(Date.now() - 1700),
+    })
+  );
+
+  // Cross-user update on settings -> FAILS
+  await assertFails(
+    otherDb.collection("users").doc(ADMIN_A).update({
+      cashierShowOmzet: true,
+      updatedAt: new Date(Date.now() - 1600),
+    })
+  );
+
+  const validClosing = {
+    ownerUid: ADMIN_A,
+    closingDate: "2026-11-26",
+    closedAtMillis: Date.now() - 1500,
+    triggerType: "AUTO",
+    leftoverMode: "RESET_ZERO",
+    totalTransactions: 12,
+    totalItemsIn: 50,
+    totalItemsSold: 42,
+    totalItemsLeftover: 8,
+    totalOmzet: 210000,
+    totalSellerShare: 168000,
+    totalAdminProfit: 42000,
+    totalOperatingExpenses: 10000,
+    netProfit: 32000,
+    itemsBreakdown: [
+      {
+        productId: 1,
+        productName: "Risoles Mayo",
+        sellerName: "Bu Sari",
+        unit: "pcs",
+        qtyIn: 50,
+        qtySold: 42,
+        qtyLeftover: 8,
+        omzet: 210000,
+        sellerShare: 168000,
+        adminProfit: 42000,
+      },
+    ],
+    createdAt: new Date(Date.now() - 1500),
+    updatedAt: new Date(Date.now() - 1500),
+  };
+
+  // Owner creates & reads daily closing archive -> SUCCEEDS
+  await assertSucceeds(
+    ownerDb.collection("users").doc(ADMIN_A).collection("daily_closings").doc("2026-11-26").set(validClosing)
+  );
+  await assertSucceeds(
+    ownerDb.collection("users").doc(ADMIN_A).collection("daily_closings").get()
+  );
+
+  // Invalid date doc ID -> FAILS
+  await assertFails(
+    ownerDb.collection("users").doc(ADMIN_A).collection("daily_closings").doc("bad-date").set({
+      ...validClosing,
+      closingDate: "bad-date",
+    })
+  );
+
+  // Cross-user & unauthenticated access to daily_closings -> FAILS
+  await assertFails(
+    otherDb.collection("users").doc(ADMIN_A).collection("daily_closings").doc("2026-11-26").get()
+  );
+  await assertFails(
+    unauthDb.collection("users").doc(ADMIN_A).collection("daily_closings").doc("2026-11-26").get()
+  );
+  await assertFails(
+    otherDb.collection("users").doc(ADMIN_A).collection("daily_closings").doc("2026-11-27").set({
+      ...validClosing,
+      closingDate: "2026-11-27",
+    })
+  );
+});
+
+
 

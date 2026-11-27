@@ -696,7 +696,11 @@ fun TransactionAdminDetailDialog(
                                 Text(
                                     text = itm.productName,
                                     style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    softWrap = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 8.dp)
                                 )
                                 Text(
                                     text = "${itm.quantity} ${itm.unit}",
@@ -2260,6 +2264,8 @@ fun SellerStockDetailDialog(
     sellerDetail: SellerDetailItem,
     productsWithStock: List<ProductDetailItem>,
     lang: String,
+    isOwner: Boolean = true,
+    onEditStock: ((ProductDetailItem) -> Unit)? = null,
     onEditProduct: ((ProductDetailItem) -> Unit)? = null,
     onDeleteProduct: ((ProductDetailItem) -> Unit)? = null,
     onAddProduct: (() -> Unit)? = null,
@@ -2443,23 +2449,35 @@ fun SellerStockDetailDialog(
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
-                                        Text(
-                                            text = "Hak Penyetor: ${LapakViewModel.formatRupiah(prodItem.product.sellerShare)} | Laba: ${LapakViewModel.formatRupiah(prodItem.product.adminProfitPerUnit)}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = TealSecondary,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
+                                        if (isOwner) {
+                                            Text(
+                                                text = "Hak Penyetor: ${LapakViewModel.formatRupiah(prodItem.product.sellerShare)} | Laba: ${LapakViewModel.formatRupiah(prodItem.product.adminProfitPerUnit)}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = TealSecondary,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
                                     }
 
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        // Stock pill badge
+                                        // Stock pill badge (clickable to edit/correct stock)
                                         Surface(
                                             color = if (prodItem.currentStock > 0) EmeraldContainer else MaterialTheme.colorScheme.surfaceVariant,
                                             shape = RoundedCornerShape(8.dp),
                                             border = androidx.compose.foundation.BorderStroke(
                                                 1.dp,
                                                 if (prodItem.currentStock > 0) EmeraldLight.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-                                            )
+                                            ),
+                                            modifier = Modifier
+                                                .then(
+                                                    if (onEditStock != null) {
+                                                        Modifier
+                                                            .clickable { onEditStock(prodItem) }
+                                                            .testTag("seller_detail_edit_stock_${prodItem.product.id}")
+                                                    } else {
+                                                        Modifier
+                                                    }
+                                                )
                                         ) {
                                             Column(
                                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -2472,7 +2490,7 @@ fun SellerStockDetailDialog(
                                                     color = if (prodItem.currentStock > 0) EmeraldDark else MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                                 Text(
-                                                    text = if (prodItem.currentStock > 0) prodItem.product.unit else "Habis",
+                                                    text = if (onEditStock != null) "Ubah" else if (prodItem.currentStock > 0) prodItem.product.unit else "Habis",
                                                     style = MaterialTheme.typography.labelSmall,
                                                     fontWeight = FontWeight.SemiBold,
                                                     color = if (prodItem.currentStock > 0) EmeraldDark else MaterialTheme.colorScheme.onSurfaceVariant

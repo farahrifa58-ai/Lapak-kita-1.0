@@ -126,6 +126,7 @@ fun AuthScreen(
                                     licenseCode = check.profile.licenseCode,
                                     deviceId = currentDeviceId,
                                     connectedDevicesCount = check.profile.connectedDevicesCount,
+                                    isOwnerDevice = check.profile.isOwnerDevice(currentDeviceId),
                                     active = true
                                 )
                                 onSetAuthError(null)
@@ -532,6 +533,7 @@ fun CompleteActivationScreen(
                                     licenseCode = profile.licenseCode,
                                     deviceId = currentDeviceId,
                                     connectedDevicesCount = profile.connectedDevicesCount,
+                                    isOwnerDevice = profile.isOwnerDevice(currentDeviceId),
                                     active = true
                                 )
                                 onSetAuthError(null)

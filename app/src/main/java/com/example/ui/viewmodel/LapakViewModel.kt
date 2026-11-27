@@ -21,9 +21,11 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -75,6 +77,8 @@ class LapakViewModel(
     private val sessionActiveFlag = AtomicBoolean(true)
     private val cloudHydratedFlag = AtomicBoolean(false)
     private val _sessionActive = MutableStateFlow(true)
+    private val _isCloudLoaded = MutableStateFlow(false)
+    val isCloudLoaded: StateFlow<Boolean> = _isCloudLoaded.asStateFlow()
 
     private val jobsLock = Any()
     private val listenerJobs = mutableListOf<Job>()
@@ -86,6 +90,15 @@ class LapakViewModel(
         return sessionActiveFlag.get() &&
             currentUserId.isNotBlank() &&
             Firebase.auth.currentUser?.uid == currentUserId
+    }
+
+    /**
+     * Strict Download-First Guard:
+     * Forbids ANY Firestore write/upload while `isCloudLoaded == false` so an empty or stale
+     * local state can NEVER overwrite real cloud data in `users/{uid}` or `lapak_vendors/{kodePenyetor}`.
+     */
+    private fun canWriteToCloud(): Boolean {
+        return isActiveAuthenticatedSession() && cloudHydratedFlag.get()
     }
 
     private fun trackListenerJob(job: Job) {
@@ -117,6 +130,7 @@ class LapakViewModel(
     fun teardownSessionAndUnsubscribe() {
         sessionActiveFlag.set(false)
         cloudHydratedFlag.set(false)
+        _isCloudLoaded.value = false
         _sessionActive.value = false
 
         synchronized(jobsLock) {
@@ -129,6 +143,7 @@ class LapakViewModel(
         processedSubmissionIds.clear()
         _currentScreen.value = AppScreen.DASHBOARD
         _connectedDevicesCount.value = 1
+        _isOwner.value = true
         _webSyncNotification.value = null
         _webPortalSyncFeedback.value = null
         _isSyncingCloud.value = false
@@ -153,7 +168,17 @@ class LapakViewModel(
     private val _currentScreen = MutableStateFlow(AppScreen.DASHBOARD)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
 
+    // Device Role: Device 1 = Owner (full access), Device 2 = Kasir / Karyawan (financials hidden)
+    private val _isOwner = MutableStateFlow(
+        licenseStorage.getCachedIsOwnerDevice(currentUserId)
+    )
+    val isOwner: StateFlow<Boolean> = _isOwner.asStateFlow()
+
     fun navigateTo(screen: AppScreen) {
+        if (screen == AppScreen.FINANCIAL_REPORT && !_isOwner.value) {
+            _currentScreen.value = AppScreen.DASHBOARD
+            return
+        }
         _currentScreen.value = screen
     }
 
@@ -232,6 +257,24 @@ class LapakViewModel(
     )
 
     val isDarkTheme: StateFlow<Boolean> = appSettings.map { it.themeMode == ThemeMode.DARK }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        false
+    )
+
+    // Permanent Daily Closing Archives (Auto & Manual Tutup Buku)
+    val dailyClosingArchives: StateFlow<List<DailyClosingArchive>> = _sessionActive.flatMapLatest { active ->
+        if (!active) flowOf(emptyList()) else repository.allDailyClosingArchives
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        emptyList()
+    )
+
+    val isTodayClosed: StateFlow<Boolean> = combine(dailyClosingArchives, appSettings) { archives, settings ->
+        val today = DailyClosingHelper.todayDateString()
+        archives.any { it.closingDate == today } || settings.lastClosedDate == today
+    }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         false
@@ -389,13 +432,175 @@ class LapakViewModel(
         }
     }
 
+    fun updateAutoClosingSettings(
+        enabled: Boolean,
+        hour: Int,
+        minute: Int,
+        leftoverMode: String,
+        onDone: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val updated = repository.updateAutoClosingSettings(
+                enabled = enabled,
+                hour = hour,
+                minute = minute,
+                leftoverMode = leftoverMode
+            )
+            licenseStorage.saveAutoClosingPrefs(
+                uid = currentUserId,
+                enabled = updated.autoClosingEnabled,
+                hour = updated.autoClosingHour,
+                minute = updated.autoClosingMinute,
+                leftoverMode = updated.autoClosingLeftoverMode,
+                lastClosedDate = updated.lastClosedDate
+            )
+            if (canWriteToCloud()) {
+                val res = financialSyncRepository.syncUserSettingsToFirestore(updated, expectedUid = currentUserId)
+                if (res.isFailure) {
+                    onDone(true, "Jadwal disimpan lokal (akan disinkronkan ke cloud saat online).")
+                    return@launch
+                }
+            }
+            val timeLabel = DailyClosingHelper.formatTime(updated.autoClosingHour, updated.autoClosingMinute)
+            val statusMsg = if (updated.autoClosingEnabled) {
+                "Auto Tutup Buku aktif pukul $timeLabel WIB (${AutoClosingLeftoverMode.label(updated.autoClosingLeftoverMode)})."
+            } else {
+                "Auto Tutup Buku harian dinonaktifkan."
+            }
+            onDone(true, statusMsg)
+        }
+    }
+
+    fun updateCashierVisibilitySettings(
+        showOmzet: Boolean,
+        showProfit: Boolean,
+        showExpenses: Boolean,
+        onDone: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val updated = repository.updateCashierVisibilitySettings(
+                showOmzet = showOmzet,
+                showProfit = showProfit,
+                showExpenses = showExpenses
+            )
+            licenseStorage.saveCashierVisibilityPrefs(
+                uid = currentUserId,
+                showOmzet = updated.cashierShowOmzet,
+                showProfit = updated.cashierShowProfit,
+                showExpenses = updated.cashierShowExpenses
+            )
+            if (canWriteToCloud()) {
+                val res = financialSyncRepository.syncUserSettingsToFirestore(updated, expectedUid = currentUserId)
+                if (res.isFailure) {
+                    onDone(true, "Pengaturan tampilan kasir disimpan lokal (menunggu koneksi cloud).")
+                    return@launch
+                }
+            }
+            onDone(true, "Kustomisasi tampilan HP Kasir berhasil disimpan & disinkronkan!")
+        }
+    }
+
+    fun updatePrinterSettings(
+        printerName: String,
+        printerAddress: String,
+        paperSize: String,
+        onDone: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val updated = repository.updatePrinterSettings(
+                printerName = printerName,
+                printerAddress = printerAddress,
+                paperSize = paperSize
+            )
+            licenseStorage.savePrinterPrefs(
+                uid = currentUserId,
+                printerName = updated.printerName,
+                printerAddress = updated.printerAddress,
+                paperSize = updated.printerPaperSize
+            )
+            val label = updated.printerName.ifBlank { "Printer Sistem / PDF" }
+            onDone(true, "Pengaturan print disimpan: $label (${PrinterPaperSize.label(updated.printerPaperSize)})")
+        }
+    }
+
+    fun runManualDailyClosing(
+        leftoverModeOverride: String? = null,
+        onDone: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val todayWib = DailyClosingHelper.todayDateString()
+            val result = repository.performDailyClosing(
+                targetDateWib = todayWib,
+                triggerType = DailyClosingTriggerType.MANUAL,
+                leftoverModeOverride = leftoverModeOverride,
+                applyStockLeftoverRule = true,
+                includeActiveCurrentStock = true,
+                forceIfEmpty = true
+            )
+            if (result.isFailure) {
+                onDone(false, result.exceptionOrNull()?.message ?: "Gagal melakukan Tutup Buku Hari Ini.")
+                return@launch
+            }
+            val archive = result.getOrThrow()
+            if (archive.leftoverMode == AutoClosingLeftoverMode.RESET_ZERO) {
+                clearCart()
+            }
+            syncDailyClosingArchiveAndState(archive)
+            val dateLabel = DailyClosingHelper.formatDisplayDate(archive.closingDate)
+            val msg = "Tutup Buku tanggal $dateLabel berhasil dicatat ke Arsip Riwayat."
+            _webSyncNotification.value = msg
+            onDone(true, msg)
+        }
+    }
+
+    private suspend fun syncDailyClosingArchiveAndState(archive: DailyClosingArchive) {
+        val updatedSettings = repository.appSettings.first()
+        licenseStorage.saveAutoClosingPrefs(
+            uid = currentUserId,
+            enabled = updatedSettings.autoClosingEnabled,
+            hour = updatedSettings.autoClosingHour,
+            minute = updatedSettings.autoClosingMinute,
+            leftoverMode = updatedSettings.autoClosingLeftoverMode,
+            lastClosedDate = updatedSettings.lastClosedDate
+        )
+        if (!canWriteToCloud()) return
+
+        val items = LapakRepository.decodeClosingItemsJson(archive.itemsBreakdownJson)
+        financialSyncRepository.syncDailyClosingToFirestore(archive, items, expectedUid = currentUserId)
+        financialSyncRepository.syncUserSettingsToFirestore(updatedSettings, expectedUid = currentUserId)
+        if (archive.leftoverMode == AutoClosingLeftoverMode.RESET_ZERO) {
+            delay(150)
+            syncAllVendorsToCloud()
+        }
+    }
+
+    private suspend fun checkAndRunAutoClosingInternal() {
+        if (!cloudHydratedFlag.get() || !sessionActiveFlag.get()) return
+        val createdArchives = repository.checkAndRunAutoClosing()
+        if (createdArchives.isEmpty()) return
+
+        if (createdArchives.any { it.leftoverMode == AutoClosingLeftoverMode.RESET_ZERO }) {
+            clearCart()
+        }
+        createdArchives.forEach { archive ->
+            syncDailyClosingArchiveAndState(archive)
+        }
+        val latest = createdArchives.maxByOrNull { it.closingDate } ?: return
+        val displayDate = DailyClosingHelper.formatDisplayDate(latest.closingDate)
+        _webSyncNotification.value = "Auto Tutup Buku tanggal $displayDate telah berhasil dicatat ke Riwayat"
+    }
+
     fun checkOperationalCycleOnResume() {
         viewModelScope.launch {
+            if (!cloudHydratedFlag.get()) return@launch
+            checkAndRunAutoClosingInternal()
             val resetResult = repository.checkAndRunAutoStockResetIfNeeded()
             if (resetResult != null) {
                 clearCart()
                 delay(150)
-                syncAllVendorsToCloud()
+                if (canWriteToCloud()) {
+                    syncAllVendorsToCloud()
+                }
                 val hourLabel = OperationalCycleHelper.formatResetHour(appSettings.value.autoResetHour)
                 _webSyncNotification.value = if (resetResult.resetProductsCount > 0) {
                     "Auto-Reset Harian ($hourLabel WIB): ${resetResult.resetProductsCount} produk (${resetResult.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
@@ -522,11 +727,14 @@ class LapakViewModel(
     )
 
     init {
-        // Cloud-First Isolated Initialization:
-        // 1. Ensure clean default ShopProfile & AppSettings (NO sample demo data injection!)
-        // 2. Pull cloud data from `users/{currentUserId}/...` FIRST before pushing anything
-        // 3. Start real-time Firestore `onSnapshot` listeners tracked for immediate teardown on logout
-        // 4. Only upload genuinely non-empty offline-created local records missing from cloud
+        // Strict Download-First Isolated Initialization:
+        // 1. Ensure clean default ShopProfile & AppSettings (ZERO sample/dummy data!)
+        // 2. Keep `isCloudLoaded = false` — strictly FORBID any Firestore upload/write!
+        // 3. Attach real-time Firestore `onSnapshot` listeners FIRST and wait until all 4
+        //    operational subcollections emit server-confirmed snapshots (`!isFromCache`)
+        //    and finish merging into local Room state.
+        // 4. ONLY THEN flip `isCloudLoaded = true` and start secondary watchers.
+        //    NEVER auto-upload empty local state or overwrite `lapak_vendors/*` on startup.
         val startupJob = viewModelScope.launch {
             if (!sessionActiveFlag.get()) return@launch
             repository.ensureDefaultProfileAndSettings(initialBusinessName)
@@ -538,6 +746,52 @@ class LapakViewModel(
             }
 
             repository.ensureAllSellersHaveVendorCodes()
+
+            if (!isActiveAuthenticatedSession()) return@launch
+
+            val vendorsServerReady = CompletableDeferred<Unit>()
+            val transactionsServerReady = CompletableDeferred<Unit>()
+            val expensesServerReady = CompletableDeferred<Unit>()
+            val settlementsServerReady = CompletableDeferred<Unit>()
+            val dailyClosingsServerReady = CompletableDeferred<Unit>()
+            val userSettingsServerReady = CompletableDeferred<Unit>()
+
+            // Step 2: Attach real-time onSnapshot listeners FIRST (Download-First)
+            startMultiDeviceRealtimeListeners(
+                vendorsServerReady = vendorsServerReady,
+                transactionsServerReady = transactionsServerReady,
+                expensesServerReady = expensesServerReady,
+                settlementsServerReady = settlementsServerReady,
+                dailyClosingsServerReady = dailyClosingsServerReady,
+                userSettingsServerReady = userSettingsServerReady
+            )
+
+            // Wait until Firestore server snapshots for all collections + user settings are downloaded & merged
+            awaitAll(
+                vendorsServerReady,
+                transactionsServerReady,
+                expensesServerReady,
+                settlementsServerReady,
+                dailyClosingsServerReady,
+                userSettingsServerReady
+            )
+
+            if (!isActiveAuthenticatedSession()) return@launch
+
+            // Restore UID-scoped local printer preferences (device-local)
+            val (savedPrinterName, savedPrinterAddr, savedPaperSize) = licenseStorage.getPrinterPrefs(currentUserId)
+            val currPostHydration = repository.appSettings.first()
+            if (currPostHydration.printerAddress.isBlank() && savedPrinterAddr.isNotBlank()) {
+                repository.updatePrinterSettings(savedPrinterName, savedPrinterAddr, savedPaperSize)
+            }
+
+            // Step 3: Cloud data is now fully loaded into state — unlock user-driven writes!
+            cloudHydratedFlag.set(true)
+            _isCloudLoaded.value = true
+
+            // Step 4: Run Auto Tutup Buku & operational cycle check ONLY after hydration
+            checkAndRunAutoClosingInternal()
+
             val startupReset = repository.checkAndRunAutoStockResetIfNeeded()
             if (startupReset != null && startupReset.resetProductsCount > 0) {
                 clearCart()
@@ -548,152 +802,29 @@ class LapakViewModel(
                     "Auto-Reset Harian ($hourLabel WIB): ${startupReset.resetProductsCount} produk (${startupReset.totalArchivedQty} sisa stok) diarsipkan & direset ke 0."
             }
 
-            // Step 2: Hydrate from Firestore FIRST for this exact UID (NEVER upload empty/stale state first!)
-            var cloudVendorCodes = emptySet<String>()
-            var cloudTrxNumbers = emptySet<String>()
-            var cloudExpenseKeys = emptySet<String>()
-            var cloudPaymentKeys = emptySet<String>()
-            var vendorsFetchedOk = false
-            var financialFetchedOk = false
-
-            if (isActiveAuthenticatedSession()) {
-                val cloudVendorsRes = financialSyncRepository.fetchCloudVendorsCatalog(currentUserId)
-                if (cloudVendorsRes.isSuccess && isActiveAuthenticatedSession()) {
-                    val remoteVendors = cloudVendorsRes.getOrThrow()
-                    vendorsFetchedOk = true
-                    cloudVendorCodes = remoteVendors.map { it.vendorCode.trim().uppercase() }.toSet()
-                    if (remoteVendors.isNotEmpty()) {
-                        val merged = repository.mergeCloudVendorsCatalog(
-                            vendors = remoteVendors,
-                            currentDeviceId = currentDeviceId,
-                            ignoreSourceDeviceCheck = true
-                        )
-                        if (merged > 0) {
-                            _lastCloudSyncAt.value = System.currentTimeMillis()
-                        }
-                    }
-                }
-
-                val cloudFinancialRes = financialSyncRepository.fetchAllCloudFinancialData(currentUserId)
-                if (cloudFinancialRes.isSuccess && isActiveAuthenticatedSession()) {
-                    val bundle = cloudFinancialRes.getOrThrow()
-                    financialFetchedOk = true
-                    cloudTrxNumbers = bundle.transactions.map { it.transactionNumber.trim() }.toSet()
-                    cloudExpenseKeys = bundle.expenses.map {
-                        "${it.expenseDateMillis}|${it.title.trim().lowercase()}|${it.amount.toLong()}"
-                    }.toSet()
-                    cloudPaymentKeys = bundle.settlements.map {
-                        "${it.paymentDateMillis}|${it.sellerName.trim().lowercase()}|${it.amount.toLong()}"
-                    }.toSet()
-                    if (bundle.transactions.isNotEmpty() || bundle.expenses.isNotEmpty() || bundle.settlements.isNotEmpty()) {
-                        val mergedFin = repository.mergeCloudFinancialData(bundle)
-                        if (mergedFin > 0) {
-                            _lastCloudSyncAt.value = System.currentTimeMillis()
-                        }
-                    }
-                }
-            }
-
-            if (!sessionActiveFlag.get()) return@launch
-            cloudHydratedFlag.set(true)
-
-            // Step 3: Start tracked real-time Firestore listeners & operational watcher
             startWebSubmissionsListener()
-            startMultiDeviceRealtimeListeners()
             startOperationalCycleWatcher()
-
-            // Step 4: Only push non-empty local-only records that were created offline & not yet on cloud
-            if (vendorsFetchedOk && financialFetchedOk && isActiveAuthenticatedSession()) {
-                pushLocalUnsyncedRecordsAfterHydration(
-                    existingCloudVendorCodes = cloudVendorCodes,
-                    existingCloudTrxNumbers = cloudTrxNumbers,
-                    existingCloudExpenseKeys = cloudExpenseKeys,
-                    existingCloudPaymentKeys = cloudPaymentKeys
-                )
-            }
-
-            // Step 5: Safeguard — refresh public Web Portal docs (`lapak_vendors/{kodePenyetor}`)
-            // for all active sellers so previously edited prices, basePrice, and commissions are live
-            if (isActiveAuthenticatedSession()) {
-                syncActiveVendorsToCloudSilently()
-            }
         }
         trackBackgroundJob(startupJob)
     }
 
-    private suspend fun pushLocalUnsyncedRecordsAfterHydration(
-        existingCloudVendorCodes: Set<String>,
-        existingCloudTrxNumbers: Set<String>,
-        existingCloudExpenseKeys: Set<String>,
-        existingCloudPaymentKeys: Set<String>
-    ) {
-        if (!isActiveAuthenticatedSession() || !cloudHydratedFlag.get()) return
-
-        val sellers = repository.sellersWithStats.first()
-        val products = repository.productsWithDetails.first()
-        val profile = repository.shopProfile.first()
-        val settings = repository.appSettings.first()
-
-        // Only push local sellers that are not yet present in cloud (never upload empty state)
-        for (sellerDetail in sellers) {
-            if (!isActiveAuthenticatedSession()) return
-            val code = sellerDetail.seller.vendorCode.trim().uppercase()
-            if (code.isBlank() || code in existingCloudVendorCodes) continue
-            val directSnapshot = repository.getSellerSyncSnapshotDirect(sellerDetail.seller.id) ?: continue
-            syncSellerSnapshotConcurrently(directSnapshot)
-        }
-
-        val snapshot = repository.getFinancialSyncSnapshot()
-        val sellersById = snapshot.sellers.associateBy { it.id }
-        val sellerStatusById = sellers.associate { it.seller.id to it.paymentStatus }
-
-        for (trx in snapshot.transactions) {
-            if (!isActiveAuthenticatedSession()) return
-            if (trx.transactionNumber.trim() in existingCloudTrxNumbers) continue
-            val trxItems = snapshot.itemsByTransactionId[trx.id].orEmpty()
-            financialSyncRepository.syncTransactionToFirestore(
-                transaction = trx,
-                items = trxItems,
-                expectedUid = currentUserId
-            )
-        }
-
-        for (exp in snapshot.expenses) {
-            if (!isActiveAuthenticatedSession()) return
-            val key = "${exp.expenseDate}|${exp.title.trim().lowercase()}|${exp.amount.toLong()}"
-            if (key in existingCloudExpenseKeys) continue
-            financialSyncRepository.syncExpenseToFirestore(
-                expense = exp,
-                expectedUid = currentUserId
-            )
-        }
-
-        for (pay in snapshot.payments) {
-            if (!isActiveAuthenticatedSession()) return
-            val seller = sellersById[pay.sellerId]
-            val sellerNameKey = seller?.name?.trim()?.lowercase().orEmpty()
-            val key = "${pay.paymentDate}|$sellerNameKey|${pay.amount.toLong()}"
-            if (key in existingCloudPaymentKeys) continue
-            val status = sellerStatusById[pay.sellerId] ?: "SEBAGIAN"
-            financialSyncRepository.syncSettlementToFirestore(
-                payment = pay,
-                seller = seller,
-                status = status,
-                expectedUid = currentUserId
-            )
-        }
-    }
-
     /**
      * Live real-time `onSnapshot` listeners (with MetadataChanges.INCLUDE) under `users/{uid}`
-     * so transactions, products, consignment stocks, settlements, expenses, and connected device count
-     * stay synchronized instantly between HP Kasir and HP Owner without manual refresh.
-     * Every listener job is tracked in [listenerJobs] for instant cancellation on Logout / UID switch.
+     * so transactions, products, consignment stocks, settlements, expenses, daily closing archives,
+     * Auto Tutup Buku / Cashier customization settings, connected device count, and Owner vs Kasir
+     * role stay synchronized instantly between HP Owner and HP Kasir.
      */
-    private fun startMultiDeviceRealtimeListeners() {
+    private fun startMultiDeviceRealtimeListeners(
+        vendorsServerReady: CompletableDeferred<Unit>,
+        transactionsServerReady: CompletableDeferred<Unit>,
+        expensesServerReady: CompletableDeferred<Unit>,
+        settlementsServerReady: CompletableDeferred<Unit>,
+        dailyClosingsServerReady: CompletableDeferred<Unit>,
+        userSettingsServerReady: CompletableDeferred<Unit>
+    ) {
         if (!isActiveAuthenticatedSession()) return
 
-        // 1. Live connected devices counter ("Perangkat Terhubung: X / 2 HP")
+        // 1. Live connected devices counter & Owner vs Kasir role detection
         trackListenerJob(
             viewModelScope.launch {
                 activationAuthRepository.observeUserProfile(currentUserId).collect { profile ->
@@ -702,6 +833,13 @@ class LapakViewModel(
                         val count = profile.connectedDevicesCount.coerceIn(1, ActivationAuthRepository.MAX_REGISTERED_DEVICES)
                         _connectedDevicesCount.value = count
                         licenseStorage.updateConnectedDevicesCount(currentUserId, count)
+
+                        val ownerFlag = profile.isOwnerDevice(currentDeviceId)
+                        _isOwner.value = ownerFlag
+                        licenseStorage.updateIsOwnerDevice(currentUserId, ownerFlag)
+                        if (!ownerFlag && _currentScreen.value == AppScreen.FINANCIAL_REPORT) {
+                            _currentScreen.value = AppScreen.DASHBOARD
+                        }
                     }
                 }
             }
@@ -711,11 +849,20 @@ class LapakViewModel(
         trackListenerJob(
             viewModelScope.launch {
                 try {
-                    financialSyncRepository.observeVendorsCatalogRealtime(currentUserId).collect { remoteVendors ->
+                    financialSyncRepository.observeVendorsCatalogWithMetadata(currentUserId).collect { batch ->
                         if (!isActiveAuthenticatedSession()) return@collect
-                        val changed = repository.mergeCloudVendorsCatalog(remoteVendors, currentDeviceId)
-                        if (changed > 0) {
-                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        if (batch.items.isNotEmpty()) {
+                            val changed = repository.mergeCloudVendorsCatalog(
+                                vendors = batch.items,
+                                currentDeviceId = currentDeviceId,
+                                ignoreSourceDeviceCheck = !cloudHydratedFlag.get()
+                            )
+                            if (changed > 0) {
+                                _lastCloudSyncAt.value = System.currentTimeMillis()
+                            }
+                        }
+                        if (!batch.isFromCache) {
+                            vendorsServerReady.complete(Unit)
                         }
                     }
                 } catch (e: CancellationException) {
@@ -730,11 +877,16 @@ class LapakViewModel(
         trackListenerJob(
             viewModelScope.launch {
                 try {
-                    financialSyncRepository.observeTransactionsChronological(currentUserId).collect { remoteTrxs ->
+                    financialSyncRepository.observeTransactionsWithMetadata(currentUserId).collect { batch ->
                         if (!isActiveAuthenticatedSession()) return@collect
-                        val changed = repository.mergeCloudTransactions(remoteTrxs)
-                        if (changed > 0) {
-                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        if (batch.items.isNotEmpty()) {
+                            val changed = repository.mergeCloudTransactions(batch.items)
+                            if (changed > 0) {
+                                _lastCloudSyncAt.value = System.currentTimeMillis()
+                            }
+                        }
+                        if (!batch.isFromCache) {
+                            transactionsServerReady.complete(Unit)
                         }
                     }
                 } catch (e: CancellationException) {
@@ -749,11 +901,16 @@ class LapakViewModel(
         trackListenerJob(
             viewModelScope.launch {
                 try {
-                    financialSyncRepository.observeExpensesRealtime(currentUserId).collect { remoteExps ->
+                    financialSyncRepository.observeExpensesWithMetadata(currentUserId).collect { batch ->
                         if (!isActiveAuthenticatedSession()) return@collect
-                        val changed = repository.mergeCloudExpenses(remoteExps)
-                        if (changed > 0) {
-                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        if (batch.items.isNotEmpty()) {
+                            val changed = repository.mergeCloudExpenses(batch.items)
+                            if (changed > 0) {
+                                _lastCloudSyncAt.value = System.currentTimeMillis()
+                            }
+                        }
+                        if (!batch.isFromCache) {
+                            expensesServerReady.complete(Unit)
                         }
                     }
                 } catch (e: CancellationException) {
@@ -768,17 +925,85 @@ class LapakViewModel(
         trackListenerJob(
             viewModelScope.launch {
                 try {
-                    financialSyncRepository.observeSettlementsRealtime(currentUserId).collect { remoteSettlements ->
+                    financialSyncRepository.observeSettlementsWithMetadata(currentUserId).collect { batch ->
                         if (!isActiveAuthenticatedSession()) return@collect
-                        val changed = repository.mergeCloudSettlements(remoteSettlements)
-                        if (changed > 0) {
-                            _lastCloudSyncAt.value = System.currentTimeMillis()
+                        if (batch.items.isNotEmpty()) {
+                            val changed = repository.mergeCloudSettlements(batch.items)
+                            if (changed > 0) {
+                                _lastCloudSyncAt.value = System.currentTimeMillis()
+                            }
+                        }
+                        if (!batch.isFromCache) {
+                            settlementsServerReady.complete(Unit)
                         }
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     Log.w("LapakViewModel", "Realtime settlements listener error: ${e.message}")
+                }
+            }
+        )
+
+        // 6. Real-time Permanent Daily Closing Archives
+        trackListenerJob(
+            viewModelScope.launch {
+                try {
+                    financialSyncRepository.observeDailyClosingsWithMetadata(currentUserId).collect { batch ->
+                        if (!isActiveAuthenticatedSession()) return@collect
+                        if (batch.items.isNotEmpty()) {
+                            val changed = repository.mergeCloudDailyClosings(batch.items)
+                            if (changed > 0) {
+                                _lastCloudSyncAt.value = System.currentTimeMillis()
+                            }
+                        }
+                        if (!batch.isFromCache) {
+                            dailyClosingsServerReady.complete(Unit)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("LapakViewModel", "Realtime daily closings listener error: ${e.message}")
+                    dailyClosingsServerReady.complete(Unit)
+                }
+            }
+        )
+
+        // 7. Real-time User Settings (Auto Tutup Buku schedule & Cashier UI Customization)
+        trackListenerJob(
+            viewModelScope.launch {
+                try {
+                    financialSyncRepository.observeUserSettingsWithMetadata(currentUserId).collect { cloudSettings ->
+                        if (!isActiveAuthenticatedSession()) return@collect
+                        if (cloudSettings != null) {
+                            val merged = repository.applyCloudUserSettings(cloudSettings)
+                            licenseStorage.saveAutoClosingPrefs(
+                                uid = currentUserId,
+                                enabled = merged.autoClosingEnabled,
+                                hour = merged.autoClosingHour,
+                                minute = merged.autoClosingMinute,
+                                leftoverMode = merged.autoClosingLeftoverMode,
+                                lastClosedDate = merged.lastClosedDate
+                            )
+                            licenseStorage.saveCashierVisibilityPrefs(
+                                uid = currentUserId,
+                                showOmzet = merged.cashierShowOmzet,
+                                showProfit = merged.cashierShowProfit,
+                                showExpenses = merged.cashierShowExpenses
+                            )
+                            if (!cloudSettings.isFromCache) {
+                                userSettingsServerReady.complete(Unit)
+                            }
+                        } else {
+                            userSettingsServerReady.complete(Unit)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("LapakViewModel", "Realtime user settings listener error: ${e.message}")
+                    userSettingsServerReady.complete(Unit)
                 }
             }
         )
@@ -790,6 +1015,7 @@ class LapakViewModel(
                 while (sessionActiveFlag.get()) {
                     delay(60_000)
                     if (!sessionActiveFlag.get()) break
+                    checkAndRunAutoClosingInternal()
                     val resetResult = repository.checkAndRunAutoStockResetIfNeeded()
                     if (resetResult != null && sessionActiveFlag.get()) {
                         clearCart()
@@ -858,14 +1084,14 @@ class LapakViewModel(
     }
 
     fun syncAllVendorsToCloud(onComplete: ((Boolean, String) -> Unit)? = null) {
-        if (!isActiveAuthenticatedSession()) {
-            onComplete?.invoke(false, "Sesi akun tidak aktif.")
+        if (!canWriteToCloud()) {
+            onComplete?.invoke(false, "Menunggu data cloud selesai dimuat sebelum mengunggah ke server.")
             return
         }
         val job = viewModelScope.launch {
             _isSyncingCloud.value = true
             try {
-                if (!isActiveAuthenticatedSession()) return@launch
+                if (!canWriteToCloud()) return@launch
                 repository.ensureAllSellersHaveVendorCodes()
                 val sellers = repository.allSellers.first()
                 if (sellers.isEmpty()) {
@@ -921,8 +1147,11 @@ class LapakViewModel(
             try {
                 if (!isActiveAuthenticatedSession()) return@launch
                 var pulledCount = 0
+                var vendorsFetchedOk = false
+                var financialFetchedOk = false
                 val cloudVendors = financialSyncRepository.fetchCloudVendorsCatalog(currentUserId)
                 if (cloudVendors.isSuccess && isActiveAuthenticatedSession()) {
+                    vendorsFetchedOk = true
                     pulledCount += repository.mergeCloudVendorsCatalog(
                         vendors = cloudVendors.getOrThrow(),
                         currentDeviceId = currentDeviceId,
@@ -932,11 +1161,20 @@ class LapakViewModel(
 
                 val cloudFetch = financialSyncRepository.fetchAllCloudFinancialData(currentUserId)
                 if (cloudFetch.isSuccess && isActiveAuthenticatedSession()) {
+                    financialFetchedOk = true
                     val bundle = cloudFetch.getOrThrow()
                     pulledCount += repository.mergeCloudFinancialData(bundle)
                 }
 
-                if (!isActiveAuthenticatedSession()) return@launch
+                if (vendorsFetchedOk && financialFetchedOk && isActiveAuthenticatedSession()) {
+                    cloudHydratedFlag.set(true)
+                    _isCloudLoaded.value = true
+                }
+
+                if (!canWriteToCloud()) {
+                    onComplete?.invoke(false, "Gagal mengunduh data terbaru dari cloud. Pengunggahan dibatalkan untuk melindungi data server.")
+                    return@launch
+                }
 
                 val snapshot = repository.getFinancialSyncSnapshot()
                 val sellersById = snapshot.sellers.associateBy { it.id }
@@ -991,13 +1229,13 @@ class LapakViewModel(
         snapshot: SellerCloudSyncSnapshot,
         lastProcessedSubmissionId: String = ""
     ): Result<Unit> {
-        if (!isActiveAuthenticatedSession()) {
-            return Result.failure(IllegalStateException("Sesi akun tidak aktif"))
+        if (!canWriteToCloud()) {
+            return Result.failure(IllegalStateException("Menunggu data cloud selesai dimuat sebelum menyinkronkan"))
         }
         val mutex = sellerSyncMutexes.computeIfAbsent(snapshot.sellerDetail.seller.id) { Mutex() }
         return mutex.withLock {
-            if (!isActiveAuthenticatedSession()) {
-                return@withLock Result.failure(IllegalStateException("Sesi akun tidak aktif"))
+            if (!canWriteToCloud()) {
+                return@withLock Result.failure(IllegalStateException("Menunggu data cloud selesai dimuat sebelum menyinkronkan"))
             }
             coroutineScope {
                 val publicPortalDeferred = async {
@@ -1036,16 +1274,22 @@ class LapakViewModel(
         showSuccessFeedback: Boolean = false,
         onComplete: ((Boolean, String) -> Unit)? = null
     ) {
-        if (!isActiveAuthenticatedSession()) {
-            val err = "Sesi akun tidak aktif. Silakan login Google terlebih dahulu."
-            emitWebPortalSyncFeedback(false, "Gagal sinkron ke Web Portal: $err")
+        if (!canWriteToCloud()) {
+            val err = if (!isActiveAuthenticatedSession()) {
+                "Sesi akun tidak aktif. Silakan login Google terlebih dahulu."
+            } else {
+                "Sedang memuat data terbaru dari cloud. Silakan tunggu sebentar lalu simpan lagi."
+            }
+            if (showSuccessFeedback) {
+                emitWebPortalSyncFeedback(false, err)
+            }
             onComplete?.invoke(false, err)
             return
         }
         val job = viewModelScope.launch {
             _isSyncingCloud.value = true
             try {
-                if (!isActiveAuthenticatedSession()) return@launch
+                if (!canWriteToCloud()) return@launch
                 val snapshot = repository.getSellerSyncSnapshotDirect(sellerId) ?: run {
                     val err = "Data penyetor tidak ditemukan."
                     emitWebPortalSyncFeedback(false, "Gagal sinkron ke Web Portal: $err")
@@ -1081,17 +1325,23 @@ class LapakViewModel(
     }
 
     /**
-     * Background safeguard triggered when opening the Daftar Penjual / Penyetor tab or on app startup:
-     * re-synchronizes ALL sellers in Admin's list (including legacy docs like LPK-NGL67G / LPK-F356HZ)
-     * with their latest products (`sellingPrice`, `basePrice`, `commission`, `stock`) to both
-     * `users/{uid}/vendors/{kode}` and `lapak_vendors/{kode}`.
+     * Explicit manual sync for Web Portal (`lapak_vendors/{kode}` + `users/{uid}/vendors/{kode}`).
+     * ONLY invoked when Admin explicitly taps a Save / Sync button (never automatically in loops).
      */
     fun syncAllSellersToWebPortal(notifyOnSuccess: Boolean = false) {
-        if (!isActiveAuthenticatedSession()) return
+        if (!canWriteToCloud()) {
+            if (notifyOnSuccess) {
+                emitWebPortalSyncFeedback(
+                    isSuccess = false,
+                    message = "Menunggu data cloud selesai dimuat sebelum menyinkronkan ke Web Portal."
+                )
+            }
+            return
+        }
         if (!activeVendorsSyncInProgress.compareAndSet(false, true)) return
         val job = viewModelScope.launch {
             try {
-                if (!isActiveAuthenticatedSession()) return@launch
+                if (!canWriteToCloud()) return@launch
                 repository.ensureAllSellersHaveVendorCodes()
                 val allSellersList = repository.allSellers.first()
                 if (allSellersList.isEmpty()) return@launch
@@ -1100,7 +1350,7 @@ class LapakViewModel(
                 val failedCodes = mutableListOf<String>()
                 var lastError: String? = null
                 for (seller in allSellersList) {
-                    if (!isActiveAuthenticatedSession()) return@launch
+                    if (!canWriteToCloud()) return@launch
                     val snapshot = repository.getSellerSyncSnapshotDirect(seller.id) ?: continue
                     val res = syncSellerSnapshotConcurrently(snapshot)
                     if (res.isSuccess) {
@@ -1127,7 +1377,7 @@ class LapakViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w("LapakViewModel", "Auto sync all sellers warning: ${e.message}")
+                Log.w("LapakViewModel", "Manual sync all sellers warning: ${e.message}")
                 emitWebPortalSyncFeedback(
                     isSuccess = false,
                     message = "Gagal sinkron ke Web Portal: ${e.message ?: "Koneksi bermasalah"}"
@@ -1139,12 +1389,8 @@ class LapakViewModel(
         trackBackgroundJob(job)
     }
 
-    fun syncActiveVendorsToCloudSilently() {
-        syncAllSellersToWebPortal(notifyOnSuccess = false)
-    }
-
     private suspend fun syncVendorByCodeToCloud(vendorCode: String, lastProcessedSubmissionId: String) {
-        if (!isActiveAuthenticatedSession()) return
+        if (!canWriteToCloud()) return
         val snapshot = repository.getSellerSyncSnapshotByCodeDirect(vendorCode) ?: return
         val res = syncSellerSnapshotConcurrently(snapshot, lastProcessedSubmissionId)
         if (res.isSuccess) _lastCloudSyncAt.value = System.currentTimeMillis()
@@ -1243,7 +1489,7 @@ class LapakViewModel(
     fun deleteSeller(seller: Seller, onDone: () -> Unit) {
         viewModelScope.launch {
             repository.deleteSeller(seller)
-            if (isActiveAuthenticatedSession()) {
+            if (canWriteToCloud()) {
                 coroutineScope {
                     val publicDelete = async {
                         vendorSyncRepository.deleteVendorFromFirestore(seller.vendorCode, expectedUid = currentUserId)
@@ -1361,6 +1607,40 @@ class LapakViewModel(
                 onSuccess()
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Gagal menambah setoran stok")
+            }
+        }
+    }
+
+    // Full Admin Stock Adjustment (increase, decrease, or set exact stock including 0)
+    fun adjustProductStock(
+        sellerId: Long,
+        productId: Long,
+        targetStock: Int,
+        reason: String,
+        onSuccess: (Int) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val result = repository.adjustProductStock(
+                sellerId = sellerId,
+                productId = productId,
+                targetStock = targetStock,
+                reason = reason
+            )
+            if (result.isSuccess) {
+                val finalStock = result.getOrThrow()
+                // Also clamp any item in cart if stock was reduced below cart qty
+                val updatedCart = _cart.value.mapNotNull { item ->
+                    if (item.product.id == productId) {
+                        if (finalStock <= 0) null
+                        else item.copy(quantity = minOf(item.quantity, finalStock))
+                    } else item
+                }
+                _cart.value = updatedCart
+                syncSingleSellerToCloud(sellerId, showSuccessFeedback = true)
+                onSuccess(finalStock)
+            } else {
+                onError(result.exceptionOrNull()?.message ?: "Gagal mengubah stok produk")
             }
         }
     }
@@ -1489,7 +1769,7 @@ class LapakViewModel(
                 affectedSellerIds.forEach { syncSingleSellerToCloud(it) }
                 // Real-time sync transaction + itemized shares to Firestore
                 val savedItems = repository.getItemsForTransactionDirect(trx.id)
-                if (isActiveAuthenticatedSession()) {
+                if (canWriteToCloud()) {
                     financialSyncRepository.syncTransactionToFirestore(trx, savedItems, expectedUid = currentUserId)
                 }
                 onSuccess(trx)
@@ -1518,7 +1798,7 @@ class LapakViewModel(
             if (res.isSuccess) {
                 affectedSellers.forEach { syncSingleSellerToCloud(it) }
                 // Update cancelled status in Firestore immediately
-                if (isActiveAuthenticatedSession()) {
+                if (canWriteToCloud()) {
                     repository.getTransactionById(trxId)?.let { updatedTrx ->
                         financialSyncRepository.syncTransactionToFirestore(updatedTrx, savedItems, expectedUid = currentUserId)
                     }
@@ -1622,7 +1902,7 @@ class LapakViewModel(
             if (seller != null) {
                 _lastSellerPaymentReceipt.value = SellerPayoutReceiptState(savedPayment, seller, newRemaining, soldItems)
             }
-            if (isActiveAuthenticatedSession()) {
+            if (canWriteToCloud()) {
                 financialSyncRepository.syncSettlementToFirestore(
                     payment = savedPayment,
                     seller = seller,
@@ -1636,8 +1916,39 @@ class LapakViewModel(
     }
 
     fun printCustomerReceipt(context: Context, transaction: LapakTransaction, items: List<TransactionItem>) {
-        val html = com.example.util.ReceiptPrinter.buildCustomerReceiptHtml(transaction, items, shopProfile.value)
-        com.example.util.ReceiptPrinter.printHtml(context, html, "Struk_${transaction.transactionNumber}")
+        val settings = appSettings.value
+        val paperSize = settings.printerPaperSize
+        val btAddress = settings.printerAddress.trim()
+
+        if (btAddress.isNotBlank() && paperSize != PrinterPaperSize.A4) {
+            viewModelScope.launch {
+                val escText = com.example.util.BluetoothThermalPrinter.formatCustomerReceiptEscPos(
+                    transaction = transaction,
+                    items = items,
+                    shopProfile = shopProfile.value,
+                    paperSize = paperSize
+                )
+                val res = com.example.util.BluetoothThermalPrinter.printEscPosText(context, btAddress, escText)
+                if (res.isSuccess) {
+                    Toast.makeText(context, "Struk dicetak ke ${settings.printerName.ifBlank { "Printer Bluetooth" }}", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        context,
+                        "${res.exceptionOrNull()?.message ?: "Printer Bluetooth gagal"} — membuka dialog cetak sistem.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    val html = com.example.util.ReceiptPrinter.buildCustomerReceiptHtml(
+                        transaction, items, shopProfile.value, paperSize
+                    )
+                    com.example.util.ReceiptPrinter.printHtml(context, html, "Struk_${transaction.transactionNumber}")
+                }
+            }
+        } else {
+            val html = com.example.util.ReceiptPrinter.buildCustomerReceiptHtml(
+                transaction, items, shopProfile.value, paperSize
+            )
+            com.example.util.ReceiptPrinter.printHtml(context, html, "Struk_${transaction.transactionNumber}")
+        }
     }
 
     fun printSellerPayoutReceipt(
@@ -1647,14 +1958,73 @@ class LapakViewModel(
         remainingBalance: Double,
         soldItems: List<SoldItemSummary> = emptyList()
     ) {
-        val html = com.example.util.ReceiptPrinter.buildSellerPayoutReceiptHtml(
-            payment,
-            seller,
-            shopProfile.value,
-            remainingBalance,
-            soldItems
-        )
-        com.example.util.ReceiptPrinter.printHtml(context, html, "Bukti_Bayar_${seller.name}")
+        val settings = appSettings.value
+        val paperSize = settings.printerPaperSize
+        val btAddress = settings.printerAddress.trim()
+
+        if (btAddress.isNotBlank() && paperSize != PrinterPaperSize.A4) {
+            viewModelScope.launch {
+                val escText = com.example.util.BluetoothThermalPrinter.formatSellerPayoutReceiptEscPos(
+                    payment = payment,
+                    seller = seller,
+                    shopProfile = shopProfile.value,
+                    remainingBalance = remainingBalance,
+                    soldItems = soldItems,
+                    paperSize = paperSize
+                )
+                val res = com.example.util.BluetoothThermalPrinter.printEscPosText(context, btAddress, escText)
+                if (res.isSuccess) {
+                    Toast.makeText(context, "Bukti bayar dicetak ke ${settings.printerName.ifBlank { "Printer Bluetooth" }}", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        context,
+                        "${res.exceptionOrNull()?.message ?: "Printer Bluetooth gagal"} — membuka dialog cetak sistem.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    val html = com.example.util.ReceiptPrinter.buildSellerPayoutReceiptHtml(
+                        payment, seller, shopProfile.value, remainingBalance, soldItems, paperSize
+                    )
+                    com.example.util.ReceiptPrinter.printHtml(context, html, "Bukti_Bayar_${seller.name}")
+                }
+            }
+        } else {
+            val html = com.example.util.ReceiptPrinter.buildSellerPayoutReceiptHtml(
+                payment, seller, shopProfile.value, remainingBalance, soldItems, paperSize
+            )
+            com.example.util.ReceiptPrinter.printHtml(context, html, "Bukti_Bayar_${seller.name}")
+        }
+    }
+
+    fun testPrintReceipt(
+        context: Context,
+        printerName: String,
+        printerAddress: String,
+        paperSize: String,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        viewModelScope.launch {
+            if (printerAddress.isNotBlank() && paperSize != PrinterPaperSize.A4) {
+                val escText = com.example.util.BluetoothThermalPrinter.formatTestPrintEscPos(
+                    shopProfile = shopProfile.value,
+                    printerName = printerName,
+                    paperSize = paperSize
+                )
+                val res = com.example.util.BluetoothThermalPrinter.printEscPosText(context, printerAddress, escText)
+                if (res.isSuccess) {
+                    onResult(true, "Tes cetak berhasil dikirim ke ${printerName.ifBlank { printerAddress }}!")
+                } else {
+                    onResult(false, res.exceptionOrNull()?.message ?: "Gagal mengirim tes cetak ke printer Bluetooth.")
+                }
+            } else {
+                val html = com.example.util.ReceiptPrinter.buildTestPrintHtml(
+                    shopProfile = shopProfile.value,
+                    printerName = printerName,
+                    paperSize = paperSize
+                )
+                com.example.util.ReceiptPrinter.printHtml(context, html, "Tes_Cetak_LapakKita")
+                onResult(true, "Membuka pratinjau cetak sistem (${PrinterPaperSize.label(paperSize)})...")
+            }
+        }
     }
 
     fun getSellerPayoutReceiptText(
@@ -1689,7 +2059,7 @@ class LapakViewModel(
                 notes = notes
             )
             val insertedId = repository.addExpense(expense)
-            if (isActiveAuthenticatedSession()) {
+            if (canWriteToCloud()) {
                 financialSyncRepository.syncExpenseToFirestore(expense.copy(id = insertedId), expectedUid = currentUserId)
             }
             onDone()
@@ -1699,7 +2069,7 @@ class LapakViewModel(
     fun deleteExpense(expense: OperatingExpense) {
         viewModelScope.launch {
             repository.deleteExpense(expense)
-            if (isActiveAuthenticatedSession()) {
+            if (canWriteToCloud()) {
                 financialSyncRepository.deleteExpenseFromFirestore(expense, expectedUid = currentUserId)
             }
         }
@@ -1840,11 +2210,29 @@ class LapakViewModel(
         viewModelScope.launch {
             val res = repository.importFullBackupJson(json)
             if (res.isSuccess) {
-                syncAllVendorsToCloud()
+                if (canWriteToCloud()) {
+                    syncAllVendorsToCloud()
+                }
                 onDone(true, "Data cadangan berhasil dipulihkan!")
             } else {
                 onDone(false, res.exceptionOrNull()?.message ?: "Gagal memulihkan cadangan!")
             }
+        }
+    }
+
+    fun recordGoogleDriveBackupSuccess(accountEmail: String? = null) {
+        viewModelScope.launch {
+            val curr = repository.appSettings.first()
+            val resolvedEmail = accountEmail?.trim()?.takeIf { it.isNotBlank() }
+                ?: Firebase.auth.currentUser?.email
+                ?: curr.driveAccountEmail
+            repository.updateAppSettings(
+                curr.copy(
+                    isGoogleDriveConnected = true,
+                    lastBackupDate = System.currentTimeMillis(),
+                    driveAccountEmail = resolvedEmail
+                )
+            )
         }
     }
 

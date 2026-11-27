@@ -145,9 +145,20 @@ class LapakRepository(private val dao: LapakDao) {
                     adminFeeType = AdminFeeType.FIXED,
                     adminFeeValue = 2000.0,
                     webPortalBaseUrl = DEFAULT_WEB_PORTAL_BASE_URL,
-                    autoResetStockEnabled = true,
+                    autoResetStockEnabled = false,
                     autoResetHour = 17,
-                    lastStockResetCycleId = OperationalCycleHelper.getOperationalCycleDate(17)
+                    lastStockResetCycleId = OperationalCycleHelper.getOperationalCycleDate(17),
+                    autoClosingEnabled = true,
+                    autoClosingHour = 22,
+                    autoClosingMinute = 0,
+                    autoClosingLeftoverMode = AutoClosingLeftoverMode.RESET_ZERO,
+                    lastClosedDate = "",
+                    cashierShowOmzet = false,
+                    cashierShowProfit = false,
+                    cashierShowExpenses = false,
+                    printerName = "",
+                    printerAddress = "",
+                    printerPaperSize = PrinterPaperSize.MM_58
                 )
             )
         }
@@ -186,10 +197,6 @@ class LapakRepository(private val dao: LapakDao) {
         updatedList
     }
 
-    suspend fun ensureSampleKitchensSeeded(): Int = withContext(Dispatchers.IO) {
-        com.example.data.database.LapakDatabase.ensureSampleKitchensSeeded(dao)
-    }
-
     private val stockResetMutex = kotlinx.coroutines.sync.Mutex()
 
     /**
@@ -211,7 +218,7 @@ class LapakRepository(private val dao: LapakDao) {
                 return@withContext null
             }
 
-            if (!settings.autoResetStockEnabled) {
+            if (settings.autoClosingEnabled || !settings.autoResetStockEnabled) {
                 return@withContext null
             }
 
@@ -729,6 +736,93 @@ data class FinancialData(
         )
 
         Result.success(lotId)
+    }
+
+    /**
+     * Full admin stock correction: supports increasing (+), decreasing (-), or setting exact
+     * stock quantity (including 0) when a vendor makes an input mistake on the web portal.
+     */
+    suspend fun adjustProductStock(
+        sellerId: Long,
+        productId: Long,
+        targetStock: Int,
+        reason: String
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        if (targetStock < 0) {
+            return@withContext Result.failure(IllegalArgumentException("Stok tidak boleh bernilai negatif"))
+        }
+        val seller = dao.getSellerById(sellerId)
+            ?: return@withContext Result.failure(Exception("Penyetor tidak ditemukan"))
+        val product = dao.getProductById(productId)
+            ?: return@withContext Result.failure(Exception("Produk tidak ditemukan"))
+        if (product.sellerId != seller.id) {
+            return@withContext Result.failure(Exception("Produk tidak sesuai dengan penyetor"))
+        }
+
+        val activeLots = dao.getActiveStockLotsForProduct(productId)
+        val currentTotal = activeLots.sumOf { it.currentQty }
+        val delta = targetStock - currentTotal
+        if (delta == 0) {
+            return@withContext Result.success(currentTotal)
+        }
+
+        val cleanReason = reason.trim().ifBlank {
+            if (delta > 0) "Koreksi stok admin (+$delta ${product.unit})"
+            else "Koreksi stok admin ($delta ${product.unit})"
+        }
+
+        if (delta > 0) {
+            val lotId = dao.insertStockLot(
+                StockLot(
+                    productId = productId,
+                    sellerId = sellerId,
+                    initialQty = delta,
+                    currentQty = delta,
+                    unit = product.unit,
+                    sellingPrice = product.sellingPrice,
+                    sellerShare = product.sellerShare,
+                    notes = cleanReason
+                )
+            )
+            val finalStock = dao.getProductTotalStock(productId)
+            dao.insertMovement(
+                StockMovement(
+                    productId = productId,
+                    sellerId = sellerId,
+                    stockLotId = lotId,
+                    type = StockMovementType.KOREKSI,
+                    quantityChange = delta,
+                    finalStock = finalStock,
+                    reasonOrNote = "$cleanReason ($currentTotal -> $finalStock ${product.unit})"
+                )
+            )
+            Result.success(finalStock)
+        } else {
+            var remainingToDeduct = -delta
+            var firstTouchedLotId: Long? = null
+            for (lot in activeLots) {
+                if (remainingToDeduct <= 0) break
+                val deduct = minOf(lot.currentQty, remainingToDeduct)
+                if (deduct > 0) {
+                    if (firstTouchedLotId == null) firstTouchedLotId = lot.id
+                    dao.updateStockLot(lot.copy(currentQty = (lot.currentQty - deduct).coerceAtLeast(0)))
+                    remainingToDeduct -= deduct
+                }
+            }
+            val finalStock = dao.getProductTotalStock(productId)
+            dao.insertMovement(
+                StockMovement(
+                    productId = productId,
+                    sellerId = sellerId,
+                    stockLotId = firstTouchedLotId,
+                    type = StockMovementType.KOREKSI,
+                    quantityChange = finalStock - currentTotal,
+                    finalStock = finalStock,
+                    reasonOrNote = "$cleanReason ($currentTotal -> $finalStock ${product.unit})"
+                )
+            )
+            Result.success(finalStock)
+        }
     }
 
     // Checkout Transaction
@@ -1801,6 +1895,465 @@ data class FinancialData(
             importedCount
         } finally {
             cloudMergeMutex.unlock()
+        }
+    }
+
+    // --- DAILY CLOSING ARCHIVES (AUTO & MANUAL TUTUP BUKU) & USER CUSTOMIZATION SETTINGS ---
+
+    val allDailyClosingArchives: Flow<List<DailyClosingArchive>> = dao.getAllDailyClosingArchivesFlow()
+
+    private val dailyClosingMutex = kotlinx.coroutines.sync.Mutex()
+
+    suspend fun getDailyClosingArchiveByDate(closingDate: String): DailyClosingArchive? = withContext(Dispatchers.IO) {
+        dao.getDailyClosingArchiveByDate(closingDate)
+    }
+
+    suspend fun updateAutoClosingSettings(
+        enabled: Boolean,
+        hour: Int,
+        minute: Int,
+        leftoverMode: String
+    ): AppSettings = withContext(Dispatchers.IO) {
+        val curr = dao.getAppSettings() ?: AppSettings()
+        val safeMode = when (leftoverMode.uppercase()) {
+            AutoClosingLeftoverMode.CARRY_OVER -> AutoClosingLeftoverMode.CARRY_OVER
+            else -> AutoClosingLeftoverMode.RESET_ZERO
+        }
+        val updated = curr.copy(
+            autoClosingEnabled = enabled,
+            autoClosingHour = hour.coerceIn(0, 23),
+            autoClosingMinute = minute.coerceIn(0, 59),
+            autoClosingLeftoverMode = safeMode,
+            autoResetStockEnabled = if (enabled) false else curr.autoResetStockEnabled
+        )
+        dao.insertOrUpdateAppSettings(updated)
+        updated
+    }
+
+    suspend fun updateCashierVisibilitySettings(
+        showOmzet: Boolean,
+        showProfit: Boolean,
+        showExpenses: Boolean
+    ): AppSettings = withContext(Dispatchers.IO) {
+        val curr = dao.getAppSettings() ?: AppSettings()
+        val updated = curr.copy(
+            cashierShowOmzet = showOmzet,
+            cashierShowProfit = showProfit,
+            cashierShowExpenses = showExpenses
+        )
+        dao.insertOrUpdateAppSettings(updated)
+        updated
+    }
+
+    suspend fun updatePrinterSettings(
+        printerName: String,
+        printerAddress: String,
+        paperSize: String
+    ): AppSettings = withContext(Dispatchers.IO) {
+        val curr = dao.getAppSettings() ?: AppSettings()
+        val safePaper = when (paperSize.uppercase()) {
+            PrinterPaperSize.MM_80 -> PrinterPaperSize.MM_80
+            PrinterPaperSize.A4 -> PrinterPaperSize.A4
+            else -> PrinterPaperSize.MM_58
+        }
+        val updated = curr.copy(
+            printerName = printerName.trim(),
+            printerAddress = printerAddress.trim(),
+            printerPaperSize = safePaper
+        )
+        dao.insertOrUpdateAppSettings(updated)
+        updated
+    }
+
+    suspend fun applyCloudUserSettings(
+        cloud: com.example.data.firebase.CloudUserSettingsDoc
+    ): AppSettings = withContext(Dispatchers.IO) {
+        val curr = dao.getAppSettings() ?: AppSettings()
+        val mergedLastClosed = listOf(curr.lastClosedDate, cloud.lastClosedDate.orEmpty())
+            .filter { it.matches(Regex("^\\d{4}-\\d{2}-\\d{2}$")) }
+            .maxOrNull()
+            .orEmpty()
+        val updated = curr.copy(
+            autoClosingEnabled = cloud.autoClosingEnabled ?: curr.autoClosingEnabled,
+            autoClosingHour = cloud.autoClosingHour?.coerceIn(0, 23) ?: curr.autoClosingHour,
+            autoClosingMinute = cloud.autoClosingMinute?.coerceIn(0, 59) ?: curr.autoClosingMinute,
+            autoClosingLeftoverMode = cloud.autoClosingLeftoverMode
+                ?.takeIf { it == AutoClosingLeftoverMode.RESET_ZERO || it == AutoClosingLeftoverMode.CARRY_OVER }
+                ?: curr.autoClosingLeftoverMode,
+            lastClosedDate = mergedLastClosed,
+            cashierShowOmzet = cloud.cashierShowOmzet ?: curr.cashierShowOmzet,
+            cashierShowProfit = cloud.cashierShowProfit ?: curr.cashierShowProfit,
+            cashierShowExpenses = cloud.cashierShowExpenses ?: curr.cashierShowExpenses
+        )
+        if (updated != curr) {
+            dao.insertOrUpdateAppSettings(updated)
+        }
+        updated
+    }
+
+    suspend fun mergeCloudDailyClosings(
+        cloudClosings: List<com.example.data.firebase.CloudDailyClosingRecord>
+    ): Int = withContext(Dispatchers.IO) {
+        cloudMergeMutex.lock()
+        try {
+            var mergedCount = 0
+            val existingByDate = dao.getAllDailyClosingArchivesDirect().associateBy { it.closingDate }
+            var latestClosedDate = (dao.getAppSettings() ?: AppSettings()).lastClosedDate
+
+            for (cc in cloudClosings) {
+                val existing = existingByDate[cc.closingDate]
+                if (existing == null || cc.closedAtMillis > existing.closedAtMillis) {
+                    val archive = DailyClosingArchive(
+                        closingDate = cc.closingDate,
+                        closedAtMillis = cc.closedAtMillis,
+                        triggerType = cc.triggerType,
+                        leftoverMode = cc.leftoverMode,
+                        totalTransactions = cc.totalTransactions,
+                        totalItemsIn = cc.totalItemsIn,
+                        totalItemsSold = cc.totalItemsSold,
+                        totalItemsLeftover = cc.totalItemsLeftover,
+                        totalOmzet = cc.totalOmzet,
+                        totalSellerShare = cc.totalSellerShare,
+                        totalAdminProfit = cc.totalAdminProfit,
+                        totalOperatingExpenses = cc.totalOperatingExpenses,
+                        netProfit = cc.netProfit,
+                        itemsBreakdownJson = encodeClosingItemsJson(cc.itemsBreakdown)
+                    )
+                    dao.insertOrUpdateDailyClosingArchive(archive)
+                    mergedCount++
+                }
+                if (cc.closingDate > latestClosedDate) {
+                    latestClosedDate = cc.closingDate
+                }
+            }
+
+            val currSettings = dao.getAppSettings() ?: AppSettings()
+            if (latestClosedDate.isNotBlank() && latestClosedDate > currSettings.lastClosedDate) {
+                dao.insertOrUpdateAppSettings(currSettings.copy(lastClosedDate = latestClosedDate))
+            }
+            mergedCount
+        } finally {
+            cloudMergeMutex.unlock()
+        }
+    }
+
+    suspend fun performDailyClosing(
+        targetDateWib: String,
+        triggerType: String,
+        leftoverModeOverride: String? = null,
+        applyStockLeftoverRule: Boolean = true,
+        includeActiveCurrentStock: Boolean = true,
+        forceIfEmpty: Boolean = false,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Result<DailyClosingArchive> = withContext(Dispatchers.IO) {
+        dailyClosingMutex.lock()
+        try {
+            val cleanDate = targetDateWib.trim()
+            if (!cleanDate.matches(Regex("^\\d{4}-\\d{2}-\\d{2}$"))) {
+                return@withContext Result.failure(IllegalArgumentException("Format tanggal tidak valid: $cleanDate"))
+            }
+
+            if (dao.getDailyClosingArchiveByDate(cleanDate) != null) {
+                return@withContext Result.failure(
+                    IllegalStateException("Tutup buku tanggal ${DailyClosingHelper.formatDisplayDate(cleanDate)} sudah pernah dicatat.")
+                )
+            }
+
+            val settings = dao.getAppSettings() ?: AppSettings()
+            val effectiveMode = when ((leftoverModeOverride ?: settings.autoClosingLeftoverMode).uppercase()) {
+                AutoClosingLeftoverMode.CARRY_OVER -> AutoClosingLeftoverMode.CARRY_OVER
+                else -> AutoClosingLeftoverMode.RESET_ZERO
+            }
+            val effectiveTrigger = when (triggerType.uppercase()) {
+                DailyClosingTriggerType.MANUAL -> DailyClosingTriggerType.MANUAL
+                else -> DailyClosingTriggerType.AUTO
+            }
+
+            val (dayStart, dayEnd) = DailyClosingHelper.dayBoundsWib(cleanDate)
+
+            val sellers = dao.getAllSellersDirect()
+            val sellerById = sellers.associateBy { it.id }
+            val products = dao.getAllProductsDirect()
+            val allLots = dao.getAllStockLotsDirect()
+            val allTransactions = dao.getAllTransactionsDirect()
+            val allTransactionItems = dao.getAllTransactionItemsDirect()
+            val allExpenses = dao.getAllOperatingExpensesDirect()
+
+            val dayTransactions = allTransactions.filter {
+                !it.isCancelled && it.timestamp in dayStart..dayEnd
+            }
+            val dayTrxIds = dayTransactions.map { it.id }.toSet()
+            val dayItems = allTransactionItems.filter { it.transactionId in dayTrxIds }
+            val dayExpenses = allExpenses.filter { it.expenseDate in dayStart..dayEnd }
+
+            val breakdown = mutableListOf<DailyClosingItemRecord>()
+            val matchedDayItemIds = mutableSetOf<Long>()
+
+            // Build per-product Masuk / Terjual / Sisa records for known catalog products
+            for (product in products) {
+                val sellerName = sellerById[product.sellerId]?.name ?: "Penyetor"
+                val normProd = product.name.trim().lowercase()
+                val normSeller = sellerName.trim().lowercase()
+
+                val prodSales = dayItems.filter { item ->
+                    (item.productId > 0L && item.productId == product.id) ||
+                        (item.productId == 0L &&
+                            item.productName.trim().lowercase() == normProd &&
+                            item.sellerName.trim().lowercase() == normSeller)
+                }
+                prodSales.forEach { matchedDayItemIds.add(it.id) }
+
+                val prodLots = allLots.filter { it.productId == product.id }
+                val depositedTodayQty = prodLots
+                    .filter { it.depositDate in dayStart..dayEnd }
+                    .sumOf { it.initialQty.coerceAtLeast(0) }
+                val qtySold = prodSales.sumOf { it.quantity.coerceAtLeast(0) }
+                val qtyLeftover = if (includeActiveCurrentStock) {
+                    prodLots.sumOf { it.currentQty.coerceAtLeast(0) }
+                } else {
+                    prodLots.filter { it.depositDate in dayStart..dayEnd }
+                        .sumOf { it.currentQty.coerceAtLeast(0) }
+                }
+
+                if (qtySold == 0 && qtyLeftover == 0 && depositedTodayQty == 0) continue
+
+                val qtyIn = maxOf(depositedTodayQty, qtySold + qtyLeftover)
+                breakdown.add(
+                    DailyClosingItemRecord(
+                        productId = product.id,
+                        productName = product.name,
+                        sellerName = sellerName,
+                        unit = product.unit,
+                        qtyIn = qtyIn,
+                        qtySold = qtySold,
+                        qtyLeftover = qtyLeftover,
+                        omzet = prodSales.sumOf { it.subtotal },
+                        sellerShare = prodSales.sumOf { it.totalSellerShare },
+                        adminProfit = prodSales.sumOf { it.totalAdminProfit }
+                    )
+                )
+            }
+
+            // Include any historical / deleted-product transaction items not matched to current catalog
+            val unmatchedItems = dayItems.filter { it.id !in matchedDayItemIds }
+            val unmatchedGroups = unmatchedItems.groupBy {
+                "${it.sellerName.trim().lowercase()}|${it.productName.trim().lowercase()}"
+            }
+            for ((_, group) in unmatchedGroups) {
+                val first = group.first()
+                val qtySold = group.sumOf { it.quantity.coerceAtLeast(0) }
+                breakdown.add(
+                    DailyClosingItemRecord(
+                        productId = first.productId,
+                        productName = first.productName,
+                        sellerName = first.sellerName,
+                        unit = first.unit,
+                        qtyIn = qtySold,
+                        qtySold = qtySold,
+                        qtyLeftover = 0,
+                        omzet = group.sumOf { it.subtotal },
+                        sellerShare = group.sumOf { it.totalSellerShare },
+                        adminProfit = group.sumOf { it.totalAdminProfit }
+                    )
+                )
+            }
+
+            val sortedBreakdown = breakdown.sortedWith(
+                compareBy<DailyClosingItemRecord> { it.sellerName.lowercase() }
+                    .thenBy { it.productName.lowercase() }
+            )
+
+            val totalItemsIn = sortedBreakdown.sumOf { it.qtyIn }
+            val totalItemsSold = sortedBreakdown.sumOf { it.qtySold }
+            val totalItemsLeftover = sortedBreakdown.sumOf { it.qtyLeftover }
+            val totalOmzet = dayTransactions.sumOf { it.totalAmount }
+            val totalSellerShare = dayTransactions.sumOf { it.totalSellerShare }
+            val totalAdminProfit = dayTransactions.sumOf { it.totalAdminProfit }
+            val totalExpenses = dayExpenses.sumOf { it.amount }
+            val netProfit = totalAdminProfit - totalExpenses
+
+            if (!forceIfEmpty && dayTransactions.isEmpty() && totalItemsLeftover == 0 && totalItemsIn == 0) {
+                return@withContext Result.failure(
+                    IllegalStateException("Belum ada transaksi atau stok aktif untuk ditutup pada tanggal ${DailyClosingHelper.formatDisplayDate(cleanDate)}.")
+                )
+            }
+
+            // Apply leftover stock policy if requested
+            if (applyStockLeftoverRule && effectiveMode == AutoClosingLeftoverMode.RESET_ZERO) {
+                val activeLots = allLots.filter { it.currentQty > 0 }
+                val lotsByProduct = activeLots.groupBy { it.productId }
+                val triggerLabel = if (effectiveTrigger == DailyClosingTriggerType.AUTO) "Auto" else "Manual"
+                for ((productId, lots) in lotsByProduct) {
+                    val sumRemaining = lots.sumOf { it.currentQty }
+                    if (sumRemaining <= 0) continue
+                    val firstLot = lots.first()
+                    for (lot in lots) {
+                        dao.updateStockLot(lot.copy(currentQty = 0))
+                    }
+                    dao.insertMovement(
+                        StockMovement(
+                            productId = productId,
+                            sellerId = firstLot.sellerId,
+                            stockLotId = firstLot.id,
+                            type = StockMovementType.PENGEMBALIAN,
+                            quantityChange = -sumRemaining,
+                            finalStock = 0,
+                            reasonOrNote = "Tutup Buku $triggerLabel ($cleanDate): retur sisa $sumRemaining ${firstLot.unit} ke penyetor"
+                        )
+                    )
+                }
+            }
+
+            val archive = DailyClosingArchive(
+                closingDate = cleanDate,
+                closedAtMillis = nowMillis,
+                triggerType = effectiveTrigger,
+                leftoverMode = effectiveMode,
+                totalTransactions = dayTransactions.size,
+                totalItemsIn = totalItemsIn,
+                totalItemsSold = totalItemsSold,
+                totalItemsLeftover = totalItemsLeftover,
+                totalOmzet = totalOmzet,
+                totalSellerShare = totalSellerShare,
+                totalAdminProfit = totalAdminProfit,
+                totalOperatingExpenses = totalExpenses,
+                netProfit = netProfit,
+                itemsBreakdownJson = encodeClosingItemsJson(sortedBreakdown)
+            )
+            dao.insertOrUpdateDailyClosingArchive(archive)
+
+            val updatedLastClosed = if (cleanDate > settings.lastClosedDate) cleanDate else settings.lastClosedDate
+            dao.insertOrUpdateAppSettings(settings.copy(lastClosedDate = updatedLastClosed))
+
+            Result.success(archive)
+        } finally {
+            dailyClosingMutex.unlock()
+        }
+    }
+
+    /**
+     * Checks and runs Auto Tutup Buku for:
+     * 1. Any past date (< today WIB) that has unarchived transactions or active consignment stock (catch-up if phone was off).
+     * 2. Today's date (== today WIB) ONLY IF current WIB time >= configured `autoClosingHour:autoClosingMinute`
+     *    and today has not been closed yet (manual or auto).
+     *
+     * First-install safety:
+     * - Never auto-closes today before the scheduled closing time has passed.
+     * - If today already has live sales/stock while catching up a past date, preserves today's live stock untouched.
+     */
+    suspend fun checkAndRunAutoClosing(
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<DailyClosingArchive> = withContext(Dispatchers.IO) {
+        val settings = dao.getAppSettings() ?: AppSettings()
+        if (!settings.autoClosingEnabled) return@withContext emptyList()
+
+        val todayWib = DailyClosingHelper.todayDateString(nowMillis)
+        val existingDates = dao.getAllDailyClosingArchivesDirect().map { it.closingDate }.toSet()
+
+        val validTransactions = dao.getAllTransactionsDirect().filter { !it.isCancelled }
+        val activeLots = dao.getAllStockLotsDirect().filter { it.currentQty > 0 }
+
+        val txDates = validTransactions.map { DailyClosingHelper.dateStringFromMillis(it.timestamp) }.toSet()
+        val lotDates = activeLots.map { DailyClosingHelper.dateStringFromMillis(it.depositDate) }.toSet()
+        val allActivityDates = (txDates + lotDates).sorted()
+
+        val pastEligibleDates = allActivityDates.filter { date ->
+            date < todayWib &&
+                date !in existingDates &&
+                (settings.lastClosedDate.isBlank() || date > settings.lastClosedDate || date in txDates)
+        }
+
+        val todayHasPassedTime = DailyClosingHelper.hasPassedScheduledTimeToday(
+            scheduledHour = settings.autoClosingHour,
+            scheduledMinute = settings.autoClosingMinute,
+            nowMillis = nowMillis
+        )
+        val todayHasAnyActivity = todayWib in txDates || todayWib in lotDates || activeLots.isNotEmpty()
+        val shouldCloseToday = todayHasPassedTime &&
+            todayHasAnyActivity &&
+            todayWib !in existingDates &&
+            settings.lastClosedDate != todayWib
+
+        val todayAlreadyActive = todayWib in txDates || todayWib in lotDates
+        val createdArchives = mutableListOf<DailyClosingArchive>()
+
+        pastEligibleDates.forEachIndexed { idx, pastDate ->
+            val isLatestPastWithoutTodayActivity =
+                !shouldCloseToday && !todayAlreadyActive && idx == pastEligibleDates.lastIndex
+            val res = performDailyClosing(
+                targetDateWib = pastDate,
+                triggerType = DailyClosingTriggerType.AUTO,
+                leftoverModeOverride = settings.autoClosingLeftoverMode,
+                applyStockLeftoverRule = isLatestPastWithoutTodayActivity,
+                includeActiveCurrentStock = isLatestPastWithoutTodayActivity,
+                forceIfEmpty = false,
+                nowMillis = nowMillis
+            )
+            res.getOrNull()?.let { createdArchives.add(it) }
+        }
+
+        if (shouldCloseToday) {
+            val res = performDailyClosing(
+                targetDateWib = todayWib,
+                triggerType = DailyClosingTriggerType.AUTO,
+                leftoverModeOverride = settings.autoClosingLeftoverMode,
+                applyStockLeftoverRule = true,
+                includeActiveCurrentStock = true,
+                forceIfEmpty = false,
+                nowMillis = nowMillis
+            )
+            res.getOrNull()?.let { createdArchives.add(it) }
+        }
+
+        createdArchives
+    }
+
+    companion object {
+        fun encodeClosingItemsJson(items: List<DailyClosingItemRecord>): String {
+            val arr = JSONArray()
+            items.forEach { rec ->
+                arr.put(
+                    JSONObject().apply {
+                        put("productId", rec.productId)
+                        put("productName", rec.productName)
+                        put("sellerName", rec.sellerName)
+                        put("unit", rec.unit)
+                        put("qtyIn", rec.qtyIn)
+                        put("qtySold", rec.qtySold)
+                        put("qtyLeftover", rec.qtyLeftover)
+                        put("omzet", rec.omzet)
+                        put("sellerShare", rec.sellerShare)
+                        put("adminProfit", rec.adminProfit)
+                    }
+                )
+            }
+            return arr.toString()
+        }
+
+        fun decodeClosingItemsJson(rawJson: String): List<DailyClosingItemRecord> {
+            if (rawJson.isBlank()) return emptyList()
+            return runCatching {
+                val arr = JSONArray(rawJson)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        add(
+                            DailyClosingItemRecord(
+                                productId = obj.optLong("productId", 0L),
+                                productName = obj.optString("productName", "Produk"),
+                                sellerName = obj.optString("sellerName", "Penyetor"),
+                                unit = obj.optString("unit", "pcs"),
+                                qtyIn = obj.optInt("qtyIn", 0).coerceAtLeast(0),
+                                qtySold = obj.optInt("qtySold", 0).coerceAtLeast(0),
+                                qtyLeftover = obj.optInt("qtyLeftover", 0).coerceAtLeast(0),
+                                omzet = obj.optDouble("omzet", 0.0).coerceAtLeast(0.0),
+                                sellerShare = obj.optDouble("sellerShare", 0.0).coerceAtLeast(0.0),
+                                adminProfit = obj.optDouble("adminProfit", 0.0).coerceAtLeast(0.0)
+                            )
+                        )
+                    }
+                }
+            }.getOrDefault(emptyList())
         }
     }
 }

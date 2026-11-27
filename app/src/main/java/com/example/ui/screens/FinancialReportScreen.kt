@@ -26,9 +26,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.*
+import com.example.ui.components.DailyClosingArchiveDetailDialog
 import com.example.ui.components.HeaderActionIconButton
 import com.example.ui.components.LapakTopHeader
 import com.example.ui.components.LucideIcons
+import com.example.ui.components.ManualDailyClosingDialog
 import com.example.ui.theme.LocalLapakColors
 import com.example.ui.viewmodel.AppScreen
 import com.example.ui.viewmodel.LapakViewModel
@@ -50,14 +52,20 @@ fun FinancialReportScreen(
     val scope = rememberCoroutineScope()
 
     val shopProfile by viewModel.shopProfile.collectAsState()
+    val appSettings by viewModel.appSettings.collectAsState()
     val periodFilter by viewModel.financialPeriodFilter.collectAsState()
     val report by viewModel.financialReport.collectAsState()
     val isSyncingFinancials by viewModel.isSyncingFinancials.collectAsState()
+    val dailyClosingArchives by viewModel.dailyClosingArchives.collectAsState()
+    val isTodayClosed by viewModel.isTodayClosed.collectAsState()
 
-    var activeTab by remember { mutableIntStateOf(0) } // 0 = Buku Kas Kronologis, 1 = Rekap Setoran Penyetor
+    var activeTab by remember { mutableIntStateOf(0) } // 0 = Buku Kas, 1 = Rekap Penyetor, 2 = Arsip Tutup Buku
     var isExporting by remember { mutableStateOf(false) }
     var showMonthPickerDialog by remember { mutableStateOf(false) }
     var showDateRangeDialog by remember { mutableStateOf(false) }
+    var showManualClosingDialog by remember { mutableStateOf(false) }
+    var isRunningClosing by remember { mutableStateOf(false) }
+    var selectedArchiveDetail by remember { mutableStateOf<DailyClosingArchive?>(null) }
 
     val wibTimeZone = remember { TimeZone.getTimeZone("Asia/Jakarta") }
     val rowDateFmt = remember {
@@ -241,6 +249,84 @@ fun FinancialReportScreen(
                             accentColor = lapakColors.expenseCardAccent,
                             modifier = Modifier.weight(1f)
                         )
+                    }
+                }
+            }
+
+            // 3b. Manual "Tutup Buku Hari Ini" & Auto Schedule Status Card
+            item {
+                val autoTimeLabel = DailyClosingHelper.formatTime(
+                    appSettings.autoClosingHour,
+                    appSettings.autoClosingMinute
+                )
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(
+                        1.dp,
+                        if (isTodayClosed) lapakColors.stockSafeText.copy(alpha = 0.4f) else lapakColors.omzetCardBorder
+                    ),
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = if (isTodayClosed) Icons.Default.CheckCircle else Icons.Default.EventAvailable,
+                                    contentDescription = null,
+                                    tint = if (isTodayClosed) lapakColors.stockSafeText else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = if (isTodayClosed) "Sudah Tutup Buku Hari Ini" else "Tutup Buku Hari Ini",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isTodayClosed) lapakColors.stockSafeText else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = if (appSettings.autoClosingEnabled) {
+                                            "Auto Tutup Buku aktif pukul $autoTimeLabel WIB (${AutoClosingLeftoverMode.shortLabel(appSettings.autoClosingLeftoverMode)})"
+                                        } else {
+                                            "Auto Tutup Buku nonaktif • tutup buku dilakukan manual"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        if (!isTodayClosed) {
+                            Button(
+                                onClick = { showManualClosingDialog = true },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("btn_financial_manual_closing")
+                            ) {
+                                Icon(Icons.Default.TaskAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Tutup Buku Hari Ini Sekarang", fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
@@ -450,7 +536,7 @@ fun FinancialReportScreen(
                 }
             }
 
-            // 5. Segmented Switch: Buku Kas Kronologis vs Rekap Setoran Penyetor
+            // 5. Segmented Switch: Buku Kas vs Rekap Penyetor vs Arsip Tutup Buku
             item {
                 Row(
                     modifier = Modifier
@@ -469,53 +555,81 @@ fun FinancialReportScreen(
                             .testTag("tab_financial_ledger")
                     )
                     ReportTabPill(
-                        label = "Rekap Penyetor (${report.sellerRecapRows.size})",
+                        label = "Penyetor (${report.sellerRecapRows.size})",
                         selected = activeTab == 1,
                         onClick = { activeTab = 1 },
                         modifier = Modifier
                             .weight(1f)
                             .testTag("tab_financial_sellers")
                     )
+                    ReportTabPill(
+                        label = "Arsip (${dailyClosingArchives.size})",
+                        selected = activeTab == 2,
+                        onClick = { activeTab = 2 },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("tab_financial_archives")
+                    )
                 }
             }
 
             // 6. Tab Content
-            if (activeTab == 0) {
-                if (report.ledgerRows.isEmpty()) {
-                    item {
-                        EmptyReportCard(
-                            title = "Belum ada catatan pada periode ini",
-                            subtitle = "Transaksi penjualan dan biaya operasional akan muncul otomatis secara kronologis (tanggal terdahulu ke terbaru)."
-                        )
-                    }
-                } else {
-                    items(report.ledgerRows, key = { "${it.number}_${it.timestampMillis}_${it.referenceCode}" }) { row ->
-                        LedgerEntryCard(
-                            row = row,
-                            dateLabel = rowDateFmt.format(Date(row.timestampMillis))
-                        )
-                    }
+            when (activeTab) {
+                0 -> {
+                    if (report.ledgerRows.isEmpty()) {
+                        item {
+                            EmptyReportCard(
+                                title = "Belum ada catatan pada periode ini",
+                                subtitle = "Transaksi penjualan dan biaya operasional akan muncul otomatis secara kronologis (tanggal terdahulu ke terbaru)."
+                            )
+                        }
+                    } else {
+                        items(report.ledgerRows, key = { "${it.number}_${it.timestampMillis}_${it.referenceCode}" }) { row ->
+                            LedgerEntryCard(
+                                row = row,
+                                dateLabel = rowDateFmt.format(Date(row.timestampMillis))
+                            )
+                        }
 
-                    // Bottom TOTAL Summary Card
-                    item {
-                        LedgerTotalFooterCard(report = report)
+                        // Bottom TOTAL Summary Card
+                        item {
+                            LedgerTotalFooterCard(report = report)
+                        }
                     }
                 }
-            } else {
-                if (report.sellerRecapRows.isEmpty()) {
-                    item {
-                        EmptyReportCard(
-                            title = "Belum ada setoran penyetor pada periode ini",
-                            subtitle = "Rekap hak penjualan, setoran dibayar, dan sisa tagihan setiap dapur penyetor akan tampil di sini."
-                        )
-                    }
-                } else {
-                    items(report.sellerRecapRows, key = { it.sellerId }) { sRow ->
-                        SellerRecapCard(row = sRow)
-                    }
+                1 -> {
+                    if (report.sellerRecapRows.isEmpty()) {
+                        item {
+                            EmptyReportCard(
+                                title = "Belum ada setoran penyetor pada periode ini",
+                                subtitle = "Rekap hak penjualan, setoran dibayar, dan sisa tagihan setiap dapur penyetor akan tampil di sini."
+                            )
+                        }
+                    } else {
+                        items(report.sellerRecapRows, key = { it.sellerId }) { sRow ->
+                            SellerRecapCard(row = sRow)
+                        }
 
-                    item {
-                        SellerRecapTotalFooterCard(rows = report.sellerRecapRows)
+                        item {
+                            SellerRecapTotalFooterCard(rows = report.sellerRecapRows)
+                        }
+                    }
+                }
+                else -> {
+                    if (dailyClosingArchives.isEmpty()) {
+                        item {
+                            EmptyReportCard(
+                                title = "Belum ada arsip tutup buku",
+                                subtitle = "Arsip harian permanen (Masuk, Terjual, Sisa/Retur) akan otomatis tersimpan saat jadwal Auto Tutup Buku berjalan atau saat Anda menekan Tutup Buku Hari Ini."
+                            )
+                        }
+                    } else {
+                        items(dailyClosingArchives, key = { it.closingDate }) { archive ->
+                            DailyClosingArchiveCard(
+                                archive = archive,
+                                onClick = { selectedArchiveDetail = archive }
+                            )
+                        }
                     }
                 }
             }
@@ -589,6 +703,141 @@ fun FinancialReportScreen(
                 },
                 modifier = Modifier.heightIn(max = 480.dp)
             )
+        }
+    }
+
+    if (showManualClosingDialog) {
+        ManualDailyClosingDialog(
+            defaultLeftoverMode = appSettings.autoClosingLeftoverMode,
+            isProcessing = isRunningClosing,
+            onConfirm = { chosenMode ->
+                isRunningClosing = true
+                viewModel.runManualDailyClosing(leftoverModeOverride = chosenMode) { ok, msg ->
+                    isRunningClosing = false
+                    showManualClosingDialog = false
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    if (ok) activeTab = 2
+                }
+            },
+            onDismiss = { showManualClosingDialog = false }
+        )
+    }
+
+    selectedArchiveDetail?.let { archive ->
+        DailyClosingArchiveDetailDialog(
+            archive = archive,
+            onDismiss = { selectedArchiveDetail = null }
+        )
+    }
+}
+
+@Composable
+private fun DailyClosingArchiveCard(
+    archive: DailyClosingArchive,
+    onClick: () -> Unit
+) {
+    val lapakColors = LocalLapakColors.current
+    val isAuto = archive.triggerType == DailyClosingTriggerType.AUTO
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, lapakColors.cardBorder),
+        shape = RoundedCornerShape(14.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .testTag("archive_card_${archive.closingDate}")
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = DailyClosingHelper.formatDisplayDate(archive.closingDate),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "${archive.totalTransactions} transaksi • ${AutoClosingLeftoverMode.shortLabel(archive.leftoverMode)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isAuto) MaterialTheme.colorScheme.primaryContainer else lapakColors.stockSafeBg)
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = if (isAuto) "AUTO" else "MANUAL",
+                        color = if (isAuto) MaterialTheme.colorScheme.primary else lapakColors.stockSafeText,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text("Masuk / Jual / Sisa", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = "${archive.totalItemsIn} / ${archive.totalItemsSold} / ${archive.totalItemsLeftover}",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Omzet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = LapakViewModel.formatRupiah(archive.totalOmzet),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = lapakColors.omzetCardAccent
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Untung Bersih", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = LapakViewModel.formatRupiah(archive.netProfit),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Lihat rincian Masuk, Terjual & Sisa",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
     }
 }

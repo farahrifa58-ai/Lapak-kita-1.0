@@ -51,6 +51,12 @@ fun DashboardScreen(
     val productsWithDetails by viewModel.productsWithDetails.collectAsState()
     val payoutReceiptState by viewModel.lastSellerPaymentReceipt.collectAsState()
     val isSyncing by viewModel.isSyncingCloud.collectAsState()
+    val isOwner by viewModel.isOwner.collectAsState()
+    val appSettings by viewModel.appSettings.collectAsState()
+    val canSeeOmzet = isOwner || appSettings.cashierShowOmzet
+    val canSeeProfit = isOwner || appSettings.cashierShowProfit
+    val canSeeExpenses = isOwner || appSettings.cashierShowExpenses
+    val canSeeAnyFinancial = canSeeOmzet || canSeeProfit || canSeeExpenses
 
     var showQuickDepositDialog by remember { mutableStateOf(false) }
     var showQuickPayoutPicker by remember { mutableStateOf(false) }
@@ -109,13 +115,15 @@ fun DashboardScreen(
             contentPadding = PaddingValues(top = 14.dp, bottom = 26.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Timeframe Filter Chips (Tactile Neumorphic Extruded / Inset)
-            item {
-                TimeframeSelector(
-                    current = currentTimeframe,
-                    lang = lang,
-                    onSelect = { viewModel.setTimeframe(it) }
-                )
+            // Timeframe Filter Chips (Owner or Cashier with enabled financial widgets)
+            if (canSeeAnyFinancial) {
+                item {
+                    TimeframeSelector(
+                        current = currentTimeframe,
+                        lang = lang,
+                        onSelect = { viewModel.setTimeframe(it) }
+                    )
+                }
             }
 
             if (com.example.config.AppConfig.IS_TRIAL) {
@@ -144,51 +152,152 @@ fun DashboardScreen(
                 }
             }
 
-            // 4 Monochromatic Soft UI / Neumorphism Financial Summary Cards
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        MetricCard(
-                            title = AppStrings.get("dash_total_omzet", lang),
-                            value = LapakViewModel.formatRupiah(summary.totalOmzet),
-                            subtitle = "${summary.totalItemsSold} ${AppStrings.get("dash_items_sold", lang)}",
-                            icon = LucideIcons.Wallet,
-                            accentColor = lapakColors.omzetCardAccent,
-                            modifier = Modifier.weight(1f)
-                        )
-                        MetricCard(
-                            title = AppStrings.get("dash_net_profit", lang),
-                            value = LapakViewModel.formatRupiah(summary.netAdminProfit),
-                            subtitle = "Kotor: ${LapakViewModel.formatRupiah(summary.grossAdminProfit)}",
-                            icon = LucideIcons.TrendingUp,
-                            accentColor = lapakColors.profitCardAccent,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
+            // Financial Summary Cards (Full 4 cards for Owner; customizable modules for Kasir/Karyawan)
+            if (isOwner) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            MetricCard(
+                                title = AppStrings.get("dash_total_omzet", lang),
+                                value = LapakViewModel.formatRupiah(summary.totalOmzet),
+                                subtitle = "${summary.totalItemsSold} ${AppStrings.get("dash_items_sold", lang)}",
+                                icon = LucideIcons.Wallet,
+                                accentColor = lapakColors.omzetCardAccent,
+                                modifier = Modifier.weight(1f)
+                            )
+                            MetricCard(
+                                title = AppStrings.get("dash_net_profit", lang),
+                                value = LapakViewModel.formatRupiah(summary.netAdminProfit),
+                                subtitle = "Kotor: ${LapakViewModel.formatRupiah(summary.grossAdminProfit)}",
+                                icon = LucideIcons.TrendingUp,
+                                accentColor = lapakColors.profitCardAccent,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            MetricCard(
+                                title = AppStrings.get("dash_seller_rights", lang),
+                                value = LapakViewModel.formatRupiah(summary.totalSellerShare),
+                                subtitle = "Hak barang terjual",
+                                icon = LucideIcons.HandCoins,
+                                accentColor = lapakColors.payoutCardAccent,
+                                modifier = Modifier.weight(1f)
+                            )
+                            MetricCard(
+                                title = AppStrings.get("dash_operating_expenses", lang),
+                                value = LapakViewModel.formatRupiah(summary.operatingExpenses),
+                                subtitle = "Biaya lapak",
+                                icon = LucideIcons.Receipt,
+                                accentColor = lapakColors.expenseCardAccent,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            } else if (canSeeAnyFinancial) {
+                item {
+                    val cashierMetrics = buildList {
+                        if (canSeeOmzet) {
+                            add(
+                                Triple(
+                                    AppStrings.get("dash_total_omzet", lang),
+                                    LapakViewModel.formatRupiah(summary.totalOmzet),
+                                    Triple("${summary.totalItemsSold} ${AppStrings.get("dash_items_sold", lang)}", LucideIcons.Wallet, lapakColors.omzetCardAccent)
+                                )
+                            )
+                        }
+                        if (canSeeProfit) {
+                            add(
+                                Triple(
+                                    AppStrings.get("dash_net_profit", lang),
+                                    LapakViewModel.formatRupiah(summary.netAdminProfit),
+                                    Triple("Kotor: ${LapakViewModel.formatRupiah(summary.grossAdminProfit)}", LucideIcons.TrendingUp, lapakColors.profitCardAccent)
+                                )
+                            )
+                        }
+                        if (canSeeExpenses) {
+                            add(
+                                Triple(
+                                    AppStrings.get("dash_operating_expenses", lang),
+                                    LapakViewModel.formatRupiah(summary.operatingExpenses),
+                                    Triple("Biaya lapak", LucideIcons.Receipt, lapakColors.expenseCardAccent)
+                                )
+                            )
+                        }
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        cashierMetrics.chunked(2).forEach { pair ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                            ) {
+                                pair.forEach { (title, value, meta) ->
+                                    MetricCard(
+                                        title = title,
+                                        value = value,
+                                        subtitle = meta.first,
+                                        icon = meta.second,
+                                        accentColor = meta.third,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                if (pair.size == 1) {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                item {
+                    NeuCard(
+                        cornerRadius = 16.dp,
+                        shadowOffset = 5.dp,
+                        blurRadius = 10.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dashboard_kasir_mode_notice")
                     ) {
-                        MetricCard(
-                            title = AppStrings.get("dash_seller_rights", lang),
-                            value = LapakViewModel.formatRupiah(summary.totalSellerShare),
-                            subtitle = "Hak barang terjual",
-                            icon = LucideIcons.HandCoins,
-                            accentColor = lapakColors.payoutCardAccent,
-                            modifier = Modifier.weight(1f)
-                        )
-                        MetricCard(
-                            title = AppStrings.get("dash_operating_expenses", lang),
-                            value = LapakViewModel.formatRupiah(summary.operatingExpenses),
-                            subtitle = "Biaya lapak",
-                            icon = LucideIcons.Receipt,
-                            accentColor = lapakColors.expenseCardAccent,
-                            modifier = Modifier.weight(1f)
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            NeuIconBadge(
+                                accentColor = MaterialTheme.colorScheme.primary,
+                                size = 40.dp
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Mode Kasir / Karyawan",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "Data omset, untung lapak, dan biaya operasional disembunyikan oleh Owner (dapat diatur di Kustomisasi Pengguna).",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -273,101 +382,105 @@ fun DashboardScreen(
                         }
                     }
 
-                    // Button 2: Bayar Setoran (Neumorphic extruded card button with soft amber accent)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 52.dp)
-                            .neuExtruded(
-                                cornerRadius = 16.dp,
-                                shadowOffset = 5.dp,
-                                blurRadius = 10.dp,
-                                surfaceColor = lapakColors.neuSurface
-                            )
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable { showQuickPayoutPicker = true }
-                            .padding(horizontal = 12.dp, vertical = 12.dp)
-                            .testTag("dashboard_quick_payout_button"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
+                    // Button 2: Bayar Setoran (Owner only)
+                    if (isOwner) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 52.dp)
+                                .neuExtruded(
+                                    cornerRadius = 16.dp,
+                                    shadowOffset = 5.dp,
+                                    blurRadius = 10.dp,
+                                    surfaceColor = lapakColors.neuSurface
+                                )
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable { showQuickPayoutPicker = true }
+                                .padding(horizontal = 12.dp, vertical = 12.dp)
+                                .testTag("dashboard_quick_payout_button"),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = LucideIcons.HandCoins,
-                                contentDescription = null,
-                                tint = lapakColors.payoutCardAccent,
-                                modifier = Modifier.size(19.dp)
-                            )
-                            Spacer(Modifier.width(7.dp))
-                            Text(
-                                text = "Bayar Setoran",
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = lapakColors.payoutCardAccent,
-                                maxLines = 1
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = LucideIcons.HandCoins,
+                                    contentDescription = null,
+                                    tint = lapakColors.payoutCardAccent,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                                Spacer(Modifier.width(7.dp))
+                                Text(
+                                    text = "Bayar Setoran",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = lapakColors.payoutCardAccent,
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            // Financial Report & Export (Excel / PDF) Entry Card (Neumorphic)
-            item {
-                NeuCard(
-                    cornerRadius = 16.dp,
-                    shadowOffset = 5.dp,
-                    blurRadius = 10.dp,
-                    onClick = { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("dashboard_financial_report_button")
-                ) {
-                    Row(
+            // Financial Report & Export (Excel / PDF) Entry Card (Owner only)
+            if (isOwner) {
+                item {
+                    NeuCard(
+                        cornerRadius = 16.dp,
+                        shadowOffset = 5.dp,
+                        blurRadius = 10.dp,
+                        onClick = { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .testTag("dashboard_financial_report_button")
                     ) {
-                        NeuIconBadge(
-                            accentColor = lapakColors.omzetCardAccent,
-                            size = 42.dp
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            NeuIconBadge(
+                                accentColor = lapakColors.omzetCardAccent,
+                                size = 42.dp
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Assessment,
+                                    contentDescription = null,
+                                    tint = lapakColors.omzetCardAccent,
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Laporan Keuangan Lapak",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Buku kas kronologis, rekap penyetor & ekspor Excel / PDF",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             Icon(
-                                imageVector = Icons.Default.Assessment,
-                                contentDescription = null,
-                                tint = lapakColors.omzetCardAccent,
-                                modifier = Modifier.size(21.dp)
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = "Buka Laporan Keuangan",
+                                tint = MaterialTheme.colorScheme.primary
                             )
                         }
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Laporan Keuangan Lapak",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "Buku kas kronologis, rekap penyetor & ekspor Excel / PDF",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Default.ChevronRight,
-                            contentDescription = "Buka Laporan Keuangan",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
                     }
                 }
             }
 
-            // Unpaid Rights Alert Card (Neumorphic extruded card with soft amber accent)
-            if (summary.totalUnpaidSellerPayables > 0) {
+            // Unpaid Rights Alert Card (Owner only)
+            if (isOwner && summary.totalUnpaidSellerPayables > 0) {
                 item {
                     NeuCard(
                         cornerRadius = 16.dp,
@@ -420,9 +533,11 @@ fun DashboardScreen(
                 }
             }
 
-            // Chart: Revenue & Profit Trend
-            item {
-                RevenueProfitBarChart(metrics = summary.dailyTrend)
+            // Chart: Revenue & Profit Trend (Owner or Cashier when Omzet/Profit enabled)
+            if (canSeeOmzet || canSeeProfit) {
+                item {
+                    RevenueProfitBarChart(metrics = summary.dailyTrend)
+                }
             }
 
             // Best Selling Products (Neumorphic cards)
@@ -450,12 +565,15 @@ fun DashboardScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
                                 Text(
                                     text = top.productName,
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 3,
+                                    softWrap = true,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     text = top.sellerName,
@@ -470,12 +588,14 @@ fun DashboardScreen(
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-                                Text(
-                                    text = "Untung: ${LapakViewModel.formatRupiah(top.adminProfit)}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = lapakColors.profitCardAccent,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                if (canSeeProfit) {
+                                    Text(
+                                        text = "Untung: ${LapakViewModel.formatRupiah(top.adminProfit)}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = lapakColors.profitCardAccent,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
                     }
@@ -513,7 +633,10 @@ fun DashboardScreen(
                                     text = low.product.name,
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 3,
+                                    softWrap = true,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     text = low.sellerName,

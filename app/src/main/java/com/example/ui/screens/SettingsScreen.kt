@@ -39,6 +39,7 @@ import com.example.ui.auth.GoogleAuthHelper
 import com.example.ui.components.*
 import com.example.ui.viewmodel.AppScreen
 import com.example.ui.viewmodel.LapakViewModel
+import com.example.util.GoogleDriveBackupHelper
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.Dispatchers
@@ -74,9 +75,30 @@ fun SettingsScreen(
     val isSyncingCloud by viewModel.isSyncingCloud.collectAsState()
     val lastCloudSyncAt by viewModel.lastCloudSyncAt.collectAsState()
     val connectedDevicesCount by viewModel.connectedDevicesCount.collectAsState()
+    val isOwner by viewModel.isOwner.collectAsState()
+    val isCloudLoaded by viewModel.isCloudLoaded.collectAsState()
+    val isTodayClosed by viewModel.isTodayClosed.collectAsState()
+    val canAccessExpenses = isOwner || appSettings.cashierShowExpenses
 
     // Dedicated full-screen sub-page navigation (null = main Pengaturan card list)
     var activeSubPage by remember { mutableStateOf<SettingsSubPage?>(null) }
+    var isBackingUpDrive by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isOwner, canAccessExpenses, activeSubPage) {
+        val blocked = mutableSetOf<SettingsSubPage>()
+        if (!isOwner) {
+            blocked.add(SettingsSubPage.BIAYA_ADMIN)
+            blocked.add(SettingsSubPage.CADANGAN)
+            blocked.add(SettingsSubPage.AUTO_CLOSING)
+            blocked.add(SettingsSubPage.KUSTOMISASI_PENGGUNA)
+        }
+        if (!canAccessExpenses) {
+            blocked.add(SettingsSubPage.BIAYA_OPERASIONAL)
+        }
+        if (activeSubPage in blocked) {
+            activeSubPage = null
+        }
+    }
 
     // 1. Profil Lapak Form State
     var shopName by remember(shopProfile) { mutableStateOf(shopProfile.shopName) }
@@ -120,6 +142,24 @@ fun SettingsScreen(
     var autoResetHour by remember(appSettings.autoResetHour) { mutableStateOf(appSettings.autoResetHour) }
     var showConfirmResetStockDialog by remember { mutableStateOf(false) }
     var isResettingStock by remember { mutableStateOf(false) }
+
+    // 6. Auto Tutup Buku Harian State
+    var autoClosingEnabled by remember(appSettings.autoClosingEnabled) { mutableStateOf(appSettings.autoClosingEnabled) }
+    var autoClosingHour by remember(appSettings.autoClosingHour) { mutableStateOf(appSettings.autoClosingHour) }
+    var autoClosingMinute by remember(appSettings.autoClosingMinute) { mutableStateOf(appSettings.autoClosingMinute) }
+    var autoClosingLeftoverMode by remember(appSettings.autoClosingLeftoverMode) { mutableStateOf(appSettings.autoClosingLeftoverMode) }
+    var showManualClosingDialog by remember { mutableStateOf(false) }
+    var isRunningManualClosing by remember { mutableStateOf(false) }
+
+    // 7. Kustomisasi Pengguna (HP Kasir) State
+    var cashierShowOmzet by remember(appSettings.cashierShowOmzet) { mutableStateOf(appSettings.cashierShowOmzet) }
+    var cashierShowProfit by remember(appSettings.cashierShowProfit) { mutableStateOf(appSettings.cashierShowProfit) }
+    var cashierShowExpenses by remember(appSettings.cashierShowExpenses) { mutableStateOf(appSettings.cashierShowExpenses) }
+
+    // 8. Kustomisasi Print & Printer Bluetooth State
+    var printerName by remember(appSettings.printerName) { mutableStateOf(appSettings.printerName) }
+    var printerAddress by remember(appSettings.printerAddress) { mutableStateOf(appSettings.printerAddress) }
+    var printerPaperSize by remember(appSettings.printerPaperSize) { mutableStateOf(appSettings.printerPaperSize) }
 
     // Zero-permission Photo Picker for Shop Logo (strictly UID-scoped file name)
     val logoPickerLauncher = rememberLauncherForActivityResult(
@@ -173,6 +213,66 @@ fun SettingsScreen(
         Firebase.auth.currentUser?.email ?: "Admin Lapak"
     }
     val syncTimeFormatter = remember { SimpleDateFormat("dd MMM HH:mm:ss", Locale("id", "ID")) }
+
+    // Google Drive Backup (SAF CreateDocument — zero storage permissions, natively saves to Google Drive)
+    val saveToDriveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            isBackingUpDrive = true
+            viewModel.exportBackup { json ->
+                scope.launch {
+                    val res = GoogleDriveBackupHelper.writeJsonToUri(context, uri, json)
+                    isBackingUpDrive = false
+                    res.fold(
+                        onSuccess = {
+                            viewModel.recordGoogleDriveBackupSuccess(signedInEmail)
+                            Toast.makeText(
+                                context,
+                                "Cadangan berhasil disimpan ke Google Drive!",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        },
+                        onFailure = { err ->
+                            Toast.makeText(
+                                context,
+                                err.message ?: "Gagal menyimpan cadangan ke Google Drive",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    // Google Drive Restore (SAF OpenDocument — natively opens JSON backup from Google Drive)
+    val restoreFromDriveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            isBackingUpDrive = true
+            scope.launch {
+                val res = GoogleDriveBackupHelper.readJsonFromUri(context, uri)
+                res.fold(
+                    onSuccess = { json ->
+                        viewModel.importBackup(json) { _, msg ->
+                            isBackingUpDrive = false
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    onFailure = { err ->
+                        isBackingUpDrive = false
+                        Toast.makeText(
+                            context,
+                            err.message ?: "Gagal membaca file cadangan Google Drive",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                )
+            }
+        }
+    }
 
     BackHandler {
         if (activeSubPage != null) {
@@ -271,15 +371,17 @@ fun SettingsScreen(
                         )
                     }
 
-                    // 2. Biaya Admin / Komisi Lapak
-                    item {
-                        SettingsMenuRowCard(
-                            title = "Biaya Admin / Komisi Lapak",
-                            subtitle = "Tarif aktif: $activeTariffLabel",
-                            icon = Icons.Default.Percent,
-                            onClick = { activeSubPage = SettingsSubPage.BIAYA_ADMIN },
-                            testTag = "menu_biaya_admin"
-                        )
+                    // 2. Biaya Admin / Komisi Lapak (Owner only)
+                    if (isOwner) {
+                        item {
+                            SettingsMenuRowCard(
+                                title = "Biaya Admin / Komisi Lapak",
+                                subtitle = "Tarif aktif: $activeTariffLabel",
+                                icon = Icons.Default.Percent,
+                                onClick = { activeSubPage = SettingsSubPage.BIAYA_ADMIN },
+                                testTag = "menu_biaya_admin"
+                            )
+                        }
                     }
 
                     // 3. Link Portal Web Penyetor
@@ -304,7 +406,64 @@ fun SettingsScreen(
                         )
                     }
 
-                    // 5. Reset Stok Harian
+                    // 5. Auto Tutup Buku Harian (Owner only)
+                    if (isOwner) {
+                        item {
+                            val timeLabel = DailyClosingHelper.formatTime(
+                                appSettings.autoClosingHour,
+                                appSettings.autoClosingMinute
+                            )
+                            val autoClosingSub = if (appSettings.autoClosingEnabled) {
+                                "Aktif • $timeLabel WIB • ${AutoClosingLeftoverMode.shortLabel(appSettings.autoClosingLeftoverMode)}"
+                            } else {
+                                "Nonaktif • Tutup buku dilakukan manual"
+                            }
+                            SettingsMenuRowCard(
+                                title = "Auto Tutup Buku Harian",
+                                subtitle = autoClosingSub,
+                                icon = Icons.Default.EventRepeat,
+                                onClick = { activeSubPage = SettingsSubPage.AUTO_CLOSING },
+                                testTag = "menu_auto_closing"
+                            )
+                        }
+                    }
+
+                    // 6. Kustomisasi Pengguna (HP Kasir / Karyawan — Owner only)
+                    if (isOwner) {
+                        item {
+                            val enabledModules = buildList {
+                                if (appSettings.cashierShowOmzet) add("Omset")
+                                if (appSettings.cashierShowProfit) add("Untung")
+                                if (appSettings.cashierShowExpenses) add("Operasional")
+                            }
+                            val cashierSub = if (enabledModules.isEmpty()) {
+                                "Kasir: Omset, Untung & Operasional disembunyikan"
+                            } else {
+                                "Tampil di Kasir: ${enabledModules.joinToString(", ")}"
+                            }
+                            SettingsMenuRowCard(
+                                title = "Kustomisasi Pengguna (Kasir)",
+                                subtitle = cashierSub,
+                                icon = Icons.Default.ManageAccounts,
+                                onClick = { activeSubPage = SettingsSubPage.KUSTOMISASI_PENGGUNA },
+                                testTag = "menu_kustomisasi_pengguna"
+                            )
+                        }
+                    }
+
+                    // 7. Kustomisasi Print & Printer Bluetooth (Owner & Kasir)
+                    item {
+                        val activePrinterLabel = appSettings.printerName.ifBlank { "Printer Sistem / PDF" }
+                        SettingsMenuRowCard(
+                            title = "Kustomisasi Print & Printer",
+                            subtitle = "$activePrinterLabel • ${PrinterPaperSize.label(appSettings.printerPaperSize)}",
+                            icon = Icons.Default.Print,
+                            onClick = { activeSubPage = SettingsSubPage.PRINTER_SETTINGS },
+                            testTag = "menu_printer_settings"
+                        )
+                    }
+
+                    // 8. Reset Stok Harian
                     item {
                         SettingsMenuRowCard(
                             title = "Reset Stok Harian",
@@ -315,26 +474,30 @@ fun SettingsScreen(
                         )
                     }
 
-                    // 6. Biaya Operasional
-                    item {
-                        SettingsMenuRowCard(
-                            title = "Biaya Operasional",
-                            subtitle = "${expenses.size} catatan • Total ${LapakViewModel.formatRupiah(totalExpenses)}",
-                            icon = Icons.Default.ReceiptLong,
-                            onClick = { activeSubPage = SettingsSubPage.BIAYA_OPERASIONAL },
-                            testTag = "menu_biaya_operasional"
-                        )
+                    // 9. Biaya Operasional (Owner or Cashier when enabled)
+                    if (canAccessExpenses) {
+                        item {
+                            SettingsMenuRowCard(
+                                title = "Biaya Operasional",
+                                subtitle = "${expenses.size} catatan • Total ${LapakViewModel.formatRupiah(totalExpenses)}",
+                                icon = Icons.Default.ReceiptLong,
+                                onClick = { activeSubPage = SettingsSubPage.BIAYA_OPERASIONAL },
+                                testTag = "menu_biaya_operasional"
+                            )
+                        }
                     }
 
-                    // 7. Cadangan & Pemulihan
-                    item {
-                        SettingsMenuRowCard(
-                            title = "Cadangan & Pemulihan",
-                            subtitle = "Ekspor JSON / kirim ke WA & pulihkan saat ganti HP",
-                            icon = Icons.Default.Backup,
-                            onClick = { activeSubPage = SettingsSubPage.CADANGAN },
-                            testTag = "menu_backup_restore"
-                        )
+                    // 10. Cadangan & Pemulihan (Owner only — Google Drive & JSON)
+                    if (isOwner) {
+                        item {
+                            SettingsMenuRowCard(
+                                title = "Cadangan & Pemulihan",
+                                subtitle = "Cadangkan & pulihkan via Google Drive atau file JSON",
+                                icon = Icons.Default.CloudUpload,
+                                onClick = { activeSubPage = SettingsSubPage.CADANGAN },
+                                testTag = "menu_backup_restore"
+                            )
+                        }
                     }
 
                     // 8. Tema & Bahasa
@@ -359,11 +522,12 @@ fun SettingsScreen(
                         )
                     }
 
-                    // 10. Status Akun & Sinkronisasi Cloud (Menu Baru)
+                    // 10. Status Akun & Sinkronisasi Cloud
                     item {
+                        val roleLabel = if (isOwner) "Owner" else "Kasir"
                         SettingsMenuRowCard(
                             title = "Status Akun & Sinkronisasi Cloud",
-                            subtitle = "$signedInEmail • Terhubung $clampedDevices/2 HP",
+                            subtitle = "$signedInEmail • $roleLabel • $clampedDevices/2 HP",
                             icon = Icons.Default.CloudDone,
                             onClick = { activeSubPage = SettingsSubPage.AKUN_CLOUD },
                             testTag = "menu_status_akun_cloud"
@@ -540,6 +704,89 @@ fun SettingsScreen(
                                 )
                             }
 
+                            SettingsSubPage.AUTO_CLOSING -> {
+                                AutoClosingSubPage(
+                                    enabled = autoClosingEnabled,
+                                    onEnabledChange = { autoClosingEnabled = it },
+                                    hour = autoClosingHour,
+                                    minute = autoClosingMinute,
+                                    onTimeChange = { h, m ->
+                                        autoClosingHour = h
+                                        autoClosingMinute = m
+                                    },
+                                    leftoverMode = autoClosingLeftoverMode,
+                                    onLeftoverModeChange = { autoClosingLeftoverMode = it },
+                                    lastClosedDate = appSettings.lastClosedDate,
+                                    isTodayClosed = isTodayClosed,
+                                    onSave = {
+                                        viewModel.updateAutoClosingSettings(
+                                            enabled = autoClosingEnabled,
+                                            hour = autoClosingHour,
+                                            minute = autoClosingMinute,
+                                            leftoverMode = autoClosingLeftoverMode
+                                        ) { _, msg ->
+                                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        }
+                                    },
+                                    onRequestManualCloseToday = {
+                                        showManualClosingDialog = true
+                                    }
+                                )
+                            }
+
+                            SettingsSubPage.KUSTOMISASI_PENGGUNA -> {
+                                CashierCustomizationSubPage(
+                                    showOmzet = cashierShowOmzet,
+                                    onShowOmzetChange = { cashierShowOmzet = it },
+                                    showProfit = cashierShowProfit,
+                                    onShowProfitChange = { cashierShowProfit = it },
+                                    showExpenses = cashierShowExpenses,
+                                    onShowExpensesChange = { cashierShowExpenses = it },
+                                    onSave = {
+                                        viewModel.updateCashierVisibilitySettings(
+                                            showOmzet = cashierShowOmzet,
+                                            showProfit = cashierShowProfit,
+                                            showExpenses = cashierShowExpenses
+                                        ) { _, msg ->
+                                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                )
+                            }
+
+                            SettingsSubPage.PRINTER_SETTINGS -> {
+                                PrinterSettingsSubPage(
+                                    selectedPrinterName = printerName,
+                                    selectedPrinterAddress = printerAddress,
+                                    selectedPaperSize = printerPaperSize,
+                                    onSelectPrinter = { name, addr ->
+                                        printerName = name
+                                        printerAddress = addr
+                                    },
+                                    onSelectPaperSize = { size ->
+                                        printerPaperSize = size
+                                    },
+                                    onSave = {
+                                        viewModel.updatePrinterSettings(
+                                            printerName = printerName,
+                                            printerAddress = printerAddress,
+                                            paperSize = printerPaperSize
+                                        ) { _, msg ->
+                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onTestPrint = { onFinished ->
+                                        viewModel.testPrintReceipt(
+                                            context = context,
+                                            printerName = printerName,
+                                            printerAddress = printerAddress,
+                                            paperSize = printerPaperSize,
+                                            onResult = onFinished
+                                        )
+                                    }
+                                )
+                            }
+
                             SettingsSubPage.RESET_STOK -> {
                                 val totalActiveProductsCount = remember(products) { products.count { it.currentStock > 0 } }
                                 val totalActiveStockQty = remember(products) { products.sumOf { it.currentStock } }
@@ -588,6 +835,50 @@ fun SettingsScreen(
 
                             SettingsSubPage.CADANGAN -> {
                                 CadanganSubPage(
+                                    lastBackupDate = appSettings.lastBackupDate,
+                                    driveAccountEmail = appSettings.driveAccountEmail ?: signedInEmail,
+                                    isBackingUpDrive = isBackingUpDrive,
+                                    syncTimeFormatter = syncTimeFormatter,
+                                    onSaveToGoogleDrive = {
+                                        saveToDriveLauncher.launch(
+                                            GoogleDriveBackupHelper.defaultBackupFileName(shopProfile.shopName)
+                                        )
+                                    },
+                                    onQuickUploadToDrive = {
+                                        isBackingUpDrive = true
+                                        viewModel.exportBackup { json ->
+                                            scope.launch {
+                                                val res = GoogleDriveBackupHelper.shareBackupFileToGoogleDrive(
+                                                    context = context,
+                                                    json = json,
+                                                    shopName = shopProfile.shopName
+                                                )
+                                                isBackingUpDrive = false
+                                                res.fold(
+                                                    onSuccess = { fileName ->
+                                                        viewModel.recordGoogleDriveBackupSuccess(signedInEmail)
+                                                        Toast.makeText(
+                                                            context,
+                                                            "Membuka Google Drive untuk menyimpan $fileName",
+                                                            Toast.LENGTH_LONG
+                                                        ).show()
+                                                    },
+                                                    onFailure = { err ->
+                                                        Toast.makeText(
+                                                            context,
+                                                            err.message ?: "Gagal membuka aplikasi Google Drive",
+                                                            Toast.LENGTH_LONG
+                                                        ).show()
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onRestoreFromGoogleDrive = {
+                                        restoreFromDriveLauncher.launch(
+                                            arrayOf("application/json", "text/plain", "*/*")
+                                        )
+                                    },
                                     onCopyJson = {
                                         viewModel.exportBackup { json ->
                                             viewModel.copyToClipboard(context, json)
@@ -623,6 +914,8 @@ fun SettingsScreen(
                                     signedInEmail = signedInEmail,
                                     registeredLicenseCode = registeredLicenseCode,
                                     connectedDevicesCount = connectedDevicesCount,
+                                    isOwner = isOwner,
+                                    isCloudLoaded = isCloudLoaded,
                                     isSyncingCloud = isSyncingCloud,
                                     lastCloudSyncAt = lastCloudSyncAt,
                                     syncTimeFormatter = syncTimeFormatter,
@@ -651,6 +944,22 @@ fun SettingsScreen(
             appSettings = appSettings,
             productsWithDetails = products,
             onDismiss = { showPromoPreviewDialog = false }
+        )
+    }
+
+    if (showManualClosingDialog) {
+        ManualDailyClosingDialog(
+            defaultLeftoverMode = autoClosingLeftoverMode,
+            isProcessing = isRunningManualClosing,
+            onConfirm = { chosenMode ->
+                isRunningManualClosing = true
+                viewModel.runManualDailyClosing(leftoverModeOverride = chosenMode) { _, msg ->
+                    isRunningManualClosing = false
+                    showManualClosingDialog = false
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            },
+            onDismiss = { showManualClosingDialog = false }
         )
     }
 

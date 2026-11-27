@@ -20,7 +20,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.repository.CartItem
 import com.example.data.repository.ProductDetailItem
 import com.example.i18n.AppStrings
@@ -166,20 +168,28 @@ fun CashierScreen(
                                         border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
                                     ) {
                                         Column(
-                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                            modifier = Modifier
+                                                .widthIn(min = 132.dp, max = 196.dp)
+                                                .padding(horizontal = 12.dp, vertical = 8.dp)
                                         ) {
                                             Text(
                                                 text = item.product.name,
-                                                maxLines = 1,
+                                                maxLines = 2,
+                                                softWrap = true,
+                                                overflow = TextOverflow.Ellipsis,
                                                 fontWeight = FontWeight.Bold,
-                                                style = MaterialTheme.typography.labelMedium,
+                                                style = MaterialTheme.typography.labelMedium.copy(
+                                                    lineHeight = 16.sp
+                                                ),
                                                 color = MaterialTheme.colorScheme.onSurface
                                             )
+                                            Spacer(Modifier.height(2.dp))
                                             Text(
                                                 text = "${LapakViewModel.formatRupiah(item.product.sellingPrice)} • ${item.seller.name}",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.primary,
-                                                maxLines = 1
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                         }
                                     }

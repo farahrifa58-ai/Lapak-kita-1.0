@@ -7,6 +7,7 @@ import android.print.PrintManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.example.data.model.LapakTransaction
+import com.example.data.model.PrinterPaperSize
 import com.example.data.model.Seller
 import com.example.data.model.SellerPayment
 import com.example.data.model.ShopProfile
@@ -45,6 +46,18 @@ object ReceiptPrinter {
         }
     }
 
+    private fun htmlMaxWidthPx(paperSize: String): Int = when (paperSize.uppercase()) {
+        PrinterPaperSize.MM_58 -> 220
+        PrinterPaperSize.MM_80 -> 300
+        else -> 580
+    }
+
+    private fun htmlBaseFontPx(paperSize: String): Int = when (paperSize.uppercase()) {
+        PrinterPaperSize.MM_58 -> 11
+        PrinterPaperSize.MM_80 -> 12
+        else -> 13
+    }
+
     /**
      * Generates thermal-styled HTML for customer purchase receipt.
      * Note: NO seller name is included (strict customer privacy).
@@ -52,20 +65,23 @@ object ReceiptPrinter {
     fun buildCustomerReceiptHtml(
         transaction: LapakTransaction,
         items: List<TransactionItem>,
-        shopProfile: ShopProfile
+        shopProfile: ShopProfile,
+        paperSize: String = PrinterPaperSize.MM_58
     ): String {
         val sdf = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
         val dateStr = sdf.format(Date(transaction.timestamp))
+        val maxWidth = htmlMaxWidthPx(paperSize)
+        val baseFont = htmlBaseFontPx(paperSize)
 
         val itemsHtml = StringBuilder()
         for (item in items) {
             itemsHtml.append("""
                 <tr>
-                    <td style="padding: 4px 0; font-size: 13px;">
+                    <td style="padding: 4px 0; font-size: ${baseFont + 1}px;">
                         <b>${item.productName}</b><br>
-                        <span style="font-size: 11px; color: #555;">${item.quantity} x ${LapakViewModel.formatRupiah(item.unitPrice)}</span>
+                        <span style="font-size: ${baseFont - 1}px; color: #555;">${item.quantity} x ${LapakViewModel.formatRupiah(item.unitPrice)}</span>
                     </td>
-                    <td style="padding: 4px 0; text-align: right; vertical-align: top; font-size: 13px;">
+                    <td style="padding: 4px 0; text-align: right; vertical-align: top; font-size: ${baseFont + 1}px;">
                         ${LapakViewModel.formatRupiah(item.subtotal)}
                     </td>
                 </tr>
@@ -80,11 +96,11 @@ object ReceiptPrinter {
                 <style>
                     body {
                         font-family: 'Courier New', Courier, monospace;
-                        font-size: 12px;
+                        font-size: ${baseFont}px;
                         color: #000;
                         margin: 0;
-                        padding: 16px;
-                        max-width: 380px;
+                        padding: 14px;
+                        max-width: ${maxWidth}px;
                     }
                     .center { text-align: center; }
                     .bold { font-weight: bold; }
@@ -140,10 +156,13 @@ object ReceiptPrinter {
         seller: Seller,
         shopProfile: ShopProfile,
         remainingBalance: Double,
-        soldItems: List<com.example.data.model.SoldItemSummary> = emptyList()
+        soldItems: List<com.example.data.model.SoldItemSummary> = emptyList(),
+        paperSize: String = PrinterPaperSize.MM_58
     ): String {
         val sdf = SimpleDateFormat("dd MMMM yyyy HH:mm", Locale("id", "ID"))
         val dateStr = sdf.format(Date(payment.paymentDate))
+        val maxWidth = htmlMaxWidthPx(paperSize)
+        val baseFont = htmlBaseFontPx(paperSize)
 
         val soldItemsHtml = StringBuilder()
         if (soldItems.isNotEmpty()) {
@@ -178,11 +197,11 @@ object ReceiptPrinter {
                 <style>
                     body {
                         font-family: 'Courier New', Courier, monospace;
-                        font-size: 12px;
+                        font-size: ${baseFont}px;
                         color: #000;
                         margin: 0;
-                        padding: 16px;
-                        max-width: 380px;
+                        padding: 14px;
+                        max-width: ${maxWidth}px;
                     }
                     .center { text-align: center; }
                     .bold { font-weight: bold; }
@@ -307,5 +326,55 @@ object ReceiptPrinter {
         }
         sb.append("================================\n")
         return sb.toString()
+    }
+
+    fun buildTestPrintHtml(
+        shopProfile: ShopProfile,
+        printerName: String,
+        paperSize: String = PrinterPaperSize.MM_58
+    ): String {
+        val maxWidth = htmlMaxWidthPx(paperSize)
+        val baseFont = htmlBaseFontPx(paperSize)
+        val sdf = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
+        return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body {
+                        font-family: 'Courier New', Courier, monospace;
+                        font-size: ${baseFont}px;
+                        color: #000;
+                        margin: 0;
+                        padding: 14px;
+                        max-width: ${maxWidth}px;
+                    }
+                    .center { text-align: center; }
+                    .bold { font-weight: bold; }
+                    .divider { border-top: 1px dashed #444; margin: 8px 0; }
+                    .double-divider { border-top: 2px solid #000; margin: 8px 0; }
+                    .row { display: flex; justify-content: space-between; margin: 2px 0; }
+                </style>
+            </head>
+            <body>
+                <div class="center">
+                    <h2 style="margin: 0 0 4px 0;">${shopProfile.shopName.uppercase()}</h2>
+                    <p style="margin: 0;">TES CETAK STRUK</p>
+                </div>
+                <div class="double-divider"></div>
+                <div class="row"><span>Printer</span><span class="bold">${printerName.ifBlank { "Printer Sistem / PDF" }}</span></div>
+                <div class="row"><span>Ukuran Kertas</span><span class="bold">${PrinterPaperSize.label(paperSize)}</span></div>
+                <div class="row"><span>Waktu</span><span>${sdf.format(Date())}</span></div>
+                <div class="divider"></div>
+                <div class="row"><span>Risoles Mayo 2x</span><span>Rp 10.000</span></div>
+                <div class="row"><span>Lemper Ayam 1x</span><span>Rp 5.000</span></div>
+                <div class="divider"></div>
+                <div class="row bold"><span>TOTAL</span><span>Rp 15.000</span></div>
+                <div class="double-divider"></div>
+                <div class="center">Printer siap digunakan!</div>
+            </body>
+            </html>
+        """.trimIndent()
     }
 }

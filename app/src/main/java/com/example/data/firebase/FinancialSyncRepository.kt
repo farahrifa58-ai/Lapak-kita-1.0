@@ -1,6 +1,11 @@
 package com.example.data.firebase
 
 import android.util.Log
+import com.example.data.model.AppSettings
+import com.example.data.model.AutoClosingLeftoverMode
+import com.example.data.model.DailyClosingArchive
+import com.example.data.model.DailyClosingItemRecord
+import com.example.data.model.DailyClosingTriggerType
 import com.example.data.model.LapakTransaction
 import com.example.data.model.OperatingExpense
 import com.example.data.model.Seller
@@ -110,6 +115,40 @@ data class CloudFinancialBundle(
     val settlements: List<CloudSettlementRecord>
 )
 
+data class CloudSnapshotBatch<T>(
+    val items: List<T>,
+    val isFromCache: Boolean
+)
+
+data class CloudUserSettingsDoc(
+    val autoClosingEnabled: Boolean?,
+    val autoClosingHour: Int?,
+    val autoClosingMinute: Int?,
+    val autoClosingLeftoverMode: String?,
+    val lastClosedDate: String?,
+    val cashierShowOmzet: Boolean?,
+    val cashierShowProfit: Boolean?,
+    val cashierShowExpenses: Boolean?,
+    val isFromCache: Boolean = false
+)
+
+data class CloudDailyClosingRecord(
+    val closingDate: String,
+    val closedAtMillis: Long,
+    val triggerType: String,
+    val leftoverMode: String,
+    val totalTransactions: Int,
+    val totalItemsIn: Int,
+    val totalItemsSold: Int,
+    val totalItemsLeftover: Int,
+    val totalOmzet: Double,
+    val totalSellerShare: Double,
+    val totalAdminProfit: Double,
+    val totalOperatingExpenses: Double,
+    val netProfit: Double,
+    val itemsBreakdown: List<DailyClosingItemRecord>
+)
+
 /**
  * Syncs all Lapak Kita operational & financial data in real time under user-scoped subcollections
  * so up to 2 authorized devices (HP Kasir + HP Owner) stay live-synced via `onSnapshot`
@@ -134,6 +173,9 @@ class FinancialSyncRepository(
 
     private fun settlementsCollection(uid: String): CollectionReference =
         db.collection("users").document(uid).collection("settlements")
+
+    private fun dailyClosingsCollection(uid: String): CollectionReference =
+        db.collection("users").document(uid).collection("daily_closings")
 
     private fun requireMatchingUserId(expectedUid: String? = null): String {
         val activeUid = auth.currentUser?.uid
@@ -346,7 +388,7 @@ class FinancialSyncRepository(
                     "items" to itemMaps,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                docRef.update(updatePayload).await()
+                docRef.set(updatePayload, SetOptions.merge()).await()
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -392,14 +434,15 @@ class FinancialSyncRepository(
                 )
                 docRef.set(createPayload).await()
             } else {
-                docRef.update(
+                docRef.set(
                     mapOf(
                         "title" to expense.title.trim().ifEmpty { "Biaya Operasional" }.take(120),
                         "amount" to expense.amount.coerceAtLeast(0.0),
                         "expenseDateMillis" to expense.expenseDate.coerceAtLeast(0L),
                         "notes" to expense.notes.trim().take(300),
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
             }
             Result.success(Unit)
@@ -480,7 +523,7 @@ class FinancialSyncRepository(
                 )
                 docRef.set(createPayload).await()
             } else {
-                docRef.update(
+                docRef.set(
                     mapOf(
                         "sellerName" to (seller?.name?.trim()?.ifEmpty { "Penyetor" } ?: "Penyetor").take(100),
                         "vendorCode" to (seller?.vendorCode?.trim() ?: "").take(20),
@@ -490,8 +533,156 @@ class FinancialSyncRepository(
                         "notes" to payment.notes.trim().take(300),
                         "status" to safeStatus,
                         "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                    ),
+                    SetOptions.merge()
                 ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: FirebaseFirestoreException) {
+            try {
+                handleFirestoreError(e, OperationType.WRITE, path)
+            } catch (wrapped: IllegalStateException) {
+                Result.failure(wrapped)
+            }
+        } catch (e: Exception) {
+            Log.e("FinancialSyncRepo", "Failed syncing $path", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun syncUserSettingsToFirestore(
+        settings: AppSettings,
+        expectedUid: String? = null
+    ): Result<Unit> {
+        val uid = try {
+            requireMatchingUserId(expectedUid)
+        } catch (e: Exception) {
+            return Result.failure(e)
+        }
+
+        val safeMode = when (settings.autoClosingLeftoverMode.uppercase()) {
+            AutoClosingLeftoverMode.CARRY_OVER -> AutoClosingLeftoverMode.CARRY_OVER
+            else -> AutoClosingLeftoverMode.RESET_ZERO
+        }
+        val safeLastClosed = settings.lastClosedDate.trim().takeIf {
+            it.isEmpty() || it.matches(Regex("^\\d{4}-\\d{2}-\\d{2}$"))
+        }.orEmpty()
+
+        val path = "users/$uid"
+        val docRef = db.collection("users").document(uid)
+        return try {
+            val payload = mapOf(
+                "autoClosingEnabled" to settings.autoClosingEnabled,
+                "autoClosingHour" to settings.autoClosingHour.coerceIn(0, 23),
+                "autoClosingMinute" to settings.autoClosingMinute.coerceIn(0, 59),
+                "autoClosingLeftoverMode" to safeMode,
+                "lastClosedDate" to safeLastClosed,
+                "cashierShowOmzet" to settings.cashierShowOmzet,
+                "cashierShowProfit" to settings.cashierShowProfit,
+                "cashierShowExpenses" to settings.cashierShowExpenses,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.update(payload).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: FirebaseFirestoreException) {
+            try {
+                handleFirestoreError(e, OperationType.UPDATE, path)
+            } catch (wrapped: IllegalStateException) {
+                Result.failure(wrapped)
+            }
+        } catch (e: Exception) {
+            Log.e("FinancialSyncRepo", "Failed syncing settings to $path", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun syncDailyClosingToFirestore(
+        archive: DailyClosingArchive,
+        items: List<DailyClosingItemRecord>,
+        expectedUid: String? = null
+    ): Result<Unit> {
+        val uid = try {
+            requireMatchingUserId(expectedUid)
+        } catch (e: Exception) {
+            return Result.failure(e)
+        }
+
+        val closingDate = archive.closingDate.trim()
+        if (!closingDate.matches(Regex("^\\d{4}-\\d{2}-\\d{2}$"))) {
+            return Result.failure(IllegalArgumentException("Format tanggal tutup buku tidak valid: $closingDate"))
+        }
+
+        val safeTrigger = when (archive.triggerType.uppercase()) {
+            DailyClosingTriggerType.MANUAL -> DailyClosingTriggerType.MANUAL
+            else -> DailyClosingTriggerType.AUTO
+        }
+        val safeMode = when (archive.leftoverMode.uppercase()) {
+            AutoClosingLeftoverMode.CARRY_OVER -> AutoClosingLeftoverMode.CARRY_OVER
+            else -> AutoClosingLeftoverMode.RESET_ZERO
+        }
+
+        val itemMaps = items.take(300).map { rec ->
+            mapOf(
+                "productId" to rec.productId,
+                "productName" to rec.productName.trim().ifEmpty { "Produk" }.take(100),
+                "sellerName" to rec.sellerName.trim().ifEmpty { "Penyetor" }.take(100),
+                "unit" to rec.unit.trim().ifEmpty { "pcs" }.take(20),
+                "qtyIn" to rec.qtyIn.coerceAtLeast(0),
+                "qtySold" to rec.qtySold.coerceAtLeast(0),
+                "qtyLeftover" to rec.qtyLeftover.coerceAtLeast(0),
+                "omzet" to rec.omzet.coerceAtLeast(0.0),
+                "sellerShare" to rec.sellerShare.coerceAtLeast(0.0),
+                "adminProfit" to rec.adminProfit.coerceAtLeast(0.0)
+            )
+        }
+
+        val path = "users/$uid/daily_closings/$closingDate"
+        val docRef = dailyClosingsCollection(uid).document(closingDate)
+        return try {
+            val existing = docRef.get().await()
+            if (!existing.exists()) {
+                val createPayload = mapOf(
+                    "ownerUid" to uid,
+                    "closingDate" to closingDate,
+                    "closedAtMillis" to archive.closedAtMillis.coerceAtLeast(0L),
+                    "triggerType" to safeTrigger,
+                    "leftoverMode" to safeMode,
+                    "totalTransactions" to archive.totalTransactions.coerceAtLeast(0),
+                    "totalItemsIn" to archive.totalItemsIn.coerceAtLeast(0),
+                    "totalItemsSold" to archive.totalItemsSold.coerceAtLeast(0),
+                    "totalItemsLeftover" to archive.totalItemsLeftover.coerceAtLeast(0),
+                    "totalOmzet" to archive.totalOmzet.coerceAtLeast(0.0),
+                    "totalSellerShare" to archive.totalSellerShare.coerceAtLeast(0.0),
+                    "totalAdminProfit" to archive.totalAdminProfit.coerceAtLeast(0.0),
+                    "totalOperatingExpenses" to archive.totalOperatingExpenses.coerceAtLeast(0.0),
+                    "netProfit" to archive.netProfit,
+                    "itemsBreakdown" to itemMaps,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(createPayload).await()
+            } else {
+                val updatePayload = mapOf(
+                    "closedAtMillis" to archive.closedAtMillis.coerceAtLeast(0L),
+                    "triggerType" to safeTrigger,
+                    "leftoverMode" to safeMode,
+                    "totalTransactions" to archive.totalTransactions.coerceAtLeast(0),
+                    "totalItemsIn" to archive.totalItemsIn.coerceAtLeast(0),
+                    "totalItemsSold" to archive.totalItemsSold.coerceAtLeast(0),
+                    "totalItemsLeftover" to archive.totalItemsLeftover.coerceAtLeast(0),
+                    "totalOmzet" to archive.totalOmzet.coerceAtLeast(0.0),
+                    "totalSellerShare" to archive.totalSellerShare.coerceAtLeast(0.0),
+                    "totalAdminProfit" to archive.totalAdminProfit.coerceAtLeast(0.0),
+                    "totalOperatingExpenses" to archive.totalOperatingExpenses.coerceAtLeast(0.0),
+                    "netProfit" to archive.netProfit,
+                    "itemsBreakdown" to itemMaps,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(updatePayload, SetOptions.merge()).await()
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -565,13 +756,16 @@ class FinancialSyncRepository(
 
     // --- REAL-TIME SNAPSHOT LISTENERS (MetadataChanges.INCLUDE) FOR 2-HP SYNC ---
 
-    fun observeVendorsCatalogRealtime(ownerUid: String): Flow<List<CloudVendorCatalogRecord>> {
+    fun observeVendorsCatalogWithMetadata(ownerUid: String): Flow<CloudSnapshotBatch<CloudVendorCatalogRecord>> {
         if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/vendors"
         return vendorsCatalogCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
-                snapshot.documents.mapNotNull { parseVendorCatalog(it) }
+                CloudSnapshotBatch(
+                    items = snapshot.documents.mapNotNull { parseVendorCatalog(it) },
+                    isFromCache = snapshot.metadata.isFromCache
+                )
             }
             .catch { cause ->
                 if (cause is CancellationException && cause.cause == null) throw cause
@@ -580,14 +774,17 @@ class FinancialSyncRepository(
             }
     }
 
-    fun observeTransactionsChronological(ownerUid: String): Flow<List<CloudTransactionRecord>> {
+    fun observeTransactionsWithMetadata(ownerUid: String): Flow<CloudSnapshotBatch<CloudTransactionRecord>> {
         if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/transactions"
         return transactionsCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
-                snapshot.documents.mapNotNull { parseTransaction(it) }
-                    .sortedBy { it.timestampMillis }
+                CloudSnapshotBatch(
+                    items = snapshot.documents.mapNotNull { parseTransaction(it) }
+                        .sortedBy { it.timestampMillis },
+                    isFromCache = snapshot.metadata.isFromCache
+                )
             }
             .catch { cause ->
                 if (cause is CancellationException && cause.cause == null) throw cause
@@ -596,14 +793,17 @@ class FinancialSyncRepository(
             }
     }
 
-    fun observeExpensesRealtime(ownerUid: String): Flow<List<CloudExpenseRecord>> {
+    fun observeExpensesWithMetadata(ownerUid: String): Flow<CloudSnapshotBatch<CloudExpenseRecord>> {
         if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/expenses"
         return expensesCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
-                snapshot.documents.mapNotNull { parseExpense(it) }
-                    .sortedBy { it.expenseDateMillis }
+                CloudSnapshotBatch(
+                    items = snapshot.documents.mapNotNull { parseExpense(it) }
+                        .sortedBy { it.expenseDateMillis },
+                    isFromCache = snapshot.metadata.isFromCache
+                )
             }
             .catch { cause ->
                 if (cause is CancellationException && cause.cause == null) throw cause
@@ -612,14 +812,17 @@ class FinancialSyncRepository(
             }
     }
 
-    fun observeSettlementsRealtime(ownerUid: String): Flow<List<CloudSettlementRecord>> {
+    fun observeSettlementsWithMetadata(ownerUid: String): Flow<CloudSnapshotBatch<CloudSettlementRecord>> {
         if (ownerUid.isBlank()) return emptyFlow()
         val path = "users/$ownerUid/settlements"
         return settlementsCollection(ownerUid)
             .snapshots(MetadataChanges.INCLUDE)
             .map { snapshot ->
-                snapshot.documents.mapNotNull { parseSettlement(it) }
-                    .sortedBy { it.paymentDateMillis }
+                CloudSnapshotBatch(
+                    items = snapshot.documents.mapNotNull { parseSettlement(it) }
+                        .sortedBy { it.paymentDateMillis },
+                    isFromCache = snapshot.metadata.isFromCache
+                )
             }
             .catch { cause ->
                 if (cause is CancellationException && cause.cause == null) throw cause
@@ -627,6 +830,66 @@ class FinancialSyncRepository(
                 handleFirestoreError(rootError, OperationType.LIST, path)
             }
     }
+
+    fun observeDailyClosingsWithMetadata(ownerUid: String): Flow<CloudSnapshotBatch<CloudDailyClosingRecord>> {
+        if (ownerUid.isBlank()) return emptyFlow()
+        val path = "users/$ownerUid/daily_closings"
+        return dailyClosingsCollection(ownerUid)
+            .snapshots(MetadataChanges.INCLUDE)
+            .map { snapshot ->
+                CloudSnapshotBatch(
+                    items = snapshot.documents.mapNotNull { parseDailyClosing(it) }
+                        .sortedByDescending { it.closingDate },
+                    isFromCache = snapshot.metadata.isFromCache
+                )
+            }
+            .catch { cause ->
+                if (cause is CancellationException && cause.cause == null) throw cause
+                val rootError = (cause as? CancellationException)?.cause ?: cause
+                handleFirestoreError(rootError, OperationType.LIST, path)
+            }
+    }
+
+    fun observeUserSettingsWithMetadata(ownerUid: String): Flow<CloudUserSettingsDoc?> {
+        if (ownerUid.isBlank()) return emptyFlow()
+        val path = "users/$ownerUid"
+        return db.collection("users").document(ownerUid)
+            .snapshots(MetadataChanges.INCLUDE)
+            .map { doc ->
+                if (!doc.exists()) {
+                    null
+                } else {
+                    CloudUserSettingsDoc(
+                        autoClosingEnabled = doc.getBoolean("autoClosingEnabled"),
+                        autoClosingHour = (doc.get("autoClosingHour") as? Number)?.toInt(),
+                        autoClosingMinute = (doc.get("autoClosingMinute") as? Number)?.toInt(),
+                        autoClosingLeftoverMode = doc.getString("autoClosingLeftoverMode"),
+                        lastClosedDate = doc.getString("lastClosedDate"),
+                        cashierShowOmzet = doc.getBoolean("cashierShowOmzet"),
+                        cashierShowProfit = doc.getBoolean("cashierShowProfit"),
+                        cashierShowExpenses = doc.getBoolean("cashierShowExpenses"),
+                        isFromCache = doc.metadata.isFromCache
+                    )
+                }
+            }
+            .catch { cause ->
+                if (cause is CancellationException && cause.cause == null) throw cause
+                val rootError = (cause as? CancellationException)?.cause ?: cause
+                handleFirestoreError(rootError, OperationType.GET, path)
+            }
+    }
+
+    fun observeVendorsCatalogRealtime(ownerUid: String): Flow<List<CloudVendorCatalogRecord>> =
+        observeVendorsCatalogWithMetadata(ownerUid).map { it.items }
+
+    fun observeTransactionsChronological(ownerUid: String): Flow<List<CloudTransactionRecord>> =
+        observeTransactionsWithMetadata(ownerUid).map { it.items }
+
+    fun observeExpensesRealtime(ownerUid: String): Flow<List<CloudExpenseRecord>> =
+        observeExpensesWithMetadata(ownerUid).map { it.items }
+
+    fun observeSettlementsRealtime(ownerUid: String): Flow<List<CloudSettlementRecord>> =
+        observeSettlementsWithMetadata(ownerUid).map { it.items }
 
     private fun parseVendorCatalog(doc: DocumentSnapshot): CloudVendorCatalogRecord? {
         val vendorCode = doc.getString("vendorCode")?.trim()?.uppercase().orEmpty()
@@ -752,6 +1015,45 @@ class FinancialSyncRepository(
             paymentMethod = doc.getString("paymentMethod").orEmpty().ifEmpty { "Tunai" },
             notes = doc.getString("notes").orEmpty(),
             status = doc.getString("status").orEmpty().ifEmpty { "SEBAGIAN" }
+        )
+    }
+
+    private fun parseDailyClosing(doc: DocumentSnapshot): CloudDailyClosingRecord? {
+        val closingDate = doc.getString("closingDate")?.trim().orEmpty()
+        if (!closingDate.matches(Regex("^\\d{4}-\\d{2}-\\d{2}$"))) return null
+
+        val rawItems = doc.get("itemsBreakdown") as? List<*> ?: emptyList<Any>()
+        val breakdown = rawItems.mapNotNull { entry ->
+            val m = entry as? Map<*, *> ?: return@mapNotNull null
+            DailyClosingItemRecord(
+                productId = (m["productId"] as? Number)?.toLong() ?: 0L,
+                productName = (m["productName"] as? String)?.trim().orEmpty().ifEmpty { "Produk" },
+                sellerName = (m["sellerName"] as? String)?.trim().orEmpty().ifEmpty { "Penyetor" },
+                unit = (m["unit"] as? String)?.trim().orEmpty().ifEmpty { "pcs" },
+                qtyIn = (m["qtyIn"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0,
+                qtySold = (m["qtySold"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0,
+                qtyLeftover = (m["qtyLeftover"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0,
+                omzet = (m["omzet"] as? Number)?.toDouble()?.coerceAtLeast(0.0) ?: 0.0,
+                sellerShare = (m["sellerShare"] as? Number)?.toDouble()?.coerceAtLeast(0.0) ?: 0.0,
+                adminProfit = (m["adminProfit"] as? Number)?.toDouble()?.coerceAtLeast(0.0) ?: 0.0
+            )
+        }
+
+        return CloudDailyClosingRecord(
+            closingDate = closingDate,
+            closedAtMillis = (doc.get("closedAtMillis") as? Number)?.toLong() ?: System.currentTimeMillis(),
+            triggerType = doc.getString("triggerType").orEmpty().ifEmpty { DailyClosingTriggerType.AUTO },
+            leftoverMode = doc.getString("leftoverMode").orEmpty().ifEmpty { AutoClosingLeftoverMode.RESET_ZERO },
+            totalTransactions = (doc.get("totalTransactions") as? Number)?.toInt() ?: 0,
+            totalItemsIn = (doc.get("totalItemsIn") as? Number)?.toInt() ?: 0,
+            totalItemsSold = (doc.get("totalItemsSold") as? Number)?.toInt() ?: 0,
+            totalItemsLeftover = (doc.get("totalItemsLeftover") as? Number)?.toInt() ?: 0,
+            totalOmzet = (doc.get("totalOmzet") as? Number)?.toDouble() ?: 0.0,
+            totalSellerShare = (doc.get("totalSellerShare") as? Number)?.toDouble() ?: 0.0,
+            totalAdminProfit = (doc.get("totalAdminProfit") as? Number)?.toDouble() ?: 0.0,
+            totalOperatingExpenses = (doc.get("totalOperatingExpenses") as? Number)?.toDouble() ?: 0.0,
+            netProfit = (doc.get("netProfit") as? Number)?.toDouble() ?: 0.0,
+            itemsBreakdown = breakdown
         )
     }
 }

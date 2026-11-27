@@ -172,6 +172,22 @@ interface LapakDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateAppSettings(settings: AppSettings)
 
+    // Daily Closing Archives (Tutup Buku Permanen)
+    @Query("SELECT * FROM daily_closing_archives ORDER BY closingDate DESC")
+    fun getAllDailyClosingArchivesFlow(): Flow<List<DailyClosingArchive>>
+
+    @Query("SELECT * FROM daily_closing_archives ORDER BY closingDate DESC")
+    suspend fun getAllDailyClosingArchivesDirect(): List<DailyClosingArchive>
+
+    @Query("SELECT * FROM daily_closing_archives WHERE closingDate = :closingDate LIMIT 1")
+    suspend fun getDailyClosingArchiveByDate(closingDate: String): DailyClosingArchive?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateDailyClosingArchive(archive: DailyClosingArchive)
+
+    @Query("DELETE FROM daily_closing_archives")
+    suspend fun clearDailyClosingArchives()
+
     // Backup & Restore
     @Query("SELECT * FROM shop_profiles")
     suspend fun getAllShopProfiles(): List<ShopProfile>

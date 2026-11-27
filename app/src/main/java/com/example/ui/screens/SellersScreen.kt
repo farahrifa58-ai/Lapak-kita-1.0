@@ -48,12 +48,7 @@ fun SellersScreen(
     val allProductsWithDetails by viewModel.productsWithDetails.collectAsState()
     val payoutReceiptState by viewModel.lastSellerPaymentReceipt.collectAsState()
     val isSyncingCloud by viewModel.isSyncingCloud.collectAsState()
-
-    // Auto-sync ALL sellers in Admin's list whenever Admin opens the Penyetor tab so legacy docs
-    // (such as LPK-NGL67G / LPK-F356HZ) immediately get fresh sellingPrice, basePrice & commission.
-    LaunchedEffect(Unit) {
-        viewModel.syncAllSellersToWebPortal(notifyOnSuccess = true)
-    }
+    val isOwner by viewModel.isOwner.collectAsState()
 
     var searchQuery by remember { mutableStateOf("") }
     var statusFilter by remember { mutableStateOf("Semua") }
@@ -64,6 +59,7 @@ fun SellersScreen(
     var paymentTargetSellerDetail by remember { mutableStateOf<SellerDetailItem?>(null) }
     var stockDetailTargetSeller by remember { mutableStateOf<SellerDetailItem?>(null) }
     var addStockTargetSellerId by remember { mutableStateOf<Long?>(null) }
+    var editStockTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
     var webLinkTargetSeller by remember { mutableStateOf<Seller?>(null) }
     var showShareAllLinksDialog by remember { mutableStateOf(false) }
     var editTargetSeller by remember { mutableStateOf<Seller?>(null) }
@@ -246,6 +242,7 @@ fun SellersScreen(
                         productsWithStock = sellerProducts,
                         appSettings = appSettings,
                         lang = lang,
+                        isOwner = isOwner,
                         onSetLeave = { leaveTargetSeller = item.seller },
                         onReactivate = {
                             viewModel.reactivateSeller(item.seller.id)
@@ -253,6 +250,7 @@ fun SellersScreen(
                         },
                         onRecordPayment = { paymentTargetSellerDetail = item },
                         onAddStock = { addStockTargetSellerId = item.seller.id },
+                        onEditStock = { prodItem -> editStockTargetProduct = prodItem },
                         onOpenWebLink = { webLinkTargetSeller = item.seller },
                         onViewReceipt = { viewModel.showLatestPaymentReceipt(item) },
                         onViewStock = { stockDetailTargetSeller = item },
@@ -426,7 +424,32 @@ fun SellersScreen(
         )
     }
 
-    // Vendor Web Link Dialog ("Link Web Penyetor")
+    // Admin Full Stock Editor Dialog (increase, decrease, or set exact stock)
+    editStockTargetProduct?.let { prodDetail ->
+        EditStockDialog(
+            productDetail = prodDetail,
+            onConfirm = { newStock, reason ->
+                viewModel.adjustProductStock(
+                    sellerId = prodDetail.seller.id,
+                    productId = prodDetail.product.id,
+                    targetStock = newStock,
+                    reason = reason,
+                    onSuccess = { finalStock ->
+                        editStockTargetProduct = null
+                        Toast.makeText(
+                            context,
+                            "Stok ${prodDetail.product.name} diperbarui menjadi $finalStock ${prodDetail.product.unit}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onError = { err -> Toast.makeText(context, err, Toast.LENGTH_LONG).show() }
+                )
+            },
+            onDismiss = { editStockTargetProduct = null }
+        )
+    }
+
+    // Vendor Web Link Dialog ("Link Web Penyetor") — manual sync only (no auto-write on open)
     webLinkTargetSeller?.let { selectedSeller ->
         // Always read freshest seller row (in case vendorCode/writeToken was just generated)
         val freshSeller = remember(selectedSeller.id, rawSellers) {
@@ -434,20 +457,8 @@ fun SellersScreen(
         }
         val portalUrl = remember(freshSeller, appSettings) { viewModel.buildVendorPortalUrl(freshSeller) }
         val shareText = remember(freshSeller, appSettings, shopProfile) { viewModel.buildVendorPortalShareText(freshSeller) }
-        var syncStatusLabel by remember(freshSeller.id) { mutableStateOf("Menyinkronkan data & token ke cloud...") }
-        var isSyncedOk by remember(freshSeller.id) { mutableStateOf(false) }
-
-        LaunchedEffect(freshSeller.id, freshSeller.vendorCode, freshSeller.writeToken) {
-            syncStatusLabel = "Menyinkronkan data & token ke Web Portal..."
-            viewModel.syncSingleSellerToCloud(freshSeller.id, showSuccessFeedback = true) { ok, msg ->
-                isSyncedOk = ok
-                syncStatusLabel = if (ok) {
-                    "Tersinkron ke Web Portal"
-                } else {
-                    "Gagal sinkron: $msg"
-                }
-            }
-        }
+        var syncStatusLabel by remember(freshSeller.id) { mutableStateOf("Tekan 'Sinkronkan' jika ingin memperbarui data di Web Portal") }
+        var isSyncedOk by remember(freshSeller.id) { mutableStateOf(true) }
 
         VendorWebLinkDialog(
             seller = freshSeller,
@@ -481,26 +492,14 @@ fun SellersScreen(
         )
     }
 
-    // Bulk Share All Active Vendor Links Dialog (Grup WA)
+    // Bulk Share All Active Vendor Links Dialog (Grup WA) — manual sync only (no auto-write on open)
     if (showShareAllLinksDialog) {
         val activeSellerCount = remember(rawSellers) { rawSellers.count { it.status == SellerStatus.AKTIF } }
         val bulkMessageText = remember(rawSellers, appSettings, shopProfile) {
             viewModel.buildAllActiveVendorLinksShareText(rawSellers)
         }
-        var bulkSyncStatus by remember { mutableStateOf("Menyinkronkan semua token penyetor ke Cloud...") }
-        var bulkSyncedOk by remember { mutableStateOf(false) }
-
-        LaunchedEffect(Unit) {
-            bulkSyncStatus = "Menyinkronkan semua token penyetor ke Cloud..."
-            viewModel.syncAllVendorsToCloud { ok, _ ->
-                bulkSyncedOk = ok
-                bulkSyncStatus = if (ok) {
-                    "Semua link & token penyetor aktif tersinkron di Cloud"
-                } else {
-                    "Sebagian belum tersinkron (cek internet lalu tekan Sinkronkan)"
-                }
-            }
-        }
+        var bulkSyncStatus by remember { mutableStateOf("Tekan 'Sinkronkan' jika ingin mengirim pembaruan terbaru ke Web Portal") }
+        var bulkSyncedOk by remember { mutableStateOf(true) }
 
         ShareAllVendorLinksDialog(
             activeSellerCount = activeSellerCount,
@@ -646,6 +645,8 @@ fun SellersScreen(
             sellerDetail = freshSellerDetail,
             productsWithStock = sellerProducts,
             lang = lang,
+            isOwner = isOwner,
+            onEditStock = { prodItem -> editStockTargetProduct = prodItem },
             onEditProduct = { prodItem -> editTargetProduct = prodItem },
             onDeleteProduct = { prodItem -> deleteTargetProduct = prodItem },
             onAddProduct = { addProductTargetSellerId = freshSellerDetail.seller.id },
@@ -706,10 +707,12 @@ fun SellerCard(
     productsWithStock: List<ProductDetailItem>,
     appSettings: AppSettings,
     lang: String,
+    isOwner: Boolean = true,
     onSetLeave: () -> Unit,
     onReactivate: () -> Unit,
     onRecordPayment: () -> Unit,
     onAddStock: () -> Unit,
+    onEditStock: (ProductDetailItem) -> Unit,
     onOpenWebLink: () -> Unit,
     onViewReceipt: () -> Unit,
     onViewStock: () -> Unit,
@@ -730,7 +733,7 @@ fun SellerCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         border = BorderStroke(
             1.dp,
-            if (item.remainingBalance > 0) lapakColors.warningBorder else lapakColors.cardBorder
+            if (isOwner && item.remainingBalance > 0) lapakColors.warningBorder else lapakColors.cardBorder
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -779,13 +782,15 @@ fun SellerCard(
                             )
                         }
                     }
-                    Text(
-                        text = "Tarif Admin: ${AdminFeeCalculator.formatTariffLabel(feeType, feeValue)}" +
-                            if (item.seller.customAdminFeeType != null) " (Khusus)" else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
+                    if (isOwner) {
+                        Text(
+                            text = "Tarif Admin: ${AdminFeeCalculator.formatTariffLabel(feeType, feeValue)}" +
+                                if (item.seller.customAdminFeeType != null) " (Khusus)" else "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -803,11 +808,13 @@ fun SellerCard(
                             )
                         }
                         DropdownMenu(expanded = showOverflowMenu, onDismissRequest = { showOverflowMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Bukti / Struk Setoran") },
-                                leadingIcon = { Icon(Icons.Default.ReceiptLong, contentDescription = null) },
-                                onClick = { showOverflowMenu = false; onViewReceipt() }
-                            )
+                            if (isOwner) {
+                                DropdownMenuItem(
+                                    text = { Text("Bukti / Struk Setoran") },
+                                    leadingIcon = { Icon(Icons.Default.ReceiptLong, contentDescription = null) },
+                                    onClick = { showOverflowMenu = false; onViewReceipt() }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text(if (item.seller.status == SellerStatus.LIBUR) "Aktifkan Penyetor" else "Atur Status Libur") },
                                 leadingIcon = {
@@ -892,40 +899,46 @@ fun SellerCard(
                     Text("Terjual: ${item.totalSoldQty}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
-                Column {
-                    Text("Total Hak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        text = LapakViewModel.formatRupiah(item.totalRights),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text("Dibayar: ${LapakViewModel.formatRupiah(item.totalPaid)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                if (isOwner) {
+                    Column {
+                        Text("Total Hak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = LapakViewModel.formatRupiah(item.totalRights),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text("Dibayar: ${LapakViewModel.formatRupiah(item.totalPaid)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
 
-                val hasUnpaid = item.remainingBalance > 0
-                val sisaBg = if (!hasUnpaid) lapakColors.omzetCardBg else if (item.paymentStatus == "Belum Dibayar") lapakColors.dangerBg else lapakColors.warningBg
-                val sisaText = if (!hasUnpaid) lapakColors.omzetCardAccent else if (item.paymentStatus == "Belum Dibayar") lapakColors.dangerText else lapakColors.warningText
+                    val hasUnpaid = item.remainingBalance > 0
+                    val sisaBg = if (!hasUnpaid) lapakColors.omzetCardBg else if (item.paymentStatus == "Belum Dibayar") lapakColors.dangerBg else lapakColors.warningBg
+                    val sisaText = if (!hasUnpaid) lapakColors.omzetCardAccent else if (item.paymentStatus == "Belum Dibayar") lapakColors.dangerText else lapakColors.warningText
 
-                Column(
-                    horizontalAlignment = Alignment.End,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(sisaBg)
-                        .border(1.dp, sisaText.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 5.dp)
-                ) {
-                    Text("Sisa Setoran", style = MaterialTheme.typography.labelSmall, color = sisaText, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = LapakViewModel.formatRupiah(item.remainingBalance),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = sisaText
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(sisaBg)
+                            .border(1.dp, sisaText.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                    ) {
+                        Text("Sisa Setoran", style = MaterialTheme.typography.labelSmall, color = sisaText, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = LapakViewModel.formatRupiah(item.remainingBalance),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = sisaText
+                        )
+                    }
+                } else {
+                    TextButton(onClick = onViewStock) {
+                        Text("Kelola Stok >", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
 
-            // Expandable inline preview of seller products (shows Harga Jual, Hak Penyetor & Laba Admin)
+            // Expandable inline preview of seller products (hides profit/commission for Kasir)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -937,7 +950,13 @@ fun SellerCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (isExpandedInline) "Sembunyikan Rincian Menu" else "Lihat ${item.products.size} Menu & Bagi Hasil",
+                    text = if (isExpandedInline) {
+                        "Sembunyikan Rincian Menu"
+                    } else if (isOwner) {
+                        "Lihat ${item.products.size} Menu & Bagi Hasil"
+                    } else {
+                        "Lihat ${item.products.size} Menu & Stok"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.SemiBold
@@ -978,10 +997,17 @@ fun SellerCard(
                                             text = prodItem.product.name,
                                             style = MaterialTheme.typography.bodySmall,
                                             fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.onSurface
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 3,
+                                            softWrap = true,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                         Text(
-                                            text = "Jual ${LapakViewModel.formatRupiah(prodItem.product.sellingPrice)} • Hak ${LapakViewModel.formatRupiah(prodItem.product.sellerShare)} • Komisi ${LapakViewModel.formatRupiah(prodItem.product.adminProfitPerUnit)}",
+                                            text = if (isOwner) {
+                                                "Jual ${LapakViewModel.formatRupiah(prodItem.product.sellingPrice)} • Hak ${LapakViewModel.formatRupiah(prodItem.product.sellerShare)} • Komisi ${LapakViewModel.formatRupiah(prodItem.product.adminProfitPerUnit)}"
+                                            } else {
+                                                "Harga Jual ${LapakViewModel.formatRupiah(prodItem.product.sellingPrice)} / ${prodItem.product.unit}"
+                                            },
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -991,16 +1017,29 @@ fun SellerCard(
                                         horizontalArrangement = Arrangement.spacedBy(2.dp)
                                     ) {
                                         Surface(
+                                            onClick = { onEditStock(prodItem) },
                                             color = if (prodItem.currentStock > 0) lapakColors.stockSafeBg else lapakColors.stockEmptyBg,
-                                            shape = RoundedCornerShape(6.dp)
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier.testTag("edit_seller_stock_${prodItem.product.id}")
                                         ) {
-                                            Text(
-                                                text = if (prodItem.currentStock > 0) "${prodItem.currentStock} ${prodItem.product.unit}" else "Habis",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                color = if (prodItem.currentStock > 0) lapakColors.stockSafeText else lapakColors.stockEmptyText,
-                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                                            )
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = if (prodItem.currentStock > 0) "${prodItem.currentStock} ${prodItem.product.unit}" else "Habis",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (prodItem.currentStock > 0) lapakColors.stockSafeText else lapakColors.stockEmptyText
+                                                )
+                                                Spacer(Modifier.width(3.dp))
+                                                Icon(
+                                                    imageVector = Icons.Default.Tune,
+                                                    contentDescription = "Edit Stok ${prodItem.product.name}",
+                                                    tint = if (prodItem.currentStock > 0) lapakColors.stockSafeText else lapakColors.stockEmptyText,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                            }
                                         }
                                         IconButton(
                                             onClick = { onEditProduct(prodItem) },
@@ -1058,31 +1097,33 @@ fun SellerCard(
 
             Spacer(Modifier.height(10.dp))
 
-            // Primary Action Row: "Bayar Setoran" + "Tambah Stok" (full clear Indonesian labels, no abbreviations)
+            // Primary Action Row: "Bayar Setoran" (Owner only) + "Tambah Stok"
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(
-                    onClick = onRecordPayment,
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 42.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (item.remainingBalance > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    )
-                ) {
-                    Icon(Icons.Default.Payments, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        text = "Bayar Setoran",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold
-                    )
+                if (isOwner) {
+                    Button(
+                        onClick = onRecordPayment,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 42.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (item.remainingBalance > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        )
+                    ) {
+                        Icon(Icons.Default.Payments, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = "Bayar Setoran",
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 OutlinedButton(

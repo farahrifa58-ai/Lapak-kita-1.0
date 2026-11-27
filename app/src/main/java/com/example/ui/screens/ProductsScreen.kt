@@ -73,6 +73,7 @@ fun ProductsScreen(
     var showShareDialog by remember { mutableStateOf(false) }
     var showAddProductDialog by remember { mutableStateOf(false) }
     var depositTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
+    var editStockTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
     var editTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
     var deleteTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
 
@@ -389,6 +390,7 @@ fun ProductsScreen(
                                 }
                             },
                             onAddDeposit = { depositTargetProduct = item },
+                            onEditStock = { editStockTargetProduct = item },
                             onEdit = { editTargetProduct = item },
                             onDelete = { deleteTargetProduct = item }
                         )
@@ -525,6 +527,31 @@ fun ProductsScreen(
         )
     }
 
+    // Admin Full Stock Editor Dialog (increase, decrease, or set exact stock)
+    editStockTargetProduct?.let { prodDetail ->
+        EditStockDialog(
+            productDetail = prodDetail,
+            onConfirm = { newStock, reason ->
+                viewModel.adjustProductStock(
+                    sellerId = prodDetail.seller.id,
+                    productId = prodDetail.product.id,
+                    targetStock = newStock,
+                    reason = reason,
+                    onSuccess = { finalStock ->
+                        editStockTargetProduct = null
+                        Toast.makeText(
+                            context,
+                            "Stok ${prodDetail.product.name} diperbarui menjadi $finalStock ${prodDetail.product.unit}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onError = { err -> Toast.makeText(context, err, Toast.LENGTH_LONG).show() }
+                )
+            },
+            onDismiss = { editStockTargetProduct = null }
+        )
+    }
+
     // Edit Product Dialog (shows full share/profit breakdown & auto tariff button)
     editTargetProduct?.let { prodDetail ->
         EditProductDialog(
@@ -562,6 +589,7 @@ private fun CompactEtalaseProductCard(
     qtyInCart: Int,
     onAddToCart: () -> Unit,
     onAddDeposit: () -> Unit,
+    onEditStock: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -591,10 +619,14 @@ private fun CompactEtalaseProductCard(
                 Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
                         text = item.product.name,
-                        style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontSize = 15.sp,
+                            lineHeight = 19.sp
+                        ),
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
+                        maxLines = 3,
+                        softWrap = true,
                         overflow = TextOverflow.Ellipsis
                     )
                     Row(
@@ -626,15 +658,26 @@ private fun CompactEtalaseProductCard(
                     Box(
                         modifier = Modifier
                             .background(stockBg, RoundedCornerShape(8.dp))
+                            .clickable(onClick = onEditStock)
                             .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .testTag("stock_badge_edit_${item.product.id}")
                     ) {
-                        Text(
-                            text = stockLabel,
-                            color = stockText,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = stockLabel,
+                                color = stockText,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Edit Stok",
+                                tint = stockText,
+                                modifier = Modifier.size(11.dp)
+                            )
+                        }
                     }
 
                     Box {
@@ -650,6 +693,11 @@ private fun CompactEtalaseProductCard(
                             )
                         }
                         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Edit / Koreksi Stok") },
+                                leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null) },
+                                onClick = { showMenu = false; onEditStock() }
+                            )
                             DropdownMenuItem(
                                 text = { Text("Tambah Stok") },
                                 leadingIcon = { Icon(Icons.Default.AddBox, contentDescription = null) },

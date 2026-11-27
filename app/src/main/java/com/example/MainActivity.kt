@@ -111,16 +111,33 @@ class MainActivity : ComponentActivity() {
         // One-time startup cleanup: purge legacy global (non-UID-prefixed) Room DB, prefs & files
         licenseStorage.cleanupLegacyGlobalCacheOnce()
 
-        val firestoreDb = FirebaseFirestore.getInstance(appContext.getString(R.string.firestore_database_id)).apply {
+        val primaryDatabaseId = appContext.getString(R.string.firestore_database_id).trim()
+        val firestoreDb = FirebaseFirestore.getInstance(primaryDatabaseId).apply {
             runCatching {
                 firestoreSettings = FirebaseFirestoreSettings.Builder()
                     .setLocalCacheSettings(PersistentCacheSettings.newBuilder().build())
                     .build()
             }
         }
+        val fallbackLicenseDbs = buildList {
+            val legacyDbId = ActivationAuthRepository.LEGACY_LICENSE_DATABASE_ID
+            if (legacyDbId.isNotBlank() && legacyDbId != primaryDatabaseId) {
+                runCatching { FirebaseFirestore.getInstance(legacyDbId) }
+                    .getOrNull()
+                    ?.let { add(it) }
+            }
+            if (primaryDatabaseId != "(default)") {
+                runCatching { FirebaseFirestore.getInstance() }
+                    .getOrNull()
+                    ?.let { add(it) }
+            }
+        }
         val vendorSyncRepository = VendorSyncRepository(firestoreDb)
         val financialSyncRepository = FinancialSyncRepository(firestoreDb)
-        val activationAuthRepository = ActivationAuthRepository(firestoreDb)
+        val activationAuthRepository = ActivationAuthRepository(
+            db = firestoreDb,
+            fallbackDbs = fallbackLicenseDbs
+        )
 
         setContent {
             val context = LocalContext.current
@@ -218,6 +235,7 @@ class MainActivity : ComponentActivity() {
                                     licenseCode = onlineCheck.profile.licenseCode,
                                     deviceId = deviceId,
                                     connectedDevicesCount = onlineCheck.profile.connectedDevicesCount,
+                                    isOwnerDevice = onlineCheck.profile.isOwnerDevice(deviceId),
                                     active = true
                                 )
                                 gateState = AccessGateState.Granted(
@@ -266,6 +284,7 @@ class MainActivity : ComponentActivity() {
                                     licenseCode = onlineCheck.profile.licenseCode,
                                     deviceId = deviceId,
                                     connectedDevicesCount = onlineCheck.profile.connectedDevicesCount,
+                                    isOwnerDevice = onlineCheck.profile.isOwnerDevice(deviceId),
                                     active = true
                                 )
                                 authError = null
@@ -505,6 +524,7 @@ private fun AuthenticatedAppShell(
     val currentScreen by viewModel.currentScreen.collectAsState()
     val lang by viewModel.currentLanguage.collectAsState()
     val cart by viewModel.cart.collectAsState()
+    val isOwner by viewModel.isOwner.collectAsState()
     val webSyncNotification by viewModel.webSyncNotification.collectAsState()
     val webPortalSyncFeedback by viewModel.webPortalSyncFeedback.collectAsState()
 
@@ -593,7 +613,13 @@ private fun AuthenticatedAppShell(
                         AppScreen.CASHIER -> CashierScreen(viewModel = viewModel)
                         AppScreen.HISTORY -> TransactionsScreen(viewModel = viewModel)
                         AppScreen.SELLERS -> SellersScreen(viewModel = viewModel)
-                        AppScreen.FINANCIAL_REPORT -> FinancialReportScreen(viewModel = viewModel)
+                        AppScreen.FINANCIAL_REPORT -> {
+                            if (isOwner) {
+                                FinancialReportScreen(viewModel = viewModel)
+                            } else {
+                                DashboardScreen(viewModel = viewModel)
+                            }
+                        }
                         AppScreen.SETTINGS -> SettingsScreen(
                             viewModel = viewModel,
                             activeLicenseCode = activeLicenseCode,

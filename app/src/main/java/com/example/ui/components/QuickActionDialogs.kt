@@ -171,7 +171,8 @@ fun QuickDepositDialog(
                                     text = label,
                                     modifier = Modifier.weight(1f),
                                     textAlign = TextAlign.Start,
-                                    maxLines = 1,
+                                    maxLines = 2,
+                                    softWrap = true,
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Icon(Icons.Default.ArrowDropDown, contentDescription = null)
@@ -634,3 +635,264 @@ fun VendorWebLinkDialog(
         }
     }
 }
+
+/**
+ * Full Admin Stock Editor dialog: lets Admin freely increase (+), decrease (-),
+ * or set an exact stock value (including 0) whenever a vendor makes an input mistake
+ * on the Web Portal. Explicitly syncs to cloud only when Admin taps "Simpan Stok".
+ */
+@Composable
+fun EditStockDialog(
+    productDetail: ProductDetailItem,
+    onConfirm: (newStock: Int, reason: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val lapakColors = LocalLapakColors.current
+    val currentStock = productDetail.currentStock.coerceAtLeast(0)
+    var stockText by remember(productDetail.product.id, currentStock) {
+        mutableStateOf(currentStock.toString())
+    }
+    var reason by remember(productDetail.product.id) {
+        mutableStateOf("Koreksi stok admin")
+    }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    val parsedTarget = stockText.toIntOrNull()
+    val delta = (parsedTarget ?: currentStock) - currentStock
+
+    fun applyTarget(value: Int) {
+        val clamped = value.coerceAtLeast(0)
+        stockText = clamped.toString()
+        error = null
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "Edit / Koreksi Stok",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                // Product & Seller info card (wraps cleanly for long menu names)
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = productDetail.product.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 3,
+                            softWrap = true,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "${productDetail.seller.name} • Stok saat ini: $currentStock ${productDetail.product.unit}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Text(
+                    text = "Atur Jumlah Stok Baru (${productDetail.product.unit}):",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+
+                // Stepper Row: [-] [Input] [+]
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilledTonalIconButton(
+                        onClick = { applyTarget((parsedTarget ?: currentStock) - 1) },
+                        enabled = (parsedTarget ?: currentStock) > 0,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("edit_stock_minus_btn")
+                    ) {
+                        Icon(Icons.Default.Remove, contentDescription = "Kurangi 1 Stok")
+                    }
+
+                    OutlinedTextField(
+                        value = stockText,
+                        onValueChange = { raw ->
+                            stockText = raw.filter { it.isDigit() }.take(6)
+                            error = null
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        textStyle = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            textAlign = TextAlign.Center
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("edit_stock_input")
+                    )
+
+                    FilledTonalIconButton(
+                        onClick = { applyTarget((parsedTarget ?: currentStock) + 1) },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("edit_stock_plus_btn")
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Tambah 1 Stok")
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                // Quick Decrease & Increase Chips
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(-10, -5, -1).forEach { diff ->
+                        AssistChip(
+                            onClick = { applyTarget((parsedTarget ?: currentStock) + diff) },
+                            label = {
+                                Text(
+                                    text = "$diff",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    AssistChip(
+                        onClick = { applyTarget(0) },
+                        label = {
+                            Text(
+                                text = "Set 0",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        modifier = Modifier.weight(1.1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(1, 5, 10, 20).forEach { diff ->
+                        AssistChip(
+                            onClick = { applyTarget((parsedTarget ?: currentStock) + diff) },
+                            label = {
+                                Text(
+                                    text = "+$diff",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                // Live Preview Strip: Old -> New & Delta
+                val deltaText = when {
+                    parsedTarget == null -> "Masukkan angka stok yang valid"
+                    delta > 0 -> "Perubahan: +$delta ${productDetail.product.unit} ($currentStock -> $parsedTarget)"
+                    delta < 0 -> "Perubahan: $delta ${productDetail.product.unit} ($currentStock -> $parsedTarget)"
+                    else -> "Stok tetap ($currentStock ${productDetail.product.unit})"
+                }
+                val previewBg = when {
+                    parsedTarget == null -> lapakColors.dangerBg
+                    delta > 0 -> lapakColors.stockSafeBg
+                    delta < 0 -> lapakColors.warningBg
+                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                }
+                val previewFg = when {
+                    parsedTarget == null -> lapakColors.dangerText
+                    delta > 0 -> lapakColors.stockSafeText
+                    delta < 0 -> lapakColors.warningText
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = previewBg,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = deltaText,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = previewFg,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedTextField(
+                    value = reason,
+                    onValueChange = { reason = it },
+                    label = { Text("Alasan Koreksi (Opsional)") },
+                    placeholder = { Text("Contoh: Salah input stok di web penyetor") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                if (error != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = error!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val target = stockText.toIntOrNull()
+                    if (target == null || target < 0) {
+                        error = "Masukkan jumlah stok valid (minimal 0)"
+                    } else {
+                        onConfirm(target, reason.trim())
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                modifier = Modifier.testTag("confirm_edit_stock_button")
+            ) {
+                Text("Simpan Stok", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Batal")
+            }
+        }
+    )
+}
+

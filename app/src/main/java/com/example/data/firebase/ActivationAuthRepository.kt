@@ -26,6 +26,16 @@ data class UserProfileDoc(
 ) {
     val connectedDevicesCount: Int
         get() = registeredDeviceIds.distinct().size
+
+    /**
+     * Device 1 (first registered device) is the Owner with full financial & operational visibility.
+     * Device 2 (any secondary device) is Kasir / Karyawan with financial metrics hidden.
+     */
+    fun isOwnerDevice(deviceId: String): Boolean {
+        val clean = deviceId.trim()
+        if (registeredDeviceIds.isEmpty() || clean.isBlank()) return true
+        return registeredDeviceIds.first() == clean
+    }
 }
 
 data class DeviceAutoRestoreHint(
@@ -76,11 +86,101 @@ private data class ClaimedActivationCodeMatch(
  * - Enforces Multi-Device Lock (up to 2 devices via `registeredDeviceIds` array).
  */
 class ActivationAuthRepository(
-    private val db: FirebaseFirestore
+    private val db: FirebaseFirestore,
+    private val fallbackDbs: List<FirebaseFirestore> = emptyList()
 ) {
+    private val allCandidateDbs: List<FirebaseFirestore> =
+        (listOf(db) + fallbackDbs).distinctBy { System.identityHashCode(it) }
     private val activationCodesCollection = db.collection("activation_codes")
     private val usersCollection = db.collection("users")
     private val deviceRegistryCollection = db.collection("device_registry")
+
+    private data class ActivationCodeLookupResult(
+        val sourceDb: FirebaseFirestore,
+        val snapshot: DocumentSnapshot
+    )
+
+    private suspend fun findActivationCodeAcrossDbs(
+        code: String
+    ): Pair<ActivationCodeLookupResult?, FirebaseFirestoreException?> {
+        var lastNetworkError: FirebaseFirestoreException? = null
+        for (candidateDb in allCandidateDbs) {
+            try {
+                val snap = candidateDb.collection("activation_codes")
+                    .document(code)
+                    .get(Source.SERVER)
+                    .await()
+                if (snap.exists()) {
+                    return ActivationCodeLookupResult(candidateDb, snap) to null
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: FirebaseFirestoreException) {
+                Log.w(TAG, "Activation code lookup warning for $code on DB: ${e.code} (${e.message})")
+                if (e.code == FirebaseFirestoreException.Code.UNAVAILABLE ||
+                    e.code == FirebaseFirestoreException.Code.DEADLINE_EXCEEDED
+                ) {
+                    lastNetworkError = e
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Activation code lookup skipped on fallback DB: ${e.message}")
+            }
+        }
+        return null to lastNetworkError
+    }
+
+    private suspend fun claimCodeOnSourceDb(
+        sourceDb: FirebaseFirestore,
+        codeRef: DocumentReference,
+        uid: String,
+        cleanEmail: String,
+        cleanBusinessName: String,
+        cleanDeviceId: String,
+        initialDevices: List<String>
+    ) {
+        val fullPayload = mapOf(
+            "status" to "used",
+            "usedByUid" to uid,
+            "usedByEmail" to cleanEmail,
+            "usedByBusinessName" to cleanBusinessName,
+            "registeredDeviceId" to cleanDeviceId,
+            "registeredDeviceIds" to initialDevices,
+            "usedAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            codeRef.update(fullPayload).await()
+        } catch (e: FirebaseFirestoreException) {
+            if (sourceDb === db || e.code != FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                throw e
+            }
+            // Retry with legacy single-device payloads in case the older License Admin DB rules
+            // do not yet permit registeredDeviceIds or updatedAt on claim.
+            val legacyWithUpdatedAt = mapOf(
+                "status" to "used",
+                "usedByUid" to uid,
+                "usedByEmail" to cleanEmail,
+                "usedByBusinessName" to cleanBusinessName,
+                "registeredDeviceId" to cleanDeviceId,
+                "usedAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            try {
+                codeRef.update(legacyWithUpdatedAt).await()
+            } catch (e2: FirebaseFirestoreException) {
+                if (e2.code != FirebaseFirestoreException.Code.PERMISSION_DENIED) throw e2
+                val legacyMinimal = mapOf(
+                    "status" to "used",
+                    "usedByUid" to uid,
+                    "usedByEmail" to cleanEmail,
+                    "usedByBusinessName" to cleanBusinessName,
+                    "registeredDeviceId" to cleanDeviceId,
+                    "usedAt" to FieldValue.serverTimestamp()
+                )
+                codeRef.update(legacyMinimal).await()
+            }
+        }
+    }
 
     fun normalizeCode(raw: String): String =
         raw.trim().uppercase().replace(Regex("[^A-Z0-9_\\-]"), "")
@@ -177,15 +277,21 @@ class ActivationAuthRepository(
         }
 
         return try {
-            val snapshot = activationCodesCollection.document(code).get(Source.SERVER).await()
-            if (!snapshot.exists()) {
+            val (found, networkErr) = findActivationCodeAcrossDbs(code)
+            if (found == null) {
+                if (networkErr != null) {
+                    return CodeAvailabilityResult.NetworkError(
+                        "Tidak dapat terhubung ke server. Periksa koneksi internet Anda."
+                    )
+                }
                 return CodeAvailabilityResult.InvalidOrUsed(
                     "Kode aktivasi $code tidak ditemukan di server saat ini. Pastikan penulisan benar atau buat kode baru di License Admin."
                 )
             }
 
+            val snapshot = found.snapshot
             val status = snapshot.getString("status")?.trim()?.lowercase().orEmpty()
-            if (status == "available") {
+            if (status == "available" || status == "unused") {
                 return CodeAvailabilityResult.Available(normalizedCode = code)
             }
 
@@ -243,22 +349,34 @@ class ActivationAuthRepository(
             return Result.failure(IllegalArgumentException("Kode aktivasi tidak valid atau sudah pernah digunakan."))
         }
 
-        val codeRef = activationCodesCollection.document(code)
         val userRef = usersCollection.document(uid)
         val deviceRef = deviceRegistryCollection.document(cleanDeviceId)
 
         return try {
-            val codeSnap = codeRef.get(Source.SERVER).await()
+            val (foundCode, networkErr) = findActivationCodeAcrossDbs(code)
+            if (foundCode == null) {
+                if (networkErr != null) {
+                    return Result.failure(
+                        IllegalStateException("Koneksi internet terputus saat memeriksa kode aktivasi. Coba lagi.")
+                    )
+                }
+                return Result.failure(
+                    IllegalStateException("Kode aktivasi $code tidak ditemukan di server saat ini.")
+                )
+            }
+
+            val sourceDb = foundCode.sourceDb
+            val codeSnap = foundCode.snapshot
+            val codeRef = sourceDb.collection("activation_codes").document(code)
+
             val status = codeSnap.getString("status")?.trim()?.lowercase().orEmpty()
-            val isAvailable = codeSnap.exists() && status == "available"
+            val isAvailable = codeSnap.exists() && (status == "available" || status == "unused")
             val isOwnedUsedCode = codeSnap.exists() &&
                 (status == "used" || status == "active") &&
                 isCodeOwnedByUser(codeSnap, uid, cleanEmail)
 
             if (!isAvailable && !isOwnedUsedCode) {
                 val reason = when {
-                    !codeSnap.exists() ->
-                        "Kode aktivasi $code tidak ditemukan di server saat ini."
                     status == "used" || status == "active" ->
                         "Kode aktivasi $code sudah terdaftar pada akun Google lain."
                     else ->
@@ -267,18 +385,27 @@ class ActivationAuthRepository(
                 return Result.failure(IllegalStateException(reason))
             }
 
-            // Check if this Google account already has a users/{uid} doc
+            // Check if this Google account already has a users/{uid} doc in primary DB (and legacy DB if different)
             val existingUserSnap = userRef.get(Source.SERVER).await()
+            val existingSourceUserSnap = if (sourceDb !== db) {
+                runCatching { sourceDb.collection("users").document(uid).get(Source.SERVER).await() }.getOrNull()
+            } else {
+                null
+            }
 
             // Case 1: Code is already "used" by THIS exact Google account -> restore & reactivate seamlessly!
             if (isOwnedUsedCode) {
                 val restoredBiz = codeSnap.getString("usedByBusinessName")?.trim().orEmpty()
                     .ifBlank { existingUserSnap.getString("businessName")?.trim().orEmpty() }
+                    .ifBlank { existingSourceUserSnap?.getString("businessName")?.trim().orEmpty() }
                     .ifBlank { cleanBusinessName }
                 val mergedDevices = linkedSetOf<String>().apply {
                     addAll(extractRegisteredDeviceIds(codeSnap))
                     if (existingUserSnap.exists()) {
                         addAll(extractRegisteredDeviceIds(existingUserSnap))
+                    }
+                    if (existingSourceUserSnap != null && existingSourceUserSnap.exists()) {
+                        addAll(extractRegisteredDeviceIds(existingSourceUserSnap))
                     }
                 }.toList()
 
@@ -303,6 +430,19 @@ class ActivationAuthRepository(
                     uid = uid,
                     updatedDevices = finalDevices
                 )
+                if (sourceDb !== db) {
+                    runCatching {
+                        restoreOrUpdateUserProfile(
+                            userRef = sourceDb.collection("users").document(uid),
+                            existingUserSnap = existingSourceUserSnap,
+                            uid = uid,
+                            email = cleanEmail,
+                            businessName = restoredBiz,
+                            licenseCode = code,
+                            devices = finalDevices
+                        )
+                    }
+                }
                 runCatching {
                     syncDeviceRegistry(deviceRef, uid, cleanEmail, restoredBiz, code)
                 }
@@ -362,36 +502,70 @@ class ActivationAuthRepository(
             // Case 3: Fresh first-time activation with an "available" code
             val initialDevices = listOf(cleanDeviceId)
 
-            val batch = db.batch()
-            batch.update(
-                codeRef,
-                mapOf(
-                    "status" to "used",
-                    "usedByUid" to uid,
-                    "usedByEmail" to cleanEmail,
-                    "usedByBusinessName" to cleanBusinessName,
-                    "registeredDeviceId" to cleanDeviceId,
-                    "registeredDeviceIds" to initialDevices,
-                    "usedAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
+            if (sourceDb === db) {
+                val batch = db.batch()
+                batch.update(
+                    codeRef,
+                    mapOf(
+                        "status" to "used",
+                        "usedByUid" to uid,
+                        "usedByEmail" to cleanEmail,
+                        "usedByBusinessName" to cleanBusinessName,
+                        "registeredDeviceId" to cleanDeviceId,
+                        "registeredDeviceIds" to initialDevices,
+                        "usedAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
                 )
-            )
-            batch.set(
-                userRef,
-                mapOf(
-                    "userId" to uid,
-                    "email" to cleanEmail,
-                    "businessName" to cleanBusinessName,
-                    "licenseCode" to code,
-                    "registeredDeviceId" to cleanDeviceId,
-                    "registeredDeviceIds" to initialDevices,
-                    "active" to true,
-                    "isActivated" to true,
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
+                batch.set(
+                    userRef,
+                    mapOf(
+                        "userId" to uid,
+                        "email" to cleanEmail,
+                        "businessName" to cleanBusinessName,
+                        "licenseCode" to code,
+                        "registeredDeviceId" to cleanDeviceId,
+                        "registeredDeviceIds" to initialDevices,
+                        "active" to true,
+                        "isActivated" to true,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
                 )
-            )
-            batch.commit().await()
+                batch.commit().await()
+            } else {
+                // Code lives in the License Admin / legacy Firestore database -> claim it there first,
+                // then provision users/{uid} in primaryDb and mirror best-effort to sourceDb.
+                claimCodeOnSourceDb(
+                    sourceDb = sourceDb,
+                    codeRef = codeRef,
+                    uid = uid,
+                    cleanEmail = cleanEmail,
+                    cleanBusinessName = cleanBusinessName,
+                    cleanDeviceId = cleanDeviceId,
+                    initialDevices = initialDevices
+                )
+                restoreOrUpdateUserProfile(
+                    userRef = userRef,
+                    existingUserSnap = existingUserSnap,
+                    uid = uid,
+                    email = cleanEmail,
+                    businessName = cleanBusinessName,
+                    licenseCode = code,
+                    devices = initialDevices
+                )
+                runCatching {
+                    restoreOrUpdateUserProfile(
+                        userRef = sourceDb.collection("users").document(uid),
+                        existingUserSnap = existingSourceUserSnap,
+                        uid = uid,
+                        email = cleanEmail,
+                        businessName = cleanBusinessName,
+                        licenseCode = code,
+                        devices = initialDevices
+                    )
+                }
+            }
 
             runCatching {
                 syncDeviceRegistry(deviceRef, uid, cleanEmail, cleanBusinessName, code)
@@ -459,50 +633,55 @@ class ActivationAuthRepository(
      */
     private suspend fun findClaimedActivationCodeForUser(
         uid: String,
-        email: String
+        email: String,
+        targetDb: FirebaseFirestore? = null
     ): ClaimedActivationCodeMatch? {
         val cleanUid = uid.trim()
         val cleanEmail = email.trim()
+        val dbsToSearch = if (targetDb != null) listOf(targetDb) else allCandidateDbs
 
-        // 1. Primary lookup by usedByUid
-        if (cleanUid.isNotEmpty()) {
-            val byUidSnap = runCatching {
-                activationCodesCollection
-                    .whereEqualTo("usedByUid", cleanUid)
-                    .limit(5)
-                    .get(Source.SERVER)
-                    .await()
-            }.onFailure { err ->
-                Log.w(TAG, "Query activation_codes by usedByUid skipped: ${err.message}")
-            }.getOrNull()
-
-            val matchedDoc = byUidSnap?.documents?.firstOrNull { doc ->
-                doc.getString("status")?.trim()?.lowercase() == "used"
-            }
-            if (matchedDoc != null) {
-                return matchedDoc.toClaimedMatch()
-            }
-        }
-
-        // 2. Secondary lookup by usedByEmail (exact & lowercase)
-        if (cleanEmail.isNotEmpty()) {
-            val emailCandidates = linkedSetOf(cleanEmail, cleanEmail.lowercase())
-            for (candidateEmail in emailCandidates) {
-                val byEmailSnap = runCatching {
-                    activationCodesCollection
-                        .whereEqualTo("usedByEmail", candidateEmail)
+        for (candidateDb in dbsToSearch) {
+            val codesCol = candidateDb.collection("activation_codes")
+            // 1. Primary lookup by usedByUid
+            if (cleanUid.isNotEmpty()) {
+                val byUidSnap = runCatching {
+                    codesCol
+                        .whereEqualTo("usedByUid", cleanUid)
                         .limit(5)
                         .get(Source.SERVER)
                         .await()
                 }.onFailure { err ->
-                    Log.w(TAG, "Query activation_codes by usedByEmail skipped: ${err.message}")
+                    Log.w(TAG, "Query activation_codes by usedByUid skipped: ${err.message}")
                 }.getOrNull()
 
-                val matchedDoc = byEmailSnap?.documents?.firstOrNull { doc ->
-                    doc.getString("status")?.trim()?.lowercase() == "used"
+                val matchedDoc = byUidSnap?.documents?.firstOrNull { doc ->
+                    doc.getString("status")?.trim()?.lowercase() in setOf("used", "active")
                 }
                 if (matchedDoc != null) {
                     return matchedDoc.toClaimedMatch()
+                }
+            }
+
+            // 2. Secondary lookup by usedByEmail (exact & lowercase)
+            if (cleanEmail.isNotEmpty()) {
+                val emailCandidates = linkedSetOf(cleanEmail, cleanEmail.lowercase())
+                for (candidateEmail in emailCandidates) {
+                    val byEmailSnap = runCatching {
+                        codesCol
+                            .whereEqualTo("usedByEmail", candidateEmail)
+                            .limit(5)
+                            .get(Source.SERVER)
+                            .await()
+                    }.onFailure { err ->
+                        Log.w(TAG, "Query activation_codes by usedByEmail skipped: ${err.message}")
+                    }.getOrNull()
+
+                    val matchedDoc = byEmailSnap?.documents?.firstOrNull { doc ->
+                        doc.getString("status")?.trim()?.lowercase() in setOf("used", "active")
+                    }
+                    if (matchedDoc != null) {
+                        return matchedDoc.toClaimedMatch()
+                    }
                 }
             }
         }
@@ -850,6 +1029,66 @@ class ActivationAuthRepository(
                 )
             }
 
+            // Step 2d: Check fallback/legacy License Admin Firestore DBs for existing users/{uid}
+            // so accounts already activated on the original Lapak Kita DB enter seamlessly without re-entering a code.
+            for (fallbackDb in fallbackDbs) {
+                val legacySnap = runCatching {
+                    fallbackDb.collection("users").document(uid).get(Source.SERVER).await()
+                }.getOrNull()
+                if (legacySnap != null && legacySnap.exists()) {
+                    val legacyActive = legacySnap.getBoolean("active")
+                    val legacyIsActivated = legacySnap.getBoolean("isActivated")
+                    if (legacyActive == false && legacyIsActivated != true) {
+                        return LoginDeviceCheckResult.InactiveAccount(
+                            "Akun Anda saat ini tidak aktif. Silakan hubungi admin Lapak Kita."
+                        )
+                    }
+                    if (isUserDocMarkedActive(legacySnap)) {
+                        val legacyDevices = extractRegisteredDeviceIds(legacySnap)
+                        val finalDevices = when {
+                            cleanDeviceId in legacyDevices -> legacyDevices.take(MAX_REGISTERED_DEVICES)
+                            legacyDevices.size < MAX_REGISTERED_DEVICES -> (legacyDevices + cleanDeviceId).distinct()
+                            else -> return LoginDeviceCheckResult.BlockedOtherDevice(MAX_DEVICES_LOCK_MESSAGE)
+                        }
+                        val restoredCode = legacySnap.getString("licenseCode")?.trim()?.uppercase().orEmpty()
+                            .ifBlank { "RESTORED-ACTIVE" }
+                        val restoredBiz = legacySnap.getString("businessName")?.trim().orEmpty()
+                            .ifBlank { "Lapak Kita" }
+                        val restoredEmail = cleanEmail
+                            .ifBlank { legacySnap.getString("email")?.trim().orEmpty() }
+                            .ifBlank { "$uid@lapakkita.local" }
+
+                        runCatching {
+                            restoreOrUpdateUserProfile(
+                                userRef = userRef,
+                                existingUserSnap = snap.takeIf { it.exists() },
+                                uid = uid,
+                                email = restoredEmail,
+                                businessName = restoredBiz,
+                                licenseCode = restoredCode,
+                                devices = finalDevices
+                            )
+                        }
+                        syncActivationCodeDevices(restoredCode, finalDevices)
+                        runCatching {
+                            syncDeviceRegistry(deviceRef, uid, restoredEmail, restoredBiz, restoredCode)
+                        }
+                        return LoginDeviceCheckResult.Allowed(
+                            profile = UserProfileDoc(
+                                userId = uid,
+                                email = restoredEmail,
+                                businessName = restoredBiz,
+                                licenseCode = restoredCode,
+                                registeredDeviceId = finalDevices.firstOrNull().orEmpty(),
+                                registeredDeviceIds = finalDevices,
+                                active = true
+                            ),
+                            wasRebound = cleanDeviceId !in legacyDevices
+                        )
+                    }
+                }
+            }
+
             // Step 3: Neither users/{uid} nor activation_codes nor sub-data nor device_registry found -> new account
             LoginDeviceCheckResult.NotRegistered
         } catch (e: CancellationException) {
@@ -872,8 +1111,11 @@ class ActivationAuthRepository(
     private suspend fun syncActivationCodeDevices(licenseCode: String, updatedDevices: List<String>) {
         val code = normalizeCode(licenseCode)
         if (code.length < 4 || code == "RESTORED-ACTIVE" || updatedDevices.isEmpty()) return
+        val (found, _) = findActivationCodeAcrossDbs(code)
+        val targetRef = found?.sourceDb?.collection("activation_codes")?.document(code)
+            ?: activationCodesCollection.document(code)
         runCatching {
-            activationCodesCollection.document(code).update(
+            targetRef.update(
                 mapOf(
                     "registeredDeviceId" to updatedDevices.first(),
                     "registeredDeviceIds" to updatedDevices,
@@ -886,35 +1128,40 @@ class ActivationAuthRepository(
     }
 
     /**
-     * Checks `device_registry/{currentDeviceId}` when opening the app without a local session
-     * (e.g., after reinstalling on the exact same phone) to detect an already-registered account.
+     * Checks `device_registry/{currentDeviceId}` across primary and fallback DBs when opening the app
+     * without a local session (e.g., after reinstalling on the exact same phone).
      */
     suspend fun lookupDeviceRegistration(currentDeviceId: String): DeviceAutoRestoreHint? {
         if (currentDeviceId.length < 6) return null
-        return try {
-            val snap = deviceRegistryCollection.document(currentDeviceId).get(Source.SERVER).await()
-            if (!snap.exists()) return null
-            val active = snap.getBoolean("active") ?: false
-            if (!active) return null
-            val ownerUid = snap.getString("ownerUid")?.trim().orEmpty()
-            val emailHint = snap.getString("emailHint")?.trim().orEmpty()
-            val businessName = snap.getString("businessName")?.trim().orEmpty()
-            val licenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty()
-            if (ownerUid.isBlank() || emailHint.isBlank()) return null
+        for (candidateDb in allCandidateDbs) {
+            try {
+                val snap = candidateDb.collection("device_registry")
+                    .document(currentDeviceId)
+                    .get(Source.SERVER)
+                    .await()
+                if (!snap.exists()) continue
+                val active = snap.getBoolean("active") ?: false
+                if (!active) continue
+                val ownerUid = snap.getString("ownerUid")?.trim().orEmpty()
+                val emailHint = snap.getString("emailHint")?.trim().orEmpty()
+                val businessName = snap.getString("businessName")?.trim().orEmpty()
+                val licenseCode = snap.getString("licenseCode")?.trim()?.uppercase().orEmpty()
+                if (ownerUid.isBlank() || emailHint.isBlank()) continue
 
-            DeviceAutoRestoreHint(
-                ownerUid = ownerUid,
-                emailHint = emailHint,
-                businessName = businessName,
-                licenseCode = licenseCode,
-                active = true
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.d(TAG, "Device auto-restore lookup skipped: ${e.message}")
-            null
+                return DeviceAutoRestoreHint(
+                    ownerUid = ownerUid,
+                    emailHint = emailHint,
+                    businessName = businessName,
+                    licenseCode = licenseCode,
+                    active = true
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.d(TAG, "Device auto-restore lookup skipped on DB: ${e.message}")
+            }
         }
+        return null
     }
 
     private suspend fun syncDeviceRegistry(
@@ -953,6 +1200,7 @@ class ActivationAuthRepository(
 
     companion object {
         private const val TAG = "ActivationAuthRepo"
+        const val LEGACY_LICENSE_DATABASE_ID = "ai-studio-android-lapakkit-7600eb97-cc5e-45ea-a204-647022c41df2"
         const val MAX_REGISTERED_DEVICES = 2
         const val MAX_DEVICES_LOCK_MESSAGE =
             "Batas maksimal 2 perangkat telah tercapai untuk akun ini. Hubungi admin jika ingin mereset perangkat."

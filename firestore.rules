@@ -131,7 +131,34 @@ service cloud.firestore {
              (data.registeredDeviceId == '' || isValidDeviceId(data.registeredDeviceId)) &&
              (!('registeredDeviceIds' in data) || isValidDeviceIdList(data.registeredDeviceIds)) &&
              data.active is bool &&
-             (!('isActivated' in data) || data.isActivated is bool);
+             (!('isActivated' in data) || data.isActivated is bool) &&
+             (!('autoClosingEnabled' in data) || data.autoClosingEnabled is bool) &&
+             (!('autoClosingHour' in data) || (data.autoClosingHour is int && data.autoClosingHour >= 0 && data.autoClosingHour <= 23)) &&
+             (!('autoClosingMinute' in data) || (data.autoClosingMinute is int && data.autoClosingMinute >= 0 && data.autoClosingMinute <= 59)) &&
+             (!('autoClosingLeftoverMode' in data) || (data.autoClosingLeftoverMode is string && data.autoClosingLeftoverMode in ['RESET_ZERO', 'CARRY_OVER'])) &&
+             (!('lastClosedDate' in data) || (data.lastClosedDate is string && (data.lastClosedDate == '' || data.lastClosedDate.matches('^\\d{4}-\\d{2}-\\d{2}$')))) &&
+             (!('cashierShowOmzet' in data) || data.cashierShowOmzet is bool) &&
+             (!('cashierShowProfit' in data) || data.cashierShowProfit is bool) &&
+             (!('cashierShowExpenses' in data) || data.cashierShowExpenses is bool);
+    }
+
+    function isValidDailyClosing(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             data.closingDate is string && data.closingDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             data.closedAtMillis is int && data.closedAtMillis >= 0 &&
+             data.triggerType is string && data.triggerType in ['AUTO', 'MANUAL'] &&
+             data.leftoverMode is string && data.leftoverMode in ['RESET_ZERO', 'CARRY_OVER'] &&
+             data.totalTransactions is int && data.totalTransactions >= 0 &&
+             data.totalItemsIn is int && data.totalItemsIn >= 0 &&
+             data.totalItemsSold is int && data.totalItemsSold >= 0 &&
+             data.totalItemsLeftover is int && data.totalItemsLeftover >= 0 &&
+             data.totalOmzet is number && data.totalOmzet >= 0 &&
+             data.totalSellerShare is number && data.totalSellerShare >= 0 &&
+             data.totalAdminProfit is number && data.totalAdminProfit >= 0 &&
+             data.totalOperatingExpenses is number && data.totalOperatingExpenses >= 0 &&
+             data.netProfit is number &&
+             data.itemsBreakdown is list && data.itemsBreakdown.size() <= 300 &&
+             (data.itemsBreakdown.size() == 0 || data.itemsBreakdown[0] is map);
     }
 
     function isValidDeviceRegistration(data) {
@@ -436,11 +463,15 @@ service cloud.firestore {
                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                         incoming().diff(existing()).affectedKeys().hasOnly([
                           'userId', 'businessName', 'email', 'licenseCode',
-                          'registeredDeviceId', 'registeredDeviceIds', 'active', 'isActivated', 'updatedAt'
+                          'registeredDeviceId', 'registeredDeviceIds', 'active', 'isActivated',
+                          'autoClosingEnabled', 'autoClosingHour', 'autoClosingMinute',
+                          'autoClosingLeftoverMode', 'lastClosedDate',
+                          'cashierShowOmzet', 'cashierShowProfit', 'cashierShowExpenses',
+                          'updatedAt'
                         ]) &&
-                        ('registeredDeviceIds' in incoming()) &&
-                        isValidDeviceListGrowth(existingDeviceList(existing()), incoming().registeredDeviceIds) &&
-                        (incoming().registeredDeviceId == '' || incoming().registeredDeviceId in incoming().registeredDeviceIds));
+                        (!('registeredDeviceIds' in incoming()) ||
+                          (isValidDeviceListGrowth(existingDeviceList(existing()), incoming().registeredDeviceIds) &&
+                           (incoming().registeredDeviceId == '' || incoming().registeredDeviceId in incoming().registeredDeviceIds))));
 
       allow delete: if isLicenseDeveloper();
 
@@ -607,6 +638,54 @@ service cloud.firestore {
         allow delete: if isSignedIn() &&
                          request.auth.uid == userId &&
                          isValidId(settlementDocId);
+      }
+
+      // 5e. User Permanent Daily Closing Archives Subcollection (Auto & Manual Tutup Buku)
+      match /daily_closings/{closingDate} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         closingDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+                         incoming().ownerUid == request.auth.uid &&
+                         incoming().closingDate == closingDate &&
+                         incoming().keys().hasAll([
+                           'ownerUid', 'closingDate', 'closedAtMillis', 'triggerType', 'leftoverMode',
+                           'totalTransactions', 'totalItemsIn', 'totalItemsSold', 'totalItemsLeftover',
+                           'totalOmzet', 'totalSellerShare', 'totalAdminProfit',
+                           'totalOperatingExpenses', 'netProfit', 'itemsBreakdown',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'ownerUid', 'closingDate', 'closedAtMillis', 'triggerType', 'leftoverMode',
+                           'totalTransactions', 'totalItemsIn', 'totalItemsSold', 'totalItemsLeftover',
+                           'totalOmzet', 'totalSellerShare', 'totalAdminProfit',
+                           'totalOperatingExpenses', 'netProfit', 'itemsBreakdown',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidDailyClosing(incoming()) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+
+        allow update: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         closingDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+                         existing().ownerUid == request.auth.uid &&
+                         isValidDailyClosing(incoming()) &&
+                         incoming().ownerUid == existing().ownerUid &&
+                         incoming().closingDate == existing().closingDate &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'closedAtMillis', 'triggerType', 'leftoverMode',
+                           'totalTransactions', 'totalItemsIn', 'totalItemsSold', 'totalItemsLeftover',
+                           'totalOmzet', 'totalSellerShare', 'totalAdminProfit',
+                           'totalOperatingExpenses', 'netProfit', 'itemsBreakdown', 'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         closingDate.matches('^\\d{4}-\\d{2}-\\d{2}$');
       }
     }
 

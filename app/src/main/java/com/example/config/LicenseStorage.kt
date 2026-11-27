@@ -17,6 +17,7 @@ data class CachedUserSession(
     val licenseCode: String,
     val registeredDeviceId: String,
     val connectedDevicesCount: Int = 1,
+    val isOwnerDevice: Boolean = true,
     val active: Boolean,
     val lastSyncedAtMillis: Long
 )
@@ -109,6 +110,7 @@ class LicenseStorage(context: Context) {
         licenseCode: String,
         deviceId: String = getDeviceId(),
         connectedDevicesCount: Int = 1,
+        isOwnerDevice: Boolean = true,
         active: Boolean = true,
         syncedAtMillis: Long = System.currentTimeMillis()
     ) {
@@ -125,6 +127,7 @@ class LicenseStorage(context: Context) {
             .putString(uidKey(cleanUid, "license_code"), normalizedCode)
             .putString(uidKey(cleanUid, "device_id"), deviceId.trim())
             .putInt(uidKey(cleanUid, "connected_devices_count"), connectedDevicesCount.coerceIn(1, 2))
+            .putBoolean(uidKey(cleanUid, "is_owner_device"), isOwnerDevice)
             .putBoolean(uidKey(cleanUid, "session_active"), active)
             .putBoolean(uidKey(cleanUid, "is_activated"), active)
             .putString(uidKey(cleanUid, "integrity_seal"), seal)
@@ -150,6 +153,21 @@ class LicenseStorage(context: Context) {
             .coerceIn(1, 2)
     }
 
+    fun updateIsOwnerDevice(uid: String, isOwner: Boolean) {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return
+        userSessionPrefs(cleanUid).edit()
+            .putBoolean(uidKey(cleanUid, "is_owner_device"), isOwner)
+            .apply()
+    }
+
+    fun getCachedIsOwnerDevice(uid: String): Boolean {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return true
+        return userSessionPrefs(cleanUid)
+            .getBoolean(uidKey(cleanUid, "is_owner_device"), true)
+    }
+
     fun getOfflineSession(targetUid: String? = null): CachedUserSession? {
         val resolvedUid = targetUid?.trim()?.takeIf { it.isNotBlank() }
             ?: devicePrefs.getString(KEY_ACTIVE_SESSION_UID, null)?.trim().orEmpty()
@@ -162,6 +180,7 @@ class LicenseStorage(context: Context) {
         val code = uPrefs.getString(uidKey(resolvedUid, "license_code"), null)?.trim()?.uppercase().orEmpty()
         val boundDeviceId = uPrefs.getString(uidKey(resolvedUid, "device_id"), null)?.trim().orEmpty()
         val connectedCount = uPrefs.getInt(uidKey(resolvedUid, "connected_devices_count"), 1).coerceIn(1, 2)
+        val isOwnerDevice = uPrefs.getBoolean(uidKey(resolvedUid, "is_owner_device"), true)
         val active = uPrefs.getBoolean(uidKey(resolvedUid, "session_active"), false)
         val savedSeal = uPrefs.getString(uidKey(resolvedUid, "integrity_seal"), null).orEmpty()
         val syncedAt = uPrefs.getLong(uidKey(resolvedUid, "activated_at"), 0L)
@@ -179,6 +198,7 @@ class LicenseStorage(context: Context) {
             licenseCode = code,
             registeredDeviceId = boundDeviceId,
             connectedDevicesCount = connectedCount,
+            isOwnerDevice = isOwnerDevice,
             active = active,
             lastSyncedAtMillis = syncedAt
         )
@@ -191,6 +211,76 @@ class LicenseStorage(context: Context) {
 
     fun getActivatedLicenseCode(uid: String? = null): String? {
         return getOfflineSession(uid)?.licenseCode
+    }
+
+    fun saveAutoClosingPrefs(
+        uid: String,
+        enabled: Boolean,
+        hour: Int,
+        minute: Int,
+        leftoverMode: String,
+        lastClosedDate: String? = null
+    ) {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return
+        val editor = userSessionPrefs(cleanUid).edit()
+            .putBoolean(uidKey(cleanUid, "auto_closing_enabled"), enabled)
+            .putInt(uidKey(cleanUid, "auto_closing_hour"), hour.coerceIn(0, 23))
+            .putInt(uidKey(cleanUid, "auto_closing_minute"), minute.coerceIn(0, 59))
+            .putString(uidKey(cleanUid, "auto_closing_leftover_mode"), leftoverMode.trim().uppercase())
+        if (lastClosedDate != null) {
+            editor.putString(uidKey(cleanUid, "auto_closing_last_closed_date"), lastClosedDate.trim())
+        }
+        editor.apply()
+    }
+
+    fun getAutoClosingLastClosedDate(uid: String): String {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return ""
+        return userSessionPrefs(cleanUid)
+            .getString(uidKey(cleanUid, "auto_closing_last_closed_date"), "")
+            .orEmpty()
+    }
+
+    fun saveCashierVisibilityPrefs(
+        uid: String,
+        showOmzet: Boolean,
+        showProfit: Boolean,
+        showExpenses: Boolean
+    ) {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return
+        userSessionPrefs(cleanUid).edit()
+            .putBoolean(uidKey(cleanUid, "cashier_show_omzet"), showOmzet)
+            .putBoolean(uidKey(cleanUid, "cashier_show_profit"), showProfit)
+            .putBoolean(uidKey(cleanUid, "cashier_show_expenses"), showExpenses)
+            .apply()
+    }
+
+    fun savePrinterPrefs(
+        uid: String,
+        printerName: String,
+        printerAddress: String,
+        paperSize: String
+    ) {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return
+        userSessionPrefs(cleanUid).edit()
+            .putString(uidKey(cleanUid, "printer_name"), printerName.trim())
+            .putString(uidKey(cleanUid, "printer_address"), printerAddress.trim())
+            .putString(uidKey(cleanUid, "printer_paper_size"), paperSize.trim().uppercase())
+            .apply()
+    }
+
+    fun getPrinterPrefs(uid: String): Triple<String, String, String> {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return Triple("", "", "58MM")
+        val prefs = userSessionPrefs(cleanUid)
+        return Triple(
+            prefs.getString(uidKey(cleanUid, "printer_name"), "").orEmpty(),
+            prefs.getString(uidKey(cleanUid, "printer_address"), "").orEmpty(),
+            prefs.getString(uidKey(cleanUid, "printer_paper_size"), "58MM").orEmpty().ifBlank { "58MM" }
+        )
     }
 
     fun clearSession(targetUid: String? = null) {

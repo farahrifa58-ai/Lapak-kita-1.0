@@ -26,6 +26,7 @@ import com.example.i18n.AppStrings
 import com.example.ui.components.CancelTransactionDialog
 import com.example.ui.components.HeaderActionIconButton
 import com.example.ui.components.LapakTopHeader
+import com.example.ui.components.ManualDailyClosingDialog
 import com.example.ui.components.ReceiptCustomerDialog
 import com.example.ui.components.TransactionAdminDetailDialog
 import com.example.ui.theme.LocalLapakColors
@@ -44,6 +45,11 @@ fun TransactionsScreen(
     val lang by viewModel.currentLanguage.collectAsState()
     val shopProfile by viewModel.shopProfile.collectAsState()
     val transactions by viewModel.allTransactions.collectAsState()
+    val isOwner by viewModel.isOwner.collectAsState()
+    val appSettings by viewModel.appSettings.collectAsState()
+    val isTodayClosed by viewModel.isTodayClosed.collectAsState()
+    val canSeeOmzet = isOwner || appSettings.cashierShowOmzet
+    val canSeeProfit = isOwner || appSettings.cashierShowProfit
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedMethod by remember { mutableStateOf("Semua") }
@@ -51,6 +57,8 @@ fun TransactionsScreen(
     var customerReceiptTarget by remember { mutableStateOf<LapakTransaction?>(null) }
     var adminDetailTarget by remember { mutableStateOf<LapakTransaction?>(null) }
     var cancelTarget by remember { mutableStateOf<LapakTransaction?>(null) }
+    var showManualClosingDialog by remember { mutableStateOf(false) }
+    var isRunningClosing by remember { mutableStateOf(false) }
 
     val filteredTransactions = remember(transactions, searchQuery, selectedMethod) {
         transactions.filter { trx ->
@@ -70,12 +78,14 @@ fun TransactionsScreen(
                 subtitle = "${transactions.count { !it.isCancelled }} transaksi tercatat",
                 paletteKey = shopProfile.headerBgColorKey,
                 actions = {
-                    HeaderActionIconButton(
-                        icon = Icons.Default.Assessment,
-                        contentDescription = "Laporan Keuangan",
-                        onClick = { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) },
-                        modifier = Modifier.testTag("history_header_financial_report_button")
-                    )
+                    if (isOwner) {
+                        HeaderActionIconButton(
+                            icon = Icons.Default.Assessment,
+                            contentDescription = "Laporan Keuangan",
+                            onClick = { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) },
+                            modifier = Modifier.testTag("history_header_financial_report_button")
+                        )
+                    }
                 }
             )
         },
@@ -90,55 +100,104 @@ fun TransactionsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(top = 12.dp, bottom = 36.dp)
         ) {
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = lapakColors.omzetCardBg),
-                    border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
-                    shape = RoundedCornerShape(14.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) }
-                        .testTag("history_financial_report_button")
-                ) {
-                    Row(
+            if (isOwner) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = lapakColors.omzetCardBg),
+                        border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
+                        shape = RoundedCornerShape(14.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .clickable { viewModel.navigateTo(AppScreen.FINANCIAL_REPORT) }
+                            .testTag("history_financial_report_button")
                     ) {
-                        Box(
+                        Row(
                             modifier = Modifier
-                                .size(38.dp)
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f), CircleShape),
-                            contentAlignment = Alignment.Center
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Assessment,
+                                    contentDescription = null,
+                                    tint = lapakColors.omzetCardAccent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Buka Laporan Keuangan (Excel & PDF)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = lapakColors.omzetCardAccent
+                                )
+                                Text(
+                                    text = "Filter periode, urutan kronologis & sinkron cloud",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = lapakColors.omzetCardAccent.copy(alpha = 0.85f)
+                                )
+                            }
                             Icon(
-                                imageVector = Icons.Default.Assessment,
+                                imageVector = Icons.Default.ChevronRight,
                                 contentDescription = null,
-                                tint = lapakColors.omzetCardAccent,
-                                modifier = Modifier.size(20.dp)
+                                tint = lapakColors.omzetCardAccent
                             )
                         }
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Buka Laporan Keuangan (Excel & PDF)",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = lapakColors.omzetCardAccent
-                            )
-                            Text(
-                                text = "Filter periode, urutan kronologis & sinkron cloud",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = lapakColors.omzetCardAccent.copy(alpha = 0.85f)
-                            )
+                    }
+                }
+
+                item {
+                    if (isTodayClosed) {
+                        Surface(
+                            color = lapakColors.stockSafeBg,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("history_today_closed_badge")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = lapakColors.stockSafeText,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Tutup Buku Hari Ini sudah tercatat di Arsip Laporan Keuangan.",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = lapakColors.stockSafeText
+                                )
+                            }
                         }
-                        Icon(
-                            imageVector = Icons.Default.ChevronRight,
-                            contentDescription = null,
-                            tint = lapakColors.omzetCardAccent
-                        )
+                    } else {
+                        OutlinedButton(
+                            onClick = { showManualClosingDialog = true },
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.primary),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("history_manual_closing_button")
+                        ) {
+                            Icon(Icons.Default.TaskAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Tutup Buku Hari Ini", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -212,6 +271,9 @@ fun TransactionsScreen(
                     TransactionCard(
                         trx = trx,
                         lang = lang,
+                        isOwner = isOwner,
+                        canSeeOmzet = canSeeOmzet,
+                        canSeeProfit = canSeeProfit,
                         onOpenCustomerReceipt = { customerReceiptTarget = trx },
                         onOpenAdminDetail = { adminDetailTarget = trx },
                         onCancel = { cancelTarget = trx }
@@ -238,16 +300,18 @@ fun TransactionsScreen(
         )
     }
 
-    adminDetailTarget?.let { trx ->
-        val itemsFlow = remember(trx.id) { viewModel.getTransactionItems(trx.id) }
-        val items by itemsFlow.collectAsState(initial = emptyList())
+    if (isOwner) {
+        adminDetailTarget?.let { trx ->
+            val itemsFlow = remember(trx.id) { viewModel.getTransactionItems(trx.id) }
+            val items by itemsFlow.collectAsState(initial = emptyList())
 
-        TransactionAdminDetailDialog(
-            transaction = trx,
-            items = items,
-            lang = lang,
-            onDismiss = { adminDetailTarget = null }
-        )
+            TransactionAdminDetailDialog(
+                transaction = trx,
+                items = items,
+                lang = lang,
+                onDismiss = { adminDetailTarget = null }
+            )
+        }
     }
 
     cancelTarget?.let { trx ->
@@ -270,12 +334,31 @@ fun TransactionsScreen(
             onDismiss = { cancelTarget = null }
         )
     }
+
+    if (showManualClosingDialog) {
+        ManualDailyClosingDialog(
+            defaultLeftoverMode = appSettings.autoClosingLeftoverMode,
+            isProcessing = isRunningClosing,
+            onConfirm = { chosenMode ->
+                isRunningClosing = true
+                viewModel.runManualDailyClosing(leftoverModeOverride = chosenMode) { _, msg ->
+                    isRunningClosing = false
+                    showManualClosingDialog = false
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            },
+            onDismiss = { showManualClosingDialog = false }
+        )
+    }
 }
 
 @Composable
 fun TransactionCard(
     trx: LapakTransaction,
     lang: String,
+    isOwner: Boolean = true,
+    canSeeOmzet: Boolean = isOwner,
+    canSeeProfit: Boolean = isOwner,
     onOpenCustomerReceipt: () -> Unit,
     onOpenAdminDetail: () -> Unit,
     onCancel: () -> Unit
@@ -352,7 +435,11 @@ fun TransactionCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column {
-                    Text("Total Omzet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = if (canSeeOmzet) "Total Omzet" else "Total Belanja",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         text = LapakViewModel.formatRupiah(trx.totalAmount),
                         style = MaterialTheme.typography.titleSmall,
@@ -366,24 +453,28 @@ fun TransactionCard(
                     )
                 }
 
-                Column {
-                    Text("Setoran Penjual", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        text = LapakViewModel.formatRupiah(trx.totalSellerShare),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = lapakColors.payoutCardAccent
-                    )
+                if (isOwner) {
+                    Column {
+                        Text("Setoran Penjual", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = LapakViewModel.formatRupiah(trx.totalSellerShare),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = lapakColors.payoutCardAccent
+                        )
+                    }
                 }
 
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("Untung Lapak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        text = LapakViewModel.formatRupiah(trx.totalAdminProfit),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                if (canSeeProfit) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("Untung Lapak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = LapakViewModel.formatRupiah(trx.totalAdminProfit),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
 
@@ -414,18 +505,20 @@ fun TransactionCard(
                     Text(AppStrings.get("history_btn_receipt_customer", lang), maxLines = 1, style = MaterialTheme.typography.labelSmall)
                 }
 
-                Button(
-                    onClick = onOpenAdminDetail,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    )
-                ) {
-                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(AppStrings.get("history_btn_detail_admin", lang), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                if (isOwner) {
+                    Button(
+                        onClick = onOpenAdminDetail,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        )
+                    ) {
+                        Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(AppStrings.get("history_btn_detail_admin", lang), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                    }
                 }
 
                 if (!trx.isCancelled) {

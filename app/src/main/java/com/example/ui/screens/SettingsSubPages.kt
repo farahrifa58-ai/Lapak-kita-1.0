@@ -46,9 +46,12 @@ enum class SettingsSubPage(
     BIAYA_ADMIN("Biaya Admin / Komisi Lapak", "Tarif default keuntungan lapak"),
     WEB_PORTAL("Link Portal Web Penyetor", "Sinkronisasi cloud & tautan penyetor"),
     PROMOSI("Kustomisasi Promosi", "Template poster & teks ajakan"),
+    AUTO_CLOSING("Auto Tutup Buku Harian", "Jadwal tutup buku otomatis & aturan sisa stok"),
+    KUSTOMISASI_PENGGUNA("Kustomisasi Pengguna (Kasir)", "Atur tampilan Omset, Untung & Operasional di HP Kasir"),
+    PRINTER_SETTINGS("Kustomisasi Print & Printer", "Pilih printer Bluetooth & ukuran kertas struk"),
     RESET_STOK("Reset Stok Harian", "Siklus otomatis & reset manual"),
     BIAYA_OPERASIONAL("Biaya Operasional", "Catat pengeluaran rutin lapak"),
-    CADANGAN("Cadangan & Pemulihan", "Ekspor & impor data JSON"),
+    CADANGAN("Cadangan & Pemulihan", "Google Drive & ekspor/impor file JSON"),
     TEMA_BAHASA("Tema & Bahasa", "Tampilan terang/gelap & bahasa"),
     TUTORIAL("Tutorial & Panduan Penggunaan", "4 alur lengkap operasional lapak"),
     AKUN_CLOUD("Status Akun & Sinkronisasi Cloud", "Akun Google, lisensi & perangkat 2 HP")
@@ -1076,69 +1079,225 @@ internal fun BiayaOperasionalSubPage(
 }
 
 // =============================================================================
-// 7. CADANGAN & PEMULIHAN SUB-PAGE
+// 7. CADANGAN & PEMULIHAN SUB-PAGE (GOOGLE DRIVE + MANUAL JSON)
 // =============================================================================
 @Composable
 internal fun CadanganSubPage(
+    lastBackupDate: Long?,
+    driveAccountEmail: String?,
+    isBackingUpDrive: Boolean,
+    syncTimeFormatter: SimpleDateFormat,
+    onSaveToGoogleDrive: () -> Unit,
+    onQuickUploadToDrive: () -> Unit,
+    onRestoreFromGoogleDrive: () -> Unit,
     onCopyJson: () -> Unit,
     onShareToWhatsApp: () -> Unit,
     onOpenRestoreDialog: () -> Unit
 ) {
     val lapakColors = LocalLapakColors.current
 
-    SettingsSubPageCard {
-        Text(
-            text = "Simpan cadangan seluruh data penyetor, produk, dan riwayat transaksi dalam format JSON agar aman saat berganti perangkat.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.height(14.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        // Card 1: Google Drive Backup & Restore
+        SettingsSubPageCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                NeuIconBadge(
+                    accentColor = MaterialTheme.colorScheme.primary,
+                    size = 44.dp
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AddToDrive,
+                        contentDescription = "Google Drive",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Cadangan Google Drive",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Simpan & pulihkan seluruh data lapak langsung ke Google Drive Anda tanpa izin penyimpanan tambahan.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+            Spacer(Modifier.height(12.dp))
+
+            // Last Google Drive backup status banner
+            Surface(
+                color = if (lastBackupDate != null) lapakColors.omzetCardBg else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                border = BorderStroke(
+                    1.dp,
+                    if (lastBackupDate != null) lapakColors.omzetCardBorder else lapakColors.cardBorder
+                ),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("google_drive_backup_status")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (lastBackupDate != null) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                        contentDescription = null,
+                        tint = if (lastBackupDate != null) lapakColors.omzetCardAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (lastBackupDate != null) {
+                                "Terakhir dicadangkan: ${syncTimeFormatter.format(Date(lastBackupDate))}"
+                            } else {
+                                "Belum pernah dicadangkan ke Google Drive"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (lastBackupDate != null) lapakColors.omzetCardAccent else MaterialTheme.colorScheme.onSurface
+                        )
+                        if (!driveAccountEmail.isNullOrBlank()) {
+                            Text(
+                                text = "Akun: $driveAccountEmail",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
             Button(
-                onClick = onCopyJson,
+                onClick = onSaveToGoogleDrive,
+                enabled = !isBackingUpDrive,
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                 modifier = Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
                     .heightIn(min = 48.dp)
+                    .testTag("btn_backup_google_drive")
             ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(5.dp))
-                Text("Salin JSON", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                if (isBackingUpDrive) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Menyiapkan Cadangan...", fontWeight = FontWeight.Bold)
+                } else {
+                    Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Simpan Cadangan ke Google Drive", fontWeight = FontWeight.Bold)
+                }
             }
 
+            Spacer(Modifier.height(8.dp))
+
             FilledTonalButton(
-                onClick = onShareToWhatsApp,
+                onClick = onQuickUploadToDrive,
+                enabled = !isBackingUpDrive,
                 shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.filledTonalButtonColors(
-                    containerColor = lapakColors.whatsappBg,
-                    contentColor = lapakColors.whatsappText
-                ),
                 modifier = Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
                     .heightIn(min = 48.dp)
+                    .testTag("btn_quick_share_google_drive")
             ) {
-                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(5.dp))
-                Text("Kirim ke WA", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                Icon(Icons.Default.AddToDrive, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Upload Cepat ke Aplikasi Google Drive", fontWeight = FontWeight.SemiBold)
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = onRestoreFromGoogleDrive,
+                enabled = !isBackingUpDrive,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("btn_restore_google_drive")
+            ) {
+                Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Pulihkan dari File Google Drive", fontWeight = FontWeight.SemiBold)
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-        OutlinedButton(
-            onClick = onOpenRestoreDialog,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp)
-        ) {
-            Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Pulihkan Data (Impor JSON)", fontWeight = FontWeight.SemiBold)
+        // Card 2: Manual JSON & WhatsApp Backup
+        SettingsSubPageCard {
+            Text(
+                text = "Cadangan Manual (JSON & WhatsApp)",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Alternatif cadangan teks JSON untuk dikirim ke WhatsApp atau disalin manual saat berganti perangkat.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onCopyJson,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                ) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Salin JSON", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                }
+
+                FilledTonalButton(
+                    onClick = onShareToWhatsApp,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = lapakColors.whatsappBg,
+                        contentColor = lapakColors.whatsappText
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Kirim ke WA", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onOpenRestoreDialog,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+            ) {
+                Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Pulihkan via Teks JSON", fontWeight = FontWeight.SemiBold)
+            }
         }
     }
 }
@@ -1297,6 +1456,8 @@ internal fun AccountCloudSyncSubPage(
     signedInEmail: String,
     registeredLicenseCode: String?,
     connectedDevicesCount: Int,
+    isOwner: Boolean = true,
+    isCloudLoaded: Boolean = true,
     isSyncingCloud: Boolean,
     lastCloudSyncAt: Long?,
     syncTimeFormatter: SimpleDateFormat,
@@ -1374,6 +1535,25 @@ internal fun AccountCloudSyncSubPage(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
+                    text = "Peran Perangkat Ini",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = if (isOwner) "Owner (Akses Penuh)" else "Kasir / Karyawan",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isOwner) lapakColors.omzetCardAccent else lapakColors.payoutCardAccent,
+                    modifier = Modifier.testTag("device_role_label")
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
                     text = "Status Lisensi",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1442,12 +1622,11 @@ internal fun AccountCloudSyncSubPage(
                                 color = lapakColors.omzetCardAccent
                             )
                             Text(
-                                text = if (isSyncingCloud) {
-                                    "Menyinkronkan data cloud..."
-                                } else if (lastCloudSyncAt != null) {
-                                    "Sinkronisasi Real-Time • ${syncTimeFormatter.format(Date(lastCloudSyncAt))}"
-                                } else {
-                                    "Sinkronisasi Cloud Real-Time Aktif"
+                                text = when {
+                                    !isCloudLoaded -> "Mengunduh data cloud terlebih dahulu..."
+                                    isSyncingCloud -> "Menyinkronkan data cloud..."
+                                    lastCloudSyncAt != null -> "Data Cloud Siap • ${syncTimeFormatter.format(Date(lastCloudSyncAt))}"
+                                    else -> "Data Cloud Siap • Sinkronisasi Real-Time Aktif"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1459,20 +1638,20 @@ internal fun AccountCloudSyncSubPage(
 
             Spacer(Modifier.height(12.dp))
 
-            // Visual 2-slot status row (HP 1 & HP 2)
+            // Visual 2-slot status row (HP 1 = Owner & HP 2 = Kasir)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 DeviceSlotBadge(
                     label = "Perangkat 1",
-                    roleHint = "HP Kasir / Utama",
+                    roleHint = "HP Owner (Akses Penuh)",
                     isConnected = clampedDevices >= 1,
                     modifier = Modifier.weight(1f)
                 )
                 DeviceSlotBadge(
                     label = "Perangkat 2",
-                    roleHint = "HP Owner / Pantau",
+                    roleHint = "HP Kasir / Karyawan",
                     isConnected = clampedDevices >= 2,
                     modifier = Modifier.weight(1f)
                 )
@@ -1480,7 +1659,7 @@ internal fun AccountCloudSyncSubPage(
 
             Spacer(Modifier.height(14.dp))
 
-            // Panduan singkat menghubungkan 2 HP
+            // Panduan singkat menghubungkan 2 HP & Privasi Data Keuangan
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                 shape = RoundedCornerShape(12.dp),
@@ -1500,7 +1679,7 @@ internal fun AccountCloudSyncSubPage(
                     )
                     Spacer(Modifier.width(10.dp))
                     Text(
-                        text = "Untuk menghubungkan HP Kasir dan HP Owner secara otomatis, login menggunakan akun Google yang sama di perangkat kedua.",
+                        text = "Perangkat 1 berperan sebagai Owner (akses penuh). Perangkat 2 (login dengan akun Google yang sama) berperan sebagai Kasir/Karyawan — data omset, untung lapak, dan biaya operasional otomatis disembunyikan.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface
                     )
