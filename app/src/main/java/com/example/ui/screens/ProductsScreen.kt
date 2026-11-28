@@ -49,6 +49,7 @@ fun ProductsScreen(
     val sellers by viewModel.rawSellers.collectAsState()
     val cart by viewModel.cart.collectAsState()
     val cartWarning by viewModel.cartWarningMessage.collectAsState()
+    val isOwner by viewModel.isOwner.collectAsState()
 
     val cartTotalItems = remember(cart) { cart.sumOf { it.quantity } }
     val cartTotalAmount = remember(cart) { cart.sumOf { it.subtotal } }
@@ -102,7 +103,9 @@ fun ProductsScreen(
             LapakTopHeader(
                 title = AppStrings.get("prod_title", lang),
                 subtitle = "${products.count { it.currentStock > 0 }} menu siap jual • ${products.sumOf { it.currentStock }} stok",
-                paletteKey = shopProfile.headerBgColorKey
+                paletteKey = shopProfile.headerBgColorKey,
+                roleBadgeIsOwner = isOwner,
+                onRoleBadgeClick = { viewModel.openRoleSwitchDialog() }
             )
         },
         floatingActionButton = {

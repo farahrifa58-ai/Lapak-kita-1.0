@@ -80,6 +80,8 @@ fun DashboardScreen(
                 title = shopProfile.shopName,
                 subtitle = if (isSyncing) "Menyinkronkan ke cloud..." else AppStrings.get("tagline", lang),
                 paletteKey = shopProfile.headerBgColorKey,
+                roleBadgeIsOwner = isOwner,
+                onRoleBadgeClick = { viewModel.openRoleSwitchDialog() },
                 leadingContent = {
                     ShopAvatarBadge(
                         iconKey = shopProfile.shopIconKey,

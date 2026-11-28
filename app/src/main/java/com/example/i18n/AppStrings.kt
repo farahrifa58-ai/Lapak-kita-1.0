@@ -119,7 +119,7 @@ object AppStrings {
 
         // Sellers
         "sellers_title" to "Daftar Penjual / Penyetor",
-        "sellers_search_hint" to "Cari nama penyetor...",
+        "sellers_search_hint" to "Cari nama penyetor, kode LPK-..., atau produk...",
         "sellers_btn_add" to "Tambah Penyetor",
         "sellers_status_active" to "Aktif",
         "sellers_status_leave" to "Libur",
@@ -160,7 +160,7 @@ object AppStrings {
         "settings_gdrive_info" to "Gunakan fitur cadangan lokal atau hubungkan akun Google Drive untuk pencadangan otomatis.",
         "settings_about_title" to "Tentang Aplikasi",
         "settings_about_desc" to "Lapak Kita adalah aplikasi pengelolaan lapak titipan yang membantu admin mencatat produk dari berbagai penyetor, mengelola stok, melakukan transaksi kasir, menghitung keuntungan, dan membagikan laporan stok secara praktis.",
-        "settings_version" to "Versi 1.0",
+        "settings_version" to "Versi 1.1",
         "settings_made_with_care" to "Made with care by Rafline Dev",
 
         // Common
@@ -285,7 +285,7 @@ object AppStrings {
 
         // Sellers
         "sellers_title" to "Sellers & Consignors Directory",
-        "sellers_search_hint" to "Search seller name...",
+        "sellers_search_hint" to "Search seller, LPK-... code, or product...",
         "sellers_btn_add" to "Add Seller",
         "sellers_status_active" to "Active",
         "sellers_status_leave" to "On Leave",
@@ -325,7 +325,7 @@ object AppStrings {
         "settings_gdrive_info" to "Use local JSON backups or link your Google Drive account for automatic cloud backups.",
         "settings_about_title" to "About Application",
         "settings_about_desc" to "Lapak Kita is a consignment food stall management system helping admins track multi-seller products, manage segregated stocks, process cashier sales, compute exact profits, and share real-time stock reports.",
-        "settings_version" to "Version 1.0",
+        "settings_version" to "Version 1.1",
         "settings_made_with_care" to "Made with care by Rafline Dev",
 
         // Common

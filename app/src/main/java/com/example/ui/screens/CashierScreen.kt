@@ -49,6 +49,7 @@ fun CashierScreen(
     val lastCompletedTrx by viewModel.lastCompletedTransaction.collectAsState()
     val productsWithDetails by viewModel.productsWithDetails.collectAsState()
     val cartWarning by viewModel.cartWarningMessage.collectAsState()
+    val isOwner by viewModel.isOwner.collectAsState()
 
     var searchQuery by remember { mutableStateOf("") }
     var matchingMultipleSellers by remember { mutableStateOf<List<ProductDetailItem>?>(null) }
@@ -94,6 +95,8 @@ fun CashierScreen(
                     "${cart.sumOf { it.quantity }} item • ${LapakViewModel.formatRupiah(totalAmount)}"
                 },
                 paletteKey = shopProfile.headerBgColorKey,
+                roleBadgeIsOwner = isOwner,
+                onRoleBadgeClick = { viewModel.openRoleSwitchDialog() },
                 actions = {
                     if (cart.isNotEmpty()) {
                         HeaderActionIconButton(

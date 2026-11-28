@@ -74,6 +74,8 @@ fun SettingsScreen(
     val products by viewModel.productsWithDetails.collectAsState()
     val isSyncingCloud by viewModel.isSyncingCloud.collectAsState()
     val lastCloudSyncAt by viewModel.lastCloudSyncAt.collectAsState()
+    val isOnline by viewModel.isOnline.collectAsState()
+    val pendingSync by viewModel.pendingSync.collectAsState()
     val connectedDevicesCount by viewModel.connectedDevicesCount.collectAsState()
     val isOwner by viewModel.isOwner.collectAsState()
     val isCloudLoaded by viewModel.isCloudLoaded.collectAsState()
@@ -298,7 +300,9 @@ fun SettingsScreen(
                     } else {
                         viewModel.navigateTo(AppScreen.DASHBOARD)
                     }
-                }
+                },
+                roleBadgeIsOwner = isOwner,
+                onRoleBadgeClick = { viewModel.openRoleSwitchDialog() }
             )
         },
         modifier = modifier
@@ -524,10 +528,16 @@ fun SettingsScreen(
 
                     // 10. Status Akun & Sinkronisasi Cloud
                     item {
-                        val roleLabel = if (isOwner) "Owner" else "Kasir"
+                        val shortTimeFmt = remember { SimpleDateFormat("HH:mm", Locale("id", "ID")) }
+                        val cloudSyncRowLabel = when {
+                            !isOnline -> "Menunggu koneksi internet..."
+                            pendingSync -> "Menunggu sinkronisasi..."
+                            lastCloudSyncAt != null -> "Terakhir tersinkronisasi: ${shortTimeFmt.format(Date(lastCloudSyncAt!!))}"
+                            else -> "$clampedDevices/2 HP • Auto-Backup aktif"
+                        }
                         SettingsMenuRowCard(
                             title = "Status Akun & Sinkronisasi Cloud",
-                            subtitle = "$signedInEmail • $roleLabel • $clampedDevices/2 HP",
+                            subtitle = "$signedInEmail • $cloudSyncRowLabel",
                             icon = Icons.Default.CloudDone,
                             onClick = { activeSubPage = SettingsSubPage.AKUN_CLOUD },
                             testTag = "menu_status_akun_cloud"
@@ -917,8 +927,15 @@ fun SettingsScreen(
                                     isOwner = isOwner,
                                     isCloudLoaded = isCloudLoaded,
                                     isSyncingCloud = isSyncingCloud,
+                                    isOnline = isOnline,
+                                    pendingSync = pendingSync,
                                     lastCloudSyncAt = lastCloudSyncAt,
                                     syncTimeFormatter = syncTimeFormatter,
+                                    onSyncNowClick = {
+                                        viewModel.flushPendingCloudBackup { _, msg ->
+                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
                                     onSignOutClick = {
                                         onSignedOut()
                                     }
@@ -1114,6 +1131,21 @@ fun SettingsScreen(
                         textAlign = TextAlign.Center
                     )
                     Spacer(Modifier.height(10.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = AppStrings.get("settings_version", lang),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                .testTag("about_app_version_badge")
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
                     Text(
                         text = "By Rafline Dev",
                         style = MaterialTheme.typography.labelMedium,

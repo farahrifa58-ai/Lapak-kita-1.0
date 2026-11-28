@@ -77,6 +77,8 @@ fun TransactionsScreen(
                 title = AppStrings.get("history_title", lang),
                 subtitle = "${transactions.count { !it.isCancelled }} transaksi tercatat",
                 paletteKey = shopProfile.headerBgColorKey,
+                roleBadgeIsOwner = isOwner,
+                onRoleBadgeClick = { viewModel.openRoleSwitchDialog() },
                 actions = {
                     if (isOwner) {
                         HeaderActionIconButton(

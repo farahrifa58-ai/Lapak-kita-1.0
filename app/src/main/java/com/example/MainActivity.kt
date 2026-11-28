@@ -1,6 +1,11 @@
 package com.example
 
 import android.app.Activity
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -66,6 +71,7 @@ import com.example.ui.auth.GoogleAuthHelper
 import com.example.ui.auth.GoogleSignInOutcome
 import com.example.ui.components.LucideIcons
 import com.example.ui.components.NeuCard
+import com.example.ui.components.QuickRoleSwitchDialog
 import com.example.ui.components.neuExtruded
 import com.example.ui.components.neuInset
 import com.example.ui.screens.*
@@ -73,6 +79,7 @@ import com.example.ui.theme.LapakKitaTheme
 import com.example.ui.theme.LocalLapakColors
 import com.example.ui.viewmodel.AppScreen
 import com.example.ui.viewmodel.LapakViewModel
+import com.example.util.CloudAutoBackupWorker
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
@@ -484,6 +491,8 @@ class MainActivity : ComponentActivity() {
                                         try {
                                             // 1. FIRST unsubscribe all Firestore listeners & reset in-memory state
                                             viewModel.teardownSessionAndUnsubscribe()
+                                            // 1b. Cancel hourly WorkManager auto-backup for this UID
+                                            CloudAutoBackupWorker.cancelHourlyAutoBackup(appContext, uidToTearDown)
                                             // 2. Clear cached offline session for this UID
                                             licenseStorage.clearSession(uidToTearDown)
                                             // 3. Immediately unmount AuthenticatedAppShell (triggers onDispose -> clear store & close DB)
@@ -525,6 +534,8 @@ private fun AuthenticatedAppShell(
     val lang by viewModel.currentLanguage.collectAsState()
     val cart by viewModel.cart.collectAsState()
     val isOwner by viewModel.isOwner.collectAsState()
+    val isRestoringFromCloud by viewModel.isRestoringFromCloud.collectAsState()
+    val showRoleSwitchDialog by viewModel.showRoleSwitchDialog.collectAsState()
     val webSyncNotification by viewModel.webSyncNotification.collectAsState()
     val webPortalSyncFeedback by viewModel.webPortalSyncFeedback.collectAsState()
 
@@ -534,6 +545,52 @@ private fun AuthenticatedAppShell(
         ThemeMode.DARK -> true
         ThemeMode.LIGHT -> false
         else -> systemDark
+    }
+
+    // Schedule hourly periodic WorkManager auto-backup to Firestore when authenticated
+    LaunchedEffect(viewModel.currentUserId) {
+        CloudAutoBackupWorker.scheduleHourlyAutoBackup(context, viewModel.currentUserId)
+    }
+
+    // Observe internet connectivity via ConnectivityManager.NetworkCallback to auto-flush pending syncs
+    DisposableEffect(context, viewModel) {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val checkOnlineNow: () -> Boolean = {
+            runCatching {
+                val active = cm?.activeNetwork
+                val caps = if (active != null) cm.getNetworkCapabilities(active) else null
+                caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            }.getOrDefault(true)
+        }
+        viewModel.onNetworkConnectivityChanged(checkOnlineNow())
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                viewModel.onNetworkConnectivityChanged(true)
+            }
+
+            override fun onLost(network: Network) {
+                viewModel.onNetworkConnectivityChanged(checkOnlineNow())
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                val hasInternet = networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                viewModel.onNetworkConnectivityChanged(hasInternet)
+            }
+        }
+        val registered = runCatching {
+            val req = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm?.registerNetworkCallback(req, callback)
+            cm != null
+        }.getOrDefault(false)
+
+        onDispose {
+            if (registered) {
+                runCatching { cm?.unregisterNetworkCallback(callback) }
+            }
+        }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -784,6 +841,78 @@ private fun AuthenticatedAppShell(
                     }
                 }
             }
+
+            // Auto-Restore Cloud Data Indicator on fresh login / reinstall
+            AnimatedVisibility(
+                visible = isRestoringFromCloud,
+                enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    shape = RoundedCornerShape(16.dp),
+                    shadowElevation = 8.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 520.dp)
+                        .testTag("cloud_auto_restore_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Memulihkan data akun Anda...",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Text(
+                                text = "Mengunduh penyetor, produk, transaksi & arsip dari Cloud Firestore",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.88f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Quick Owner / Kasir Switch Dialog (accessible from top header badge on every screen)
+        if (showRoleSwitchDialog) {
+            QuickRoleSwitchDialog(
+                isOwner = isOwner,
+                isUsingDefaultPin = viewModel.isUsingDefaultOwnerPin(),
+                onSwitchToCashier = {
+                    viewModel.switchToCashierMode()
+                    Toast.makeText(context, "Beralih ke Mode Kasir", Toast.LENGTH_SHORT).show()
+                },
+                onVerifyOwnerPin = { pin ->
+                    val ok = viewModel.verifyOwnerPinAndSwitch(pin)
+                    if (ok) {
+                        Toast.makeText(context, "Mode Owner diaktifkan", Toast.LENGTH_SHORT).show()
+                    }
+                    ok
+                },
+                onUpdateOwnerPin = { oldPin, newPin ->
+                    viewModel.updateOwnerPin(oldPin, newPin)
+                },
+                onDismiss = { viewModel.dismissRoleSwitchDialog() }
+            )
         }
     }
 }

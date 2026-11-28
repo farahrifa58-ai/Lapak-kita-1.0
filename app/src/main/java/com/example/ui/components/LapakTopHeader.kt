@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -229,12 +230,55 @@ fun HeaderActionIconButton(
 }
 
 @Composable
+fun HeaderRoleSwitchBadge(
+    isOwner: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(20.dp),
+        color = if (isOwner) Color.White.copy(alpha = 0.22f) else Color(0xFFFFE082).copy(alpha = 0.24f),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = if (isOwner) Color.White.copy(alpha = 0.42f) else Color(0xFFFFD54F).copy(alpha = 0.65f)
+        ),
+        modifier = modifier
+            .heightIn(min = 38.dp)
+            .testTag("header_role_badge")
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = if (isOwner) Icons.Default.VerifiedUser else Icons.Default.PointOfSale,
+                contentDescription = if (isOwner) "Mode Owner, ketuk untuk ganti mode" else "Mode Kasir, ketuk untuk ganti mode",
+                tint = Color.White,
+                modifier = Modifier.size(14.dp)
+            )
+            Text(
+                text = if (isOwner) "Owner" else "Kasir",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+    }
+}
+
+@Composable
 fun LapakTopHeader(
     title: String,
     subtitle: String? = null,
     paletteKey: String = HeaderBgColorKey.SOFT_EMERALD,
     showBackButton: Boolean = false,
     onBackClick: (() -> Unit)? = null,
+    roleBadgeIsOwner: Boolean? = null,
+    onRoleBadgeClick: (() -> Unit)? = null,
     leadingContent: (@Composable () -> Unit)? = null,
     actions: (@Composable RowScope.() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -301,12 +345,21 @@ fun LapakTopHeader(
                 }
             }
 
-            if (actions != null) {
+            if ((roleBadgeIsOwner != null && onRoleBadgeClick != null) || actions != null) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    content = actions
-                )
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (roleBadgeIsOwner != null && onRoleBadgeClick != null) {
+                        HeaderRoleSwitchBadge(
+                            isOwner = roleBadgeIsOwner,
+                            onClick = onRoleBadgeClick
+                        )
+                    }
+                    if (actions != null) {
+                        actions()
+                    }
+                }
             }
         }
     }

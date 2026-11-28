@@ -754,6 +754,30 @@ class FinancialSyncRepository(
         }
     }
 
+    suspend fun fetchAllCloudDailyClosings(ownerUid: String): Result<List<CloudDailyClosingRecord>> {
+        if (ownerUid.isBlank()) return Result.failure(IllegalStateException("UID tidak valid"))
+        val activeUid = auth.currentUser?.uid
+        if (activeUid != ownerUid) {
+            return Result.failure(IllegalStateException("Sesi akun tidak cocok untuk memuat arsip tutup buku cloud."))
+        }
+        return try {
+            val snap = dailyClosingsCollection(ownerUid).get().await()
+            val closings = snap.documents.mapNotNull { parseDailyClosing(it) }
+                .sortedByDescending { it.closingDate }
+            Result.success(closings)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: FirebaseFirestoreException) {
+            try {
+                handleFirestoreError(e, OperationType.LIST, "users/$ownerUid/daily_closings")
+            } catch (wrapped: IllegalStateException) {
+                Result.failure(wrapped)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     // --- REAL-TIME SNAPSHOT LISTENERS (MetadataChanges.INCLUDE) FOR 2-HP SYNC ---
 
     fun observeVendorsCatalogWithMetadata(ownerUid: String): Flow<CloudSnapshotBatch<CloudVendorCatalogRecord>> {

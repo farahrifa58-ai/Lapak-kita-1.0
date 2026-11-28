@@ -283,6 +283,54 @@ class LicenseStorage(context: Context) {
         )
     }
 
+    fun setPendingCloudSync(uid: String, pending: Boolean) {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return
+        userSessionPrefs(cleanUid).edit()
+            .putBoolean(uidKey(cleanUid, "pending_cloud_sync"), pending)
+            .apply()
+    }
+
+    fun hasPendingCloudSync(uid: String): Boolean {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return false
+        return userSessionPrefs(cleanUid)
+            .getBoolean(uidKey(cleanUid, "pending_cloud_sync"), false)
+    }
+
+    fun saveLastCloudSyncAt(uid: String, timestampMillis: Long) {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank() || timestampMillis <= 0L) return
+        userSessionPrefs(cleanUid).edit()
+            .putLong(uidKey(cleanUid, "last_cloud_sync_at"), timestampMillis)
+            .apply()
+    }
+
+    fun getLastCloudSyncAt(uid: String): Long? {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return null
+        val value = userSessionPrefs(cleanUid).getLong(uidKey(cleanUid, "last_cloud_sync_at"), 0L)
+        return value.takeIf { it > 0L }
+    }
+
+    fun saveOwnerPin(uid: String, pin: String) {
+        val cleanUid = uid.trim()
+        val cleanPin = pin.filter { it.isDigit() }
+        if (cleanUid.isBlank() || cleanPin.length !in 4..6) return
+        userSessionPrefs(cleanUid).edit()
+            .putString(uidKey(cleanUid, "owner_mode_pin"), cleanPin)
+            .apply()
+    }
+
+    fun getOwnerPin(uid: String): String {
+        val cleanUid = uid.trim()
+        if (cleanUid.isBlank()) return DEFAULT_OWNER_PIN
+        return userSessionPrefs(cleanUid)
+            .getString(uidKey(cleanUid, "owner_mode_pin"), DEFAULT_OWNER_PIN)
+            .orEmpty()
+            .ifBlank { DEFAULT_OWNER_PIN }
+    }
+
     fun clearSession(targetUid: String? = null) {
         val activeUid = targetUid?.trim()?.takeIf { it.isNotBlank() }
             ?: devicePrefs.getString(KEY_ACTIVE_SESSION_UID, null)?.trim()
@@ -294,6 +342,7 @@ class LicenseStorage(context: Context) {
     }
 
     companion object {
+        const val DEFAULT_OWNER_PIN = "1234"
         private const val DEVICE_PREFS_NAME = "lapak_kita_device_prefs"
         private const val LEGACY_GLOBAL_PREFS_NAME = "lapak_kita_license_prefs"
         private const val KEY_ACTIVE_SESSION_UID = "active_session_uid"

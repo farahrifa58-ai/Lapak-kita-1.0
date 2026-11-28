@@ -5,11 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.*
 import android.graphics.pdf.PdfDocument
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import com.example.data.model.SellerPeriodReportSnapshot
+import com.example.data.model.SellerPeriodSection
 import com.example.data.model.ShopProfile
 import com.example.ui.viewmodel.LapakViewModel
 import java.io.ByteArrayOutputStream
@@ -930,55 +932,78 @@ object SellerReportExporter {
     }
 
     // =========================================================================
-    // 3. SAVE TO DOWNLOADS & DIRECT SHARE (WHATSAPP / SYSTEM CHOOSER)
+    // 3. SAVE TO DOWNLOADS, OPEN FILE, SHARE FILE & WHATSAPP SLIP FORMATTER
     // =========================================================================
+
+    data class SavedReportFile(
+        val displayPath: String,
+        val fileName: String,
+        val contentUri: Uri,
+        val mimeType: String,
+        val isExcel: Boolean
+    )
+
+    fun saveExcelWithResult(
+        context: Context,
+        shopProfile: ShopProfile,
+        report: SellerPeriodReportSnapshot
+    ): Result<SavedReportFile> {
+        return try {
+            val bytes = generateExcelBytes(shopProfile, report)
+            val slug = if (report.isSingleSeller) sanitizeSlug(report.scopeLabel) else "Semua_Penyetor"
+            val fileName = "Laporan_Penyetor_${slug}_${formatStampForFile(report.generatedAtMillis)}.xlsx"
+            saveBytesToDownloadsWithUri(
+                context = context,
+                fileName = fileName,
+                mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                bytes = bytes,
+                isExcel = true
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun savePdfWithResult(
+        context: Context,
+        shopProfile: ShopProfile,
+        report: SellerPeriodReportSnapshot
+    ): Result<SavedReportFile> {
+        return try {
+            val bytes = generatePdfBytes(shopProfile, report)
+            val slug = if (report.isSingleSeller) sanitizeSlug(report.scopeLabel) else "Semua_Penyetor"
+            val fileName = "Laporan_Penyetor_${slug}_${formatStampForFile(report.generatedAtMillis)}.pdf"
+            saveBytesToDownloadsWithUri(
+                context = context,
+                fileName = fileName,
+                mimeType = "application/pdf",
+                bytes = bytes,
+                isExcel = false
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
     fun saveExcelToDownloads(
         context: Context,
         shopProfile: ShopProfile,
         report: SellerPeriodReportSnapshot
-    ): Result<String> {
-        return try {
-            val bytes = generateExcelBytes(shopProfile, report)
-            val slug = if (report.isSingleSeller) sanitizeSlug(report.scopeLabel) else "Semua_Penyetor"
-            val fileName = "Laporan_Penyetor_${slug}_${formatStampForFile(report.generatedAtMillis)}.xlsx"
-            saveBytesToDownloads(
-                context = context,
-                fileName = fileName,
-                mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                bytes = bytes
-            )
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+    ): Result<String> = saveExcelWithResult(context, shopProfile, report).map { it.displayPath }
 
     fun savePdfToDownloads(
         context: Context,
         shopProfile: ShopProfile,
         report: SellerPeriodReportSnapshot
-    ): Result<String> {
-        return try {
-            val bytes = generatePdfBytes(shopProfile, report)
-            val slug = if (report.isSingleSeller) sanitizeSlug(report.scopeLabel) else "Semua_Penyetor"
-            val fileName = "Laporan_Penyetor_${slug}_${formatStampForFile(report.generatedAtMillis)}.pdf"
-            saveBytesToDownloads(
-                context = context,
-                fileName = fileName,
-                mimeType = "application/pdf",
-                bytes = bytes
-            )
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+    ): Result<String> = savePdfWithResult(context, shopProfile, report).map { it.displayPath }
 
-    private fun saveBytesToDownloads(
+    private fun saveBytesToDownloadsWithUri(
         context: Context,
         fileName: String,
         mimeType: String,
-        bytes: ByteArray
-    ): Result<String> {
+        bytes: ByteArray,
+        isExcel: Boolean
+    ): Result<SavedReportFile> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)
@@ -994,14 +1019,127 @@ object SellerReportExporter {
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
-            Result.success("Downloads/Lapak Kita/$fileName")
+            Result.success(
+                SavedReportFile(
+                    displayPath = "Downloads/Lapak Kita/$fileName",
+                    fileName = fileName,
+                    contentUri = uri,
+                    mimeType = mimeType,
+                    isExcel = isExcel
+                )
+            )
         } else {
             val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Lapak Kita").apply { mkdirs() }
             val outFile = File(dir, fileName)
             FileOutputStream(outFile).use { it.write(bytes) }
-            Result.success(outFile.absolutePath)
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outFile)
+            Result.success(
+                SavedReportFile(
+                    displayPath = outFile.absolutePath,
+                    fileName = fileName,
+                    contentUri = uri,
+                    mimeType = mimeType,
+                    isExcel = isExcel
+                )
+            )
         }
     }
+
+    fun openSavedReportFile(context: Context, savedFile: SavedReportFile): Result<Unit> {
+        return try {
+            val openIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(savedFile.contentUri, savedFile.mimeType)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(openIntent)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(
+                IllegalStateException("Tidak ditemukan aplikasi pembuka file ${if (savedFile.isExcel) "Excel (.xlsx)" else "PDF"} di perangkat ini.")
+            )
+        }
+    }
+
+    fun shareSavedReportFile(
+        context: Context,
+        savedFile: SavedReportFile,
+        caption: String,
+        preferWhatsApp: Boolean = false
+    ): Result<Unit> {
+        return try {
+            if (preferWhatsApp) {
+                val waIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = savedFile.mimeType
+                    putExtra(Intent.EXTRA_STREAM, savedFile.contentUri)
+                    putExtra(Intent.EXTRA_TEXT, caption)
+                    setPackage("com.whatsapp")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    context.startActivity(waIntent)
+                    return Result.success(Unit)
+                } catch (_: Exception) {
+                    // Fallback to system chooser
+                }
+            }
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = savedFile.mimeType
+                putExtra(Intent.EXTRA_STREAM, savedFile.contentUri)
+                putExtra(Intent.EXTRA_TEXT, caption)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(shareIntent, "Bagikan Laporan Penyetor").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun buildSellerWhatsAppSlipText(
+        shopProfile: ShopProfile,
+        periodLabel: String,
+        section: SellerPeriodSection
+    ): String = buildString {
+        appendLine("*SLIP SETORAN PENYETOR*")
+        appendLine("*${shopProfile.shopName.ifBlank { "Lapak Kita" }}*")
+        appendLine("==============================")
+        appendLine("Penyetor : *${section.sellerName}*")
+        if (section.vendorCode.isNotBlank()) {
+            appendLine("Kode ID  : ${section.vendorCode}")
+        }
+        appendLine("Periode  : $periodLabel")
+        appendLine("------------------------------")
+        if (section.productRows.isEmpty()) {
+            appendLine("_Belum ada aktivitas produk pada periode ini._")
+        } else {
+            appendLine("*Rincian Produk:*")
+            section.productRows.forEachIndexed { idx, row ->
+                appendLine("${idx + 1}. *${row.productName}*")
+                appendLine("   Masuk: ${row.qtyIn} | Laku: ${row.qtySold} | Sisa/Retur: ${row.qtyLeftover} ${row.unit}")
+                appendLine("   Harga: ${LapakViewModel.formatRupiah(row.sellingPrice)} | Hak: *${LapakViewModel.formatRupiah(row.totalSellerShare)}*")
+            }
+        }
+        appendLine("------------------------------")
+        appendLine("Total Stok Masuk : ${section.totalQtyIn} item")
+        appendLine("Total Terjual    : ${section.totalQtySold} item")
+        appendLine("Total Retur/Sisa : ${section.totalQtyLeftover} item")
+        appendLine("------------------------------")
+        appendLine("Total Hak        : *${LapakViewModel.formatRupiah(section.totalSellerShare)}*")
+        appendLine("Sudah Dibayar    : ${LapakViewModel.formatRupiah(section.totalPaid)}")
+        appendLine("Sisa Setoran     : *${LapakViewModel.formatRupiah(section.remainingBalance)}*")
+        appendLine("Status           : ${section.paymentStatus}")
+        appendLine("==============================")
+        if (shopProfile.footerMessage.isNotBlank()) {
+            appendLine(shopProfile.footerMessage)
+        } else {
+            appendLine("Terima kasih atas kerja samanya!")
+        }
+    }.trim()
 
     fun shareReportFile(
         context: Context,

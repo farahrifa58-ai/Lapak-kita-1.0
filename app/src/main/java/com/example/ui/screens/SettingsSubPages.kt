@@ -1459,12 +1459,30 @@ internal fun AccountCloudSyncSubPage(
     isOwner: Boolean = true,
     isCloudLoaded: Boolean = true,
     isSyncingCloud: Boolean,
+    isOnline: Boolean = true,
+    pendingSync: Boolean = false,
     lastCloudSyncAt: Long?,
     syncTimeFormatter: SimpleDateFormat,
+    onSyncNowClick: (() -> Unit)? = null,
     onSignOutClick: () -> Unit
 ) {
     val lapakColors = LocalLapakColors.current
     val clampedDevices = connectedDevicesCount.coerceIn(0, 2)
+    val shortHourFormatter = SimpleDateFormat("HH:mm", java.util.Locale("id", "ID"))
+    val syncHeadlineText = when {
+        !isOnline -> "Menunggu koneksi internet..."
+        isSyncingCloud -> "Menyinkronkan data ke Cloud..."
+        pendingSync -> "Menunggu sinkronisasi antrean..."
+        lastCloudSyncAt != null -> "Terakhir tersinkronisasi: ${shortHourFormatter.format(Date(lastCloudSyncAt))}"
+        !isCloudLoaded -> "Memulihkan data akun Anda..."
+        else -> "Auto-Backup Cloud Aktif"
+    }
+    val syncDetailText = when {
+        !isOnline -> "Perubahan dicatat lokal & otomatis dikirim saat online kembali"
+        pendingSync -> "Ada perubahan lokal menunggu unggah otomatis ke Firestore"
+        lastCloudSyncAt != null -> "Real-time & otomatis tiap 1 jam • ${syncTimeFormatter.format(Date(lastCloudSyncAt))}"
+        else -> "Auto-backup real-time setiap transaksi & berkala tiap 1 jam aktif"
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         // Card 1: Akun Google & Lisensi Aktif
@@ -1622,17 +1640,48 @@ internal fun AccountCloudSyncSubPage(
                                 color = lapakColors.omzetCardAccent
                             )
                             Text(
-                                text = when {
-                                    !isCloudLoaded -> "Mengunduh data cloud terlebih dahulu..."
-                                    isSyncingCloud -> "Menyinkronkan data cloud..."
-                                    lastCloudSyncAt != null -> "Data Cloud Siap • ${syncTimeFormatter.format(Date(lastCloudSyncAt))}"
-                                    else -> "Data Cloud Siap • Sinkronisasi Real-Time Aktif"
-                                },
+                                text = syncHeadlineText,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (!isOnline || pendingSync) lapakColors.warningText else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testTag("cloud_sync_time_status")
+                            )
+                            Text(
+                                text = syncDetailText,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
+                }
+            }
+
+            if (onSyncNowClick != null) {
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = onSyncNowClick,
+                    enabled = !isSyncingCloud,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("btn_sync_cloud_now")
+                ) {
+                    if (isSyncingCloud) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            imageVector = if (!isOnline) Icons.Default.CloudOff else Icons.Default.CloudSync,
+                            contentDescription = "Sinkronkan Cloud Sekarang",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (isSyncingCloud) "Menyinkronkan..." else "Sinkronkan Cadangan Cloud Sekarang",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
 

@@ -58,6 +58,7 @@ fun FinancialReportScreen(
     val isSyncingFinancials by viewModel.isSyncingFinancials.collectAsState()
     val dailyClosingArchives by viewModel.dailyClosingArchives.collectAsState()
     val isTodayClosed by viewModel.isTodayClosed.collectAsState()
+    val isOwner by viewModel.isOwner.collectAsState()
 
     var activeTab by remember { mutableIntStateOf(0) } // 0 = Buku Kas, 1 = Rekap Penyetor, 2 = Arsip Tutup Buku
     var isExporting by remember { mutableStateOf(false) }
@@ -82,6 +83,8 @@ fun FinancialReportScreen(
                 paletteKey = shopProfile.headerBgColorKey,
                 showBackButton = true,
                 onBackClick = { viewModel.navigateTo(AppScreen.DASHBOARD) },
+                roleBadgeIsOwner = isOwner,
+                onRoleBadgeClick = { viewModel.openRoleSwitchDialog() },
                 actions = {
                     HeaderActionIconButton(
                         icon = Icons.Default.CloudSync,

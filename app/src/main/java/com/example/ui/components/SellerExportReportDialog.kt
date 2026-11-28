@@ -24,6 +24,7 @@ import com.example.data.model.Seller
 import com.example.data.model.SellerPeriodReportSnapshot
 import com.example.ui.theme.LocalLapakColors
 import com.example.ui.viewmodel.LapakViewModel
+import com.example.util.SellerReportExporter
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -32,6 +33,9 @@ fun SellerExportReportDialog(
     sellers: List<Seller>,
     selectedSellerId: Long?,
     isExporting: Boolean,
+    lastSavedFile: SellerReportExporter.SavedReportFile? = null,
+    onOpenSavedFile: ((SellerReportExporter.SavedReportFile) -> Unit)? = null,
+    onShareSavedFile: ((SellerReportExporter.SavedReportFile) -> Unit)? = null,
     onSelectSeller: (Long?) -> Unit,
     onSavePdf: (SellerPeriodReportSnapshot) -> Unit,
     onSharePdfWhatsApp: (SellerPeriodReportSnapshot) -> Unit,
@@ -99,6 +103,83 @@ fun SellerExportReportDialog(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(4.dp))
                     )
+                }
+
+                // Post-save success banner with instant "Buka File" & "Bagikan" actions
+                if (lastSavedFile != null && !isExporting) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = lapakColors.stockSafeBg,
+                        border = BorderStroke(1.dp, lapakColors.omzetCardBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("export_saved_file_banner")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "File Tersimpan",
+                                    tint = lapakColors.stockSafeText,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${if (lastSavedFile.isExcel) "Excel (.xlsx)" else "PDF"} Berhasil Disimpan!",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = lapakColors.stockSafeText
+                                    )
+                                    Text(
+                                        text = lastSavedFile.displayPath,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { onOpenSavedFile?.invoke(lastSavedFile) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.primary,
+                                        contentColor = MaterialTheme.colorScheme.onPrimary
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 48.dp)
+                                        .testTag("btn_open_exported_file")
+                                ) {
+                                    Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Buka File", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                                }
+                                OutlinedButton(
+                                    onClick = { onShareSavedFile?.invoke(lastSavedFile) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 48.dp)
+                                        .testTag("btn_share_exported_file")
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("Bagikan", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Scope Selector: All Sellers or Specific Seller

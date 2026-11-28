@@ -82,13 +82,24 @@ fun SellersScreen(
     var showSellerExportDialog by remember { mutableStateOf(false) }
     var exportTargetSellerId by remember { mutableStateOf<Long?>(null) }
     var isExportingSellerReport by remember { mutableStateOf(false) }
+    var lastSavedReportFile by remember { mutableStateOf<SellerReportExporter.SavedReportFile?>(null) }
 
-    val filteredSellers = remember(sellersWithStats, searchQuery, statusFilter) {
+    val productsBySellerId = remember(allProductsWithDetails) {
+        allProductsWithDetails.groupBy { it.product.sellerId }
+    }
+    val periodSectionBySellerId = remember(sellerPeriodReport) {
+        sellerPeriodReport.sections.associateBy { it.sellerId }
+    }
+
+    val filteredSellers = remember(sellersWithStats, productsBySellerId, searchQuery, statusFilter) {
+        val q = searchQuery.trim()
         sellersWithStats.filter { item ->
-            val matchQuery = searchQuery.isBlank() ||
-                item.seller.name.contains(searchQuery, ignoreCase = true) ||
-                item.seller.whatsappNumber.contains(searchQuery, ignoreCase = true) ||
-                item.seller.vendorCode.contains(searchQuery, ignoreCase = true)
+            val sellerProducts = productsBySellerId[item.seller.id].orEmpty()
+            val matchQuery = q.isEmpty() ||
+                item.seller.name.contains(q, ignoreCase = true) ||
+                item.seller.whatsappNumber.contains(q, ignoreCase = true) ||
+                item.seller.vendorCode.contains(q, ignoreCase = true) ||
+                sellerProducts.any { it.product.name.contains(q, ignoreCase = true) }
 
             val matchStatus = when (statusFilter) {
                 "Aktif" -> item.seller.status == SellerStatus.AKTIF
@@ -108,7 +119,9 @@ fun SellersScreen(
             LapakTopHeader(
                 title = AppStrings.get("sellers_title", lang),
                 subtitle = "${sellersWithStats.size} penyetor terdaftar • Web Penyetor aktif",
-                paletteKey = shopProfile.headerBgColorKey
+                paletteKey = shopProfile.headerBgColorKey,
+                roleBadgeIsOwner = isOwner,
+                onRoleBadgeClick = { viewModel.openRoleSwitchDialog() }
             )
         },
         floatingActionButton = {
@@ -246,6 +259,29 @@ fun SellersScreen(
                     ) {
                         item {
                             FilterChip(
+                                selected = sellerPeriodFilter.period == FinancialReportPeriod.ALL_TIME,
+                                onClick = {
+                                    viewModel.setSellerPeriodFilter(
+                                        sellerPeriodFilter.copy(period = FinancialReportPeriod.ALL_TIME)
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = "Semua Waktu",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                modifier = Modifier.testTag("seller_period_all_time")
+                            )
+                        }
+                        item {
+                            FilterChip(
                                 selected = sellerPeriodFilter.period == FinancialReportPeriod.TODAY,
                                 onClick = {
                                     viewModel.setSellerPeriodFilter(
@@ -323,6 +359,7 @@ fun SellersScreen(
                     FilledTonalButton(
                         onClick = {
                             exportTargetSellerId = null
+                            lastSavedReportFile = null
                             showSellerExportDialog = true
                         },
                         shape = RoundedCornerShape(12.dp),
@@ -395,12 +432,15 @@ fun SellersScreen(
                 }
             } else {
                 items(filteredSellers, key = { it.seller.id }) { item ->
-                    val sellerProducts = remember(allProductsWithDetails, item.seller.id) {
-                        allProductsWithDetails.filter { it.product.sellerId == item.seller.id }
-                    }
+                    val sellerProducts = productsBySellerId[item.seller.id].orEmpty()
+                    val periodSection = periodSectionBySellerId[item.seller.id]
+                    val isAllTimePeriod = sellerPeriodFilter.period == FinancialReportPeriod.ALL_TIME
                     SellerCard(
                         item = item,
                         productsWithStock = sellerProducts,
+                        periodSection = periodSection,
+                        periodLabel = sellerPeriodReport.periodLabel,
+                        isAllTimePeriod = isAllTimePeriod,
                         appSettings = appSettings,
                         lang = lang,
                         isOwner = isOwner,
@@ -413,6 +453,33 @@ fun SellersScreen(
                         onAddStock = { addStockTargetSellerId = item.seller.id },
                         onEditStock = { prodItem -> editStockTargetProduct = prodItem },
                         onOpenWebLink = { webLinkTargetSeller = item.seller },
+                        onSendWhatsAppSlip = {
+                            val (feeType, feeVal) = AdminFeeCalculator.resolveEffectiveFee(item.seller, appSettings)
+                            val sectionForSlip = periodSection ?: SellerPeriodSection(
+                                sellerId = item.seller.id,
+                                sellerName = item.seller.name,
+                                vendorCode = item.seller.vendorCode,
+                                whatsappNumber = item.seller.whatsappNumber,
+                                sellerStatus = item.seller.status,
+                                tariffLabel = AdminFeeCalculator.formatTariffLabel(feeType, feeVal),
+                                productRows = emptyList(),
+                                totalQtyIn = item.totalStock + item.totalSoldQty,
+                                totalQtySold = item.totalSoldQty,
+                                totalQtyLeftover = item.totalStock,
+                                totalOmzet = 0.0,
+                                totalCommission = 0.0,
+                                totalSellerShare = item.totalRights,
+                                totalPaid = item.totalPaid,
+                                remainingBalance = item.remainingBalance,
+                                paymentStatus = item.paymentStatus
+                            )
+                            val slipText = SellerReportExporter.buildSellerWhatsAppSlipText(
+                                shopProfile = shopProfile,
+                                periodLabel = sellerPeriodReport.periodLabel,
+                                section = sectionForSlip
+                            )
+                            viewModel.shareTextToWhatsApp(context, slipText, item.seller.whatsappNumber)
+                        },
                         onViewReceipt = { viewModel.showLatestPaymentReceipt(item) },
                         onViewStock = { stockDetailTargetSeller = item },
                         onEdit = { editTargetSeller = item.seller },
@@ -422,6 +489,7 @@ fun SellersScreen(
                         onDeleteProduct = { prodItem -> deleteTargetProduct = prodItem },
                         onExportSellerReport = {
                             exportTargetSellerId = item.seller.id
+                            lastSavedReportFile = null
                             showSellerExportDialog = true
                         }
                     )
@@ -891,16 +959,37 @@ fun SellersScreen(
             sellers = rawSellers,
             selectedSellerId = exportTargetSellerId,
             isExporting = isExportingSellerReport,
-            onSelectSeller = { exportTargetSellerId = it },
+            lastSavedFile = lastSavedReportFile,
+            onOpenSavedFile = { saved ->
+                SellerReportExporter.openSavedReportFile(context, saved).onFailure { err ->
+                    Toast.makeText(context, err.message ?: "Tidak dapat membuka file", Toast.LENGTH_LONG).show()
+                }
+            },
+            onShareSavedFile = { saved ->
+                val caption = "Laporan Penyetor ${shopProfile.shopName.ifBlank { "Lapak Kita" }} (${sellerPeriodReport.periodLabel})"
+                SellerReportExporter.shareSavedReportFile(
+                    context = context,
+                    savedFile = saved,
+                    caption = caption,
+                    preferWhatsApp = false
+                ).onFailure { err ->
+                    Toast.makeText(context, err.message ?: "Gagal membagikan file", Toast.LENGTH_LONG).show()
+                }
+            },
+            onSelectSeller = {
+                exportTargetSellerId = it
+                lastSavedReportFile = null
+            },
             onSavePdf = { scopedReport ->
                 isExportingSellerReport = true
                 scope.launch {
                     val result = withContext(Dispatchers.IO) {
-                        SellerReportExporter.savePdfToDownloads(context, shopProfile, scopedReport)
+                        SellerReportExporter.savePdfWithResult(context, shopProfile, scopedReport)
                     }
                     isExportingSellerReport = false
-                    result.onSuccess { path ->
-                        Toast.makeText(context, "PDF tersimpan di $path", Toast.LENGTH_LONG).show()
+                    result.onSuccess { saved ->
+                        lastSavedReportFile = saved
+                        Toast.makeText(context, "PDF tersimpan di ${saved.displayPath}", Toast.LENGTH_LONG).show()
                     }.onFailure { err ->
                         Toast.makeText(context, "Gagal menyimpan PDF: ${err.message}", Toast.LENGTH_LONG).show()
                     }
@@ -928,11 +1017,12 @@ fun SellersScreen(
                 isExportingSellerReport = true
                 scope.launch {
                     val result = withContext(Dispatchers.IO) {
-                        SellerReportExporter.saveExcelToDownloads(context, shopProfile, scopedReport)
+                        SellerReportExporter.saveExcelWithResult(context, shopProfile, scopedReport)
                     }
                     isExportingSellerReport = false
-                    result.onSuccess { path ->
-                        Toast.makeText(context, "Excel tersimpan di $path", Toast.LENGTH_LONG).show()
+                    result.onSuccess { saved ->
+                        lastSavedReportFile = saved
+                        Toast.makeText(context, "Excel tersimpan di ${saved.displayPath}", Toast.LENGTH_LONG).show()
                     }.onFailure { err ->
                         Toast.makeText(context, "Gagal menyimpan Excel: ${err.message}", Toast.LENGTH_LONG).show()
                     }
@@ -956,7 +1046,10 @@ fun SellersScreen(
                     }
                 }
             },
-            onDismiss = { showSellerExportDialog = false }
+            onDismiss = {
+                showSellerExportDialog = false
+                lastSavedReportFile = null
+            }
         )
     }
 }
@@ -965,6 +1058,9 @@ fun SellersScreen(
 fun SellerCard(
     item: SellerDetailItem,
     productsWithStock: List<ProductDetailItem>,
+    periodSection: SellerPeriodSection? = null,
+    periodLabel: String = "Semua Waktu",
+    isAllTimePeriod: Boolean = true,
     appSettings: AppSettings,
     lang: String,
     isOwner: Boolean = true,
@@ -974,6 +1070,7 @@ fun SellerCard(
     onAddStock: () -> Unit,
     onEditStock: (ProductDetailItem) -> Unit,
     onOpenWebLink: () -> Unit,
+    onSendWhatsAppSlip: () -> Unit = {},
     onViewReceipt: () -> Unit,
     onViewStock: () -> Unit,
     onEdit: () -> Unit,
@@ -988,13 +1085,20 @@ fun SellerCard(
     var showOverflowMenu by remember { mutableStateOf(false) }
     val (feeType, feeValue) = AdminFeeCalculator.resolveEffectiveFee(item.seller, appSettings)
 
+    // Dynamically display period-filtered metrics when a specific period is active
+    val displayedSoldQty = if (!isAllTimePeriod && periodSection != null) periodSection.totalQtySold else item.totalSoldQty
+    val displayedRights = if (!isAllTimePeriod && periodSection != null) periodSection.totalSellerShare else item.totalRights
+    val displayedPaid = if (!isAllTimePeriod && periodSection != null) periodSection.totalPaid else item.totalPaid
+    val displayedRemaining = if (!isAllTimePeriod && periodSection != null) periodSection.remainingBalance else item.remainingBalance
+    val displayedPaymentStatus = if (!isAllTimePeriod && periodSection != null) periodSection.paymentStatus else item.paymentStatus
+
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         border = BorderStroke(
             1.dp,
-            if (isOwner && item.remainingBalance > 0) lapakColors.warningBorder else lapakColors.cardBorder
+            if (isOwner && displayedRemaining > 0) lapakColors.warningBorder else lapakColors.cardBorder
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -1140,66 +1244,94 @@ fun SellerCard(
 
             Spacer(Modifier.height(10.dp))
 
-            // Metrics Strip: Stok Aktif | Hak Terjual | Sisa Setoran
-            Row(
+            // Metrics Strip: Stok Aktif (or Masuk Periode) | Hak Terjual | Sisa Setoran
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
                     .padding(10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Column(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onViewStock)
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                ) {
-                    Text("Stok Aktif", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        text = "${item.totalStock} item (${item.products.size} menu)",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text("Terjual: ${item.totalSoldQty}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-
-                if (isOwner) {
-                    Column {
-                        Text("Total Hak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (!isAllTimePeriod) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = LapakViewModel.formatRupiah(item.totalRights),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            text = "Rekap Periode: $periodLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Text("Dibayar: ${LapakViewModel.formatRupiah(item.totalPaid)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (periodSection != null) {
+                            Text(
+                                text = "Masuk ${periodSection.totalQtyIn} • Retur ${periodSection.totalQtyLeftover}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-
-                    val hasUnpaid = item.remainingBalance > 0
-                    val sisaBg = if (!hasUnpaid) lapakColors.omzetCardBg else if (item.paymentStatus == "Belum Dibayar") lapakColors.dangerBg else lapakColors.warningBg
-                    val sisaText = if (!hasUnpaid) lapakColors.omzetCardAccent else if (item.paymentStatus == "Belum Dibayar") lapakColors.dangerText else lapakColors.warningText
-
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Column(
-                        horizontalAlignment = Alignment.End,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(sisaBg)
-                            .border(1.dp, sisaText.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                            .clickable(onClick = onViewStock)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        Text("Sisa Setoran", style = MaterialTheme.typography.labelSmall, color = sisaText, fontWeight = FontWeight.SemiBold)
+                        Text("Stok Aktif", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
-                            text = LapakViewModel.formatRupiah(item.remainingBalance),
+                            text = "${item.totalStock} item (${item.products.size} menu)",
                             style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = sisaText
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
                         )
+                        Text("Terjual: $displayedSoldQty", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                } else {
-                    TextButton(onClick = onViewStock) {
-                        Text("Kelola Stok >", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+
+                    if (isOwner) {
+                        Column {
+                            Text("Total Hak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = LapakViewModel.formatRupiah(displayedRights),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text("Dibayar: ${LapakViewModel.formatRupiah(displayedPaid)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+
+                        val hasUnpaid = displayedRemaining > 0
+                        val sisaBg = if (!hasUnpaid) lapakColors.omzetCardBg else if (displayedPaymentStatus == "Belum Dibayar") lapakColors.dangerBg else lapakColors.warningBg
+                        val sisaText = if (!hasUnpaid) lapakColors.omzetCardAccent else if (displayedPaymentStatus == "Belum Dibayar") lapakColors.dangerText else lapakColors.warningText
+
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(sisaBg)
+                                .border(1.dp, sisaText.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                        ) {
+                            Text("Sisa Setoran", style = MaterialTheme.typography.labelSmall, color = sisaText, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = LapakViewModel.formatRupiah(displayedRemaining),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = sisaText
+                            )
+                        }
+                    } else {
+                        TextButton(onClick = onViewStock) {
+                            Text("Kelola Stok >", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -1413,30 +1545,60 @@ fun SellerCard(
 
             Spacer(Modifier.height(8.dp))
 
-            // Secondary Action: WhatsApp-accented "Link Web Penyetor" button
-            FilledTonalButton(
-                onClick = onOpenWebLink,
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.filledTonalButtonColors(
-                    containerColor = lapakColors.whatsappBg,
-                    contentColor = lapakColors.whatsappText
-                ),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 42.dp)
-                    .testTag("vendor_web_link_btn_${item.seller.id}")
+            // Secondary Action Row: "Kirim Slip ke WhatsApp" + "Link Web Penyetor"
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Default.Forum, contentDescription = "WhatsApp Link Web Penyetor", modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = "Link Web Penyetor (WhatsApp)",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
-                )
-                Spacer(Modifier.width(4.dp))
-                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(14.dp))
+                if (isOwner) {
+                    FilledTonalButton(
+                        onClick = onSendWhatsAppSlip,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = lapakColors.whatsappBg,
+                            contentColor = lapakColors.whatsappText
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("seller_send_wa_slip_btn_${item.seller.id}")
+                    ) {
+                        Icon(Icons.Default.Send, contentDescription = "Kirim Slip ke WhatsApp", modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = "Kirim Slip WA",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                FilledTonalButton(
+                    onClick = onOpenWebLink,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = if (isOwner) MaterialTheme.colorScheme.secondaryContainer else lapakColors.whatsappBg,
+                        contentColor = if (isOwner) MaterialTheme.colorScheme.onSecondaryContainer else lapakColors.whatsappText
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("vendor_web_link_btn_${item.seller.id}")
+                ) {
+                    Icon(Icons.Default.Forum, contentDescription = "Link Web Penyetor", modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = if (isOwner) "Link Web" else "Link Web Penyetor (WhatsApp)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
