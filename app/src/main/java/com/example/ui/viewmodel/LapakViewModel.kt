@@ -707,16 +707,21 @@ class LapakViewModel(
         } else {
             combine(
                 _financialPeriodFilter,
-                repository.allSellers,
-                repository.financialData
-            ) { filter, sellers, fin ->
+                repository.inventoryData,
+                repository.financialData,
+                repository.returnMovements,
+                repository.allDailyClosingArchives
+            ) { filter, inv, fin, returns, archives ->
                 FinancialReportBuilder.buildReport(
                     filter = filter,
-                    sellers = sellers,
+                    sellers = inv.sellers,
                     transactions = fin.transactions,
                     transactionItems = fin.items,
                     expenses = fin.expenses,
-                    payments = fin.payments
+                    payments = fin.payments,
+                    stockLots = inv.lots,
+                    returnMovements = returns,
+                    dailyClosingArchives = archives
                 )
             }
         }
@@ -724,6 +729,61 @@ class LapakViewModel(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         emptyFinancialReport
+    )
+
+    // Sellers Screen Period Filter & Per-Seller Product Report State
+    private val _sellerPeriodFilter = MutableStateFlow(
+        FinancialPeriodFilter(period = FinancialReportPeriod.TODAY)
+    )
+    val sellerPeriodFilter: StateFlow<FinancialPeriodFilter> = _sellerPeriodFilter.asStateFlow()
+
+    fun setSellerPeriodFilter(filter: FinancialPeriodFilter) {
+        _sellerPeriodFilter.value = filter
+    }
+
+    private val emptySellerPeriodReport = SellerPeriodReportBuilder.build(
+        filter = FinancialPeriodFilter(period = FinancialReportPeriod.TODAY),
+        sellers = emptyList(),
+        products = emptyList(),
+        stockLots = emptyList(),
+        transactions = emptyList(),
+        transactionItems = emptyList(),
+        payments = emptyList(),
+        returnMovements = emptyList(),
+        dailyClosingArchives = emptyList(),
+        appSettings = AppSettings()
+    )
+
+    val sellerPeriodReport: StateFlow<SellerPeriodReportSnapshot> = _sessionActive.flatMapLatest { active ->
+        if (!active) {
+            flowOf(emptySellerPeriodReport)
+        } else {
+            combine(
+                _sellerPeriodFilter,
+                repository.inventoryData,
+                repository.financialData,
+                combine(repository.returnMovements, repository.allDailyClosingArchives, repository.appSettings) { ret, arch, cfg ->
+                    Triple(ret, arch, cfg)
+                }
+            ) { filter, inv, fin, extra ->
+                SellerPeriodReportBuilder.build(
+                    filter = filter,
+                    sellers = inv.sellers,
+                    products = inv.products,
+                    stockLots = inv.lots,
+                    transactions = fin.transactions,
+                    transactionItems = fin.items,
+                    payments = fin.payments,
+                    returnMovements = extra.first,
+                    dailyClosingArchives = extra.second,
+                    appSettings = extra.third
+                )
+            }
+        }
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        emptySellerPeriodReport
     )
 
     init {

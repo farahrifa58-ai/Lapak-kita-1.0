@@ -108,10 +108,11 @@ fun FinancialReportScreen(
             contentPadding = PaddingValues(top = 12.dp, bottom = 36.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Period Filter Chips
+            // 1. Period Filter Chips (with generous end padding so "Pilih Bulan" is never clipped)
             item {
                 LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(end = 28.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     items(FinancialReportPeriod.entries) { period ->
@@ -131,7 +132,9 @@ fun FinancialReportScreen(
                                 Text(
                                     text = period.label,
                                     style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             },
                             leadingIcon = if (selected) {
@@ -221,7 +224,7 @@ fun FinancialReportScreen(
                             modifier = Modifier.weight(1f)
                         )
                         MetricCard(
-                            title = "Untung Bersih Lapak",
+                            title = "Untung Bersih",
                             value = LapakViewModel.formatRupiah(report.netLapakProfit),
                             subtitle = "Komisi: ${LapakViewModel.formatRupiah(report.totalAdminCommission)}",
                             icon = LucideIcons.TrendingUp,
@@ -251,6 +254,11 @@ fun FinancialReportScreen(
                         )
                     }
                 }
+            }
+
+            // 3a. Rincian Laba & Performa Lapak Card
+            item {
+                ProfitAndPerformanceCard(report = report)
             }
 
             // 3b. Manual "Tutup Buku Hari Ini" & Auto Schedule Status Card
@@ -1231,7 +1239,393 @@ private fun EmptyReportCard(
 }
 
 @Composable
-private fun MonthYearPickerDialog(
+private fun ProfitAndPerformanceCard(report: FinancialReportSnapshot) {
+    val lapakColors = LocalLapakColors.current
+    val marginText = String.format(Locale("id", "ID"), "%.1f%%", report.profitMarginPercent)
+    val sellThroughText = String.format(Locale("id", "ID"), "%.1f%%", report.sellThroughRatePercent)
+    val payoutRatio = if (report.totalSellerShare > 0.0) {
+        (report.totalSellerPaid / report.totalSellerShare).toFloat().coerceIn(0f, 1f)
+    } else {
+        if (report.totalSellerPaid > 0.0) 1f else 0f
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, lapakColors.cardBorder),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("card_profit_and_performance")
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Card Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Insights,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "Rincian Laba & Performa Lapak",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Margin, setoran penyetor & rasio penjualan",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = if (report.netLapakProfit >= 0.0) lapakColors.stockSafeBg else lapakColors.dangerBg
+                ) {
+                    Text(
+                        text = "Margin $marginText",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (report.netLapakProfit >= 0.0) lapakColors.stockSafeText else lapakColors.dangerText,
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            // Section 1: Laba & Margin
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "KOMPONEN LABA LAPAK",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                PerformanceAmountRow(
+                    label = "Total Komisi Kotor",
+                    value = LapakViewModel.formatRupiah(report.totalAdminCommission),
+                    valueColor = MaterialTheme.colorScheme.onSurface
+                )
+                PerformanceAmountRow(
+                    label = "Biaya Operasional",
+                    value = "- ${LapakViewModel.formatRupiah(report.totalOperatingExpenses)}",
+                    valueColor = lapakColors.expenseCardAccent
+                )
+                HorizontalDivider(color = lapakColors.cardBorder)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Untung Bersih Lapak ($marginText)",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = LapakViewModel.formatRupiah(report.netLapakProfit),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (report.netLapakProfit >= 0.0) lapakColors.profitCardAccent else lapakColors.dangerText
+                    )
+                }
+            }
+
+            // Section 2: Status Setoran Penyetor
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(lapakColors.payoutCardBg.copy(alpha = 0.55f))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "STATUS SETORAN PENYETOR",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = lapakColors.payoutCardAccent
+                    )
+                    Text(
+                        text = "${(payoutRatio * 100).toInt()}% Terbayar",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = lapakColors.payoutCardAccent
+                    )
+                }
+
+                LinearProgressIndicator(
+                    progress = { payoutRatio },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(999.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Total Hak",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = LapakViewModel.formatRupiah(report.totalSellerShare),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "Sudah Dibayar",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = LapakViewModel.formatRupiah(report.totalSellerPaid),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "Sisa Belum Dibayar",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = LapakViewModel.formatRupiah(report.totalSellerUnpaid),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (report.totalSellerUnpaid > 0.0) lapakColors.dangerText else lapakColors.stockSafeText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            // Section 3: Rasio Terjual, Barang Retur/Sisa, Menu & Penyetor Terlaris
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = lapakColors.stockSafeBg.copy(alpha = 0.7f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "Rasio Terjual",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = lapakColors.stockSafeText
+                        )
+                        Text(
+                            text = sellThroughText,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = lapakColors.stockSafeText
+                        )
+                        Text(
+                            text = "${report.totalItemsSold} dari ${report.totalItemsIn} item",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = lapakColors.warningBg.copy(alpha = 0.8f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "Barang Retur / Sisa",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = lapakColors.warningText
+                        )
+                        Text(
+                            text = "${report.totalItemsLeftover} item",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = lapakColors.warningText
+                        )
+                        Text(
+                            text = "Stok tidak terjual / retur",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            // Top Menu & Top Seller Strip
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.EmojiEvents,
+                                contentDescription = null,
+                                tint = lapakColors.payoutCardAccent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "Menu Terlaris",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = report.topSellingProductName ?: "-",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (report.topSellingProductQty > 0) "${report.topSellingProductQty} item terjual" else "Belum ada penjualan",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Storefront,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "Penyetor Terlaris",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = report.topSellingSellerName ?: "-",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (report.topSellingSellerQty > 0) "${report.topSellingSellerQty} item terjual" else "Belum ada penjualan",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PerformanceAmountRow(
+    label: String,
+    value: String,
+    valueColor: Color
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Bold,
+            color = valueColor
+        )
+    }
+}
+
+@Composable
+internal fun MonthYearPickerDialog(
     initialYear: Int,
     initialMonth: Int,
     onDismiss: () -> Unit,

@@ -651,6 +651,9 @@ data class FinancialData(
         dao.getAllPaymentsFlow()
     ) { t, i, e, p -> FinancialData(t, i, e, p) }
 
+    val returnMovements: Flow<List<StockMovement>> =
+        dao.getMovementsByTypeFlow(StockMovementType.PENGEMBALIAN)
+
     // Combined Sellers with financial & stock statistics
     val sellersWithStats: Flow<List<SellerDetailItem>> = combine(
         inventoryData,

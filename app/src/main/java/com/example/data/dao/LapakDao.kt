@@ -87,6 +87,9 @@ interface LapakDao {
     @Query("SELECT * FROM stock_movements WHERE sellerId = :sellerId ORDER BY timestamp DESC")
     fun getMovementsForSellerFlow(sellerId: Long): Flow<List<StockMovement>>
 
+    @Query("SELECT * FROM stock_movements WHERE type = :type ORDER BY timestamp DESC")
+    fun getMovementsByTypeFlow(type: StockMovementType): Flow<List<StockMovement>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMovement(movement: StockMovement): Long
 

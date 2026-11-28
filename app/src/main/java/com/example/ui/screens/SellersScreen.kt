@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,6 +32,13 @@ import com.example.i18n.AppStrings
 import com.example.ui.components.*
 import com.example.ui.theme.LocalLapakColors
 import com.example.ui.viewmodel.LapakViewModel
+import com.example.util.SellerReportExporter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,6 +57,9 @@ fun SellersScreen(
     val payoutReceiptState by viewModel.lastSellerPaymentReceipt.collectAsState()
     val isSyncingCloud by viewModel.isSyncingCloud.collectAsState()
     val isOwner by viewModel.isOwner.collectAsState()
+    val sellerPeriodFilter by viewModel.sellerPeriodFilter.collectAsState()
+    val sellerPeriodReport by viewModel.sellerPeriodReport.collectAsState()
+    val scope = rememberCoroutineScope()
 
     var searchQuery by remember { mutableStateOf("") }
     var statusFilter by remember { mutableStateOf("Semua") }
@@ -67,6 +78,10 @@ fun SellersScreen(
     var addProductTargetSellerId by remember { mutableStateOf<Long?>(null) }
     var editTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
     var deleteTargetProduct by remember { mutableStateOf<ProductDetailItem?>(null) }
+    var showSellerMonthPicker by remember { mutableStateOf(false) }
+    var showSellerExportDialog by remember { mutableStateOf(false) }
+    var exportTargetSellerId by remember { mutableStateOf<Long?>(null) }
+    var isExportingSellerReport by remember { mutableStateOf(false) }
 
     val filteredSellers = remember(sellersWithStats, searchQuery, statusFilter) {
         sellersWithStats.filter { item ->
@@ -207,6 +222,152 @@ fun SellersScreen(
                 }
             }
 
+            // Period Filter Row (Hari Ini | 7 Hari Terakhir | Pilih Bulan & Tahun)
+            item {
+                val monthChipLabel = remember(sellerPeriodFilter) {
+                    if (sellerPeriodFilter.period == FinancialReportPeriod.CUSTOM_MONTH) {
+                        val cal = Calendar.getInstance().apply {
+                            set(Calendar.YEAR, sellerPeriodFilter.selectedYear)
+                            set(Calendar.MONTH, sellerPeriodFilter.selectedMonth.coerceIn(0, 11))
+                            set(Calendar.DAY_OF_MONTH, 1)
+                        }
+                        SimpleDateFormat("MMM yyyy", Locale("id", "ID")).format(cal.time)
+                    } else {
+                        "Bulan & Tahun"
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(end = 24.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        item {
+                            FilterChip(
+                                selected = sellerPeriodFilter.period == FinancialReportPeriod.TODAY,
+                                onClick = {
+                                    viewModel.setSellerPeriodFilter(
+                                        sellerPeriodFilter.copy(period = FinancialReportPeriod.TODAY)
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = "Hari Ini",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                modifier = Modifier.testTag("seller_period_today")
+                            )
+                        }
+                        item {
+                            FilterChip(
+                                selected = sellerPeriodFilter.period == FinancialReportPeriod.LAST_7_DAYS,
+                                onClick = {
+                                    viewModel.setSellerPeriodFilter(
+                                        sellerPeriodFilter.copy(period = FinancialReportPeriod.LAST_7_DAYS)
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = "7 Hari Terakhir",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                modifier = Modifier.testTag("seller_period_7days")
+                            )
+                        }
+                        item {
+                            FilterChip(
+                                selected = sellerPeriodFilter.period == FinancialReportPeriod.CUSTOM_MONTH,
+                                onClick = { showSellerMonthPicker = true },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.CalendarMonth,
+                                        contentDescription = "Pilih Bulan & Tahun",
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = monthChipLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    selectedLeadingIconColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                modifier = Modifier.testTag("seller_period_month")
+                            )
+                        }
+                    }
+
+                    // Export Seller Report (PDF / Excel) Action Button
+                    FilledTonalButton(
+                        onClick = {
+                            exportTargetSellerId = null
+                            showSellerExportDialog = true
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .testTag("btn_export_seller_report")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PictureAsPdf,
+                            contentDescription = "Ekspor Laporan Penyetor",
+                            modifier = Modifier.size(19.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Ekspor Laporan Penyetor (PDF / Excel)",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Periode: ${sellerPeriodReport.periodLabel}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.FileDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
             // Sellers List
             if (filteredSellers.isEmpty()) {
                 item {
@@ -258,7 +419,11 @@ fun SellersScreen(
                         onDelete = { deleteTargetSeller = item.seller },
                         onAddProduct = { addProductTargetSellerId = item.seller.id },
                         onEditProduct = { prodItem -> editTargetProduct = prodItem },
-                        onDeleteProduct = { prodItem -> deleteTargetProduct = prodItem }
+                        onDeleteProduct = { prodItem -> deleteTargetProduct = prodItem },
+                        onExportSellerReport = {
+                            exportTargetSellerId = item.seller.id
+                            showSellerExportDialog = true
+                        }
                     )
                 }
             }
@@ -699,6 +864,101 @@ fun SellersScreen(
             onDismiss = { deleteTargetProduct = null }
         )
     }
+
+    // Period Month & Year Picker Dialog for Seller Reports
+    if (showSellerMonthPicker) {
+        MonthYearPickerDialog(
+            initialYear = sellerPeriodFilter.selectedYear,
+            initialMonth = sellerPeriodFilter.selectedMonth,
+            onDismiss = { showSellerMonthPicker = false },
+            onConfirm = { year, month ->
+                viewModel.setSellerPeriodFilter(
+                    sellerPeriodFilter.copy(
+                        period = FinancialReportPeriod.CUSTOM_MONTH,
+                        selectedYear = year,
+                        selectedMonth = month
+                    )
+                )
+                showSellerMonthPicker = false
+            }
+        )
+    }
+
+    // Export Seller Report Dialog (All Sellers or Individual Seller — PDF & Excel)
+    if (showSellerExportDialog) {
+        SellerExportReportDialog(
+            report = sellerPeriodReport,
+            sellers = rawSellers,
+            selectedSellerId = exportTargetSellerId,
+            isExporting = isExportingSellerReport,
+            onSelectSeller = { exportTargetSellerId = it },
+            onSavePdf = { scopedReport ->
+                isExportingSellerReport = true
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        SellerReportExporter.savePdfToDownloads(context, shopProfile, scopedReport)
+                    }
+                    isExportingSellerReport = false
+                    result.onSuccess { path ->
+                        Toast.makeText(context, "PDF tersimpan di $path", Toast.LENGTH_LONG).show()
+                    }.onFailure { err ->
+                        Toast.makeText(context, "Gagal menyimpan PDF: ${err.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+            onSharePdfWhatsApp = { scopedReport ->
+                isExportingSellerReport = true
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        SellerReportExporter.shareReportFile(
+                            context = context,
+                            shopProfile = shopProfile,
+                            report = scopedReport,
+                            isExcel = false,
+                            preferWhatsApp = true
+                        )
+                    }
+                    isExportingSellerReport = false
+                    result.onFailure { err ->
+                        Toast.makeText(context, "Gagal membagikan PDF: ${err.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+            onSaveExcel = { scopedReport ->
+                isExportingSellerReport = true
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        SellerReportExporter.saveExcelToDownloads(context, shopProfile, scopedReport)
+                    }
+                    isExportingSellerReport = false
+                    result.onSuccess { path ->
+                        Toast.makeText(context, "Excel tersimpan di $path", Toast.LENGTH_LONG).show()
+                    }.onFailure { err ->
+                        Toast.makeText(context, "Gagal menyimpan Excel: ${err.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+            onShareExcelWhatsApp = { scopedReport ->
+                isExportingSellerReport = true
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        SellerReportExporter.shareReportFile(
+                            context = context,
+                            shopProfile = shopProfile,
+                            report = scopedReport,
+                            isExcel = true,
+                            preferWhatsApp = true
+                        )
+                    }
+                    isExportingSellerReport = false
+                    result.onFailure { err ->
+                        Toast.makeText(context, "Gagal membagikan Excel: ${err.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+            onDismiss = { showSellerExportDialog = false }
+        )
+    }
 }
 
 @Composable
@@ -720,7 +980,8 @@ fun SellerCard(
     onDelete: () -> Unit,
     onAddProduct: () -> Unit,
     onEditProduct: (ProductDetailItem) -> Unit,
-    onDeleteProduct: (ProductDetailItem) -> Unit
+    onDeleteProduct: (ProductDetailItem) -> Unit,
+    onExportSellerReport: () -> Unit = {}
 ) {
     val lapakColors = LocalLapakColors.current
     var isExpandedInline by remember { mutableStateOf(false) }
@@ -815,6 +1076,11 @@ fun SellerCard(
                                     onClick = { showOverflowMenu = false; onViewReceipt() }
                                 )
                             }
+                            DropdownMenuItem(
+                                text = { Text("Ekspor Laporan (PDF / Excel)") },
+                                leadingIcon = { Icon(Icons.Default.PictureAsPdf, contentDescription = null) },
+                                onClick = { showOverflowMenu = false; onExportSellerReport() }
+                            )
                             DropdownMenuItem(
                                 text = { Text(if (item.seller.status == SellerStatus.LIBUR) "Aktifkan Penyetor" else "Atur Status Libur") },
                                 leadingIcon = {

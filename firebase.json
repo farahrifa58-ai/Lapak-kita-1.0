@@ -1,7 +1,7 @@
 {
   "firestore": [
     {
-      "database": "ai-studio-android-lapakkit-6191fcc5-092d-402e-b45b-edd224b60f8e",
+      "database": "ai-studio-android-lapakkit-f363177a-a1cd-4f41-b67a-b69ac32f900d",
       "rules": "firestore.rules"
     }
   ],

@@ -63,7 +63,18 @@ data class FinancialReportSnapshot(
     val totalItemsSold: Int,
     val totalTransactionsCount: Int,
     val ledgerRows: List<FinancialLedgerRow>,
-    val sellerRecapRows: List<SellerRecapRow>
+    val sellerRecapRows: List<SellerRecapRow>,
+    val profitMarginPercent: Double = 0.0,
+    val totalSellerPaid: Double = 0.0,
+    val totalSellerUnpaid: Double = 0.0,
+    val totalItemsIn: Int = 0,
+    val totalItemsLeftover: Int = 0,
+    val sellThroughRatePercent: Double = 0.0,
+    val topSellingProductName: String? = null,
+    val topSellingProductQty: Int = 0,
+    val topSellingSellerName: String? = null,
+    val topSellingSellerQty: Int = 0,
+    val topSellingSellerOmzet: Double = 0.0
 )
 
 object FinancialReportBuilder {
@@ -201,6 +212,9 @@ object FinancialReportBuilder {
         transactionItems: List<TransactionItem>,
         expenses: List<OperatingExpense>,
         payments: List<SellerPayment>,
+        stockLots: List<StockLot> = emptyList(),
+        returnMovements: List<StockMovement> = emptyList(),
+        dailyClosingArchives: List<DailyClosingArchive> = emptyList(),
         nowMillis: Long = System.currentTimeMillis()
     ): FinancialReportSnapshot {
         val (startMillis, endMillis, periodLabel) = resolveDateBounds(filter, nowMillis)
@@ -349,6 +363,68 @@ object FinancialReportBuilder {
             .sortedBy { it.sellerName.lowercase() }
             .mapIndexed { idx, row -> row.copy(number = idx + 1) }
 
+        // Profit margin (%) relative to gross omzet
+        val profitMarginPercent = if (totalGrossOmzet > 0.0) {
+            (netLapakProfit / totalGrossOmzet) * 100.0
+        } else {
+            0.0
+        }
+
+        // Payout settlement totals across the period
+        val totalSellerPaid = periodPayments.sumOf { it.amount }
+        val totalSellerUnpaid = recapList.sumOf { it.remainingUnpaid }
+
+        // Stock In, Leftover/Return, and Sell-through Ratio (%)
+        val todayDateStr = DailyClosingHelper.todayDateString(nowMillis)
+        val (todayStart, _) = DailyClosingHelper.dayBoundsWib(todayDateStr)
+        val periodIncludesToday = endMillis >= todayStart
+        val isTodayClosed = dailyClosingArchives.any { it.closingDate == todayDateStr }
+
+        val periodArchives = dailyClosingArchives.filter { archive ->
+            val (aStart, _) = DailyClosingHelper.dayBoundsWib(archive.closingDate)
+            aStart in startMillis..endMillis
+        }
+        val archivedIn = periodArchives.sumOf { it.totalItemsIn.coerceAtLeast(0) }
+        val archivedLeftover = periodArchives.sumOf { it.totalItemsLeftover.coerceAtLeast(0) }
+
+        val periodLots = stockLots.filter { it.depositDate in startMillis..endMillis }
+        val lotsIn = periodLots.sumOf { it.initialQty.coerceAtLeast(0) }
+        val movementReturned = returnMovements
+            .filter { it.type == StockMovementType.PENGEMBALIAN && it.timestamp in startMillis..endMillis }
+            .sumOf { kotlin.math.abs(it.quantityChange) }
+
+        val closedLeftover = maxOf(archivedLeftover, movementReturned)
+        val unclosedCurrentStock = when {
+            periodIncludesToday && !isTodayClosed -> stockLots.sumOf { it.currentQty.coerceAtLeast(0) }
+            !periodIncludesToday && closedLeftover == 0 -> periodLots.sumOf { it.currentQty.coerceAtLeast(0) }
+            else -> 0
+        }
+        val totalItemsLeftover = closedLeftover + unclosedCurrentStock
+        val totalItemsIn = maxOf(lotsIn, archivedIn, totalItemsSold + totalItemsLeftover)
+        val sellThroughRatePercent = when {
+            totalItemsIn > 0 -> ((totalItemsSold.toDouble() / totalItemsIn.toDouble()) * 100.0).coerceIn(0.0, 100.0)
+            totalItemsSold > 0 -> 100.0
+            else -> 0.0
+        }
+
+        // Top-selling menu & top-selling vendor in this period
+        val topProductEntry = allPeriodItems
+            .groupBy { it.productName.trim().ifBlank { "Produk" } }
+            .mapValues { (_, list) -> list.sumOf { it.quantity.coerceAtLeast(0) } to list.sumOf { it.subtotal } }
+            .entries
+            .sortedWith(compareByDescending<Map.Entry<String, Pair<Int, Double>>> { it.value.first }.thenByDescending { it.value.second })
+            .firstOrNull()
+
+        val topSellerEntry = allPeriodItems
+            .groupBy { item ->
+                sellerById[item.sellerId]?.name?.takeIf { it.isNotBlank() }
+                    ?: item.sellerName.trim().ifBlank { "Penyetor" }
+            }
+            .mapValues { (_, list) -> list.sumOf { it.quantity.coerceAtLeast(0) } to list.sumOf { it.subtotal } }
+            .entries
+            .sortedWith(compareByDescending<Map.Entry<String, Pair<Int, Double>>> { it.value.first }.thenByDescending { it.value.second })
+            .firstOrNull()
+
         return FinancialReportSnapshot(
             periodLabel = periodLabel,
             startMillis = startMillis,
@@ -362,7 +438,18 @@ object FinancialReportBuilder {
             totalItemsSold = totalItemsSold,
             totalTransactionsCount = periodTransactions.size,
             ledgerRows = sortedLedger,
-            sellerRecapRows = recapList
+            sellerRecapRows = recapList,
+            profitMarginPercent = profitMarginPercent,
+            totalSellerPaid = totalSellerPaid,
+            totalSellerUnpaid = totalSellerUnpaid,
+            totalItemsIn = totalItemsIn,
+            totalItemsLeftover = totalItemsLeftover,
+            sellThroughRatePercent = sellThroughRatePercent,
+            topSellingProductName = topProductEntry?.key,
+            topSellingProductQty = topProductEntry?.value?.first ?: 0,
+            topSellingSellerName = topSellerEntry?.key,
+            topSellingSellerQty = topSellerEntry?.value?.first ?: 0,
+            topSellingSellerOmzet = topSellerEntry?.value?.second ?: 0.0
         )
     }
 }
